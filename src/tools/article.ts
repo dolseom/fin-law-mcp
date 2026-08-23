@@ -18,6 +18,15 @@ import { buildJO } from "../lib/law-parser.js"
 import { cleanHtml, flattenContent, groupMokByReset } from "../lib/article-parser.js"
 import { parseThreeTierDelegation } from "../lib/three-tier-parser.js"
 import { extractTag, toArray } from "../lib/xml-parser.js"
+import {
+  type SectionResult,
+  failed,
+  withDeadline,
+  truncateWithHint,
+  ladderQueries,
+  parseNtsRulings,
+  SOURCE_FOOTER,
+} from "../lib/fin-common.js"
 
 // ── 응답 예산 (PRD 02 문서) ─────────────────────────────────────────────
 const BUDGET_ARTICLE = 6000
@@ -57,37 +66,6 @@ export const FIN_ARTICLE_TOOL = {
   },
   annotations: { readOnlyHint: true, idempotentHint: true },
 } as const
-
-// ── 섹션 상태 (부분 실패 계약) ──────────────────────────────────────────
-interface SectionResult {
-  status: "성공" | "실패" | "시간초과"
-  text: string
-  reason?: string
-}
-
-function failed(reason: string): SectionResult {
-  return { status: "실패", text: "", reason }
-}
-
-/** deadline 내 완료 못 하면 시간초과 처리. (진행 중 호출 자체는 취소하지 않음 — MVP 한계) */
-async function withDeadline(p: Promise<SectionResult>, deadlineAt: number): Promise<SectionResult> {
-  const remain = deadlineAt - Date.now()
-  if (remain <= 0) return { status: "시간초과", text: "", reason: "도구 deadline 초과" }
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<SectionResult>((resolve) => {
-    timer = setTimeout(() => resolve({ status: "시간초과", text: "", reason: `deadline ${DEADLINE_MS}ms 초과` }), remain)
-  })
-  try {
-    return await Promise.race([p, timeout])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-}
-
-function truncateWithHint(text: string, max: number, hint: string): string {
-  if (text.length <= max) return text
-  return text.slice(0, max) + `\n… (예산 ${max.toLocaleString()}자 초과로 절단 — 전체는 ${hint})`
-}
 
 /** "제26조"/"26"/"제10조의2" → 표시용 "제26조"·"제10조의2" */
 function normalizeArticleLabel(input: string): string {
@@ -158,45 +136,11 @@ function renderArticleUnits(lawData: any): string {
 }
 
 // ── ③ 예규 검색 (ntsCgmExpc — 목록만. 본문은 fin_nts_ruling) ──────────────
-interface RulingItem {
-  title: string
-  docNo: string
-  date: string
-  link: string
-}
-
-function parseNtsRulings(xml: string, max: number): RulingItem[] {
-  const items: RulingItem[] = []
-  const blocks = xml.match(/<cgmExpc [\s\S]*?<\/cgmExpc>/g) || []
-  for (const block of blocks.slice(0, max)) {
-    items.push({
-      title: extractTag(block, "안건명"),
-      docNo: extractTag(block, "안건번호"),
-      date: extractTag(block, "해석일자"),
-      link: extractTag(block, "법령해석상세링크"),
-    })
-  }
-  return items
-}
 
 /** 조문 제목에서 예규 검색어 추출 (괄호·조사 제거) */
 function rulingQueryFromTitle(joTitle: string, lawName: string): string {
   const cleaned = joTitle.replace(/[()]/g, " ").replace(/\s+/g, " ").trim()
   return cleaned || lawName
-}
-
-// 축약 재검색 사다리 (자체 패치 #5 원칙: 진짜 0건에만 축약, 오류에는 재시도 금지)
-const RULING_STOPWORDS = new Set(["등의", "등", "및", "의", "에", "관한", "대한", "따른"])
-
-function ladderQueries(base: string): string[] {
-  const toks = base.split(/\s+/).filter((t) => t && !RULING_STOPWORDS.has(t))
-  if (toks.length === 0) return [base]
-  const qs: string[] = []
-  // 앞토막 축약 (3→2→1어절) 후, 남은 개별 토큰을 뒤에서부터 폴백
-  // (예규 제목 어휘는 조문 제목의 마지막 명사구인 경우가 많다: "손금불산입" 등)
-  for (let n = Math.min(toks.length, 3); n >= 1; n--) qs.push(toks.slice(0, n).join(" "))
-  for (let i = toks.length - 1; i >= 1; i--) qs.push(toks[i])
-  return [...new Set(qs)].slice(0, 4) // 왕복 상한 (재시도 총량 예산)
 }
 
 // ── 별표 목록 (licbyl JSON — 방어적 추출) ────────────────────────────────
@@ -429,7 +373,7 @@ export async function handleFinArticle(
     ``,
     `■ 법령 정보 — 시행일자 ${law.effectiveDate || "미상"} · 원문: ${encodeURI(publicUrl)}`,
     ``,
-    `출처: 법제처 국가법령정보센터 · 법적 효력이 필요한 판단에는 원문을 확인하세요`,
+    SOURCE_FOOTER,
   ].join("\n")
 
   return { content: [{ type: "text", text }] }

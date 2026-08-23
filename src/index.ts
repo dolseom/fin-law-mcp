@@ -11,10 +11,19 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { config } from "dotenv"
+import { fileURLToPath } from "node:url"
+import path from "node:path"
 import { LawApiClient } from "./lib/api-client.js"
 import { FIN_ARTICLE_TOOL, handleFinArticle } from "./tools/article.js"
+import { FIN_LAW_SEARCH_TOOL, handleFinLawSearch } from "./tools/law-search.js"
+import { FIN_RULING_SEARCH_TOOL, handleFinRulingSearch } from "./tools/ruling-search.js"
+import { FIN_NTS_RULING_TOOL, handleFinNtsRuling } from "./tools/nts-ruling.js"
+import { FIN_ANNEX_TOOL, handleFinAnnex } from "./tools/annex.js"
+import { FIN_VERIFY_TOOL, handleFinVerify } from "./tools/verify.js"
 
-config({ quiet: true })
+// MCP 클라이언트가 임의 cwd에서 실행해도 .env를 찾도록 모듈 기준 경로로 로드
+const moduleDir = path.dirname(fileURLToPath(import.meta.url))
+config({ path: path.join(moduleDir, "..", ".env"), quiet: true })
 
 const VERSION = "0.1.0"
 
@@ -38,6 +47,11 @@ const apiClient = new LawApiClient({ apiKey: process.env.LAW_OC || "" })
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     FIN_ARTICLE_TOOL,
+    FIN_LAW_SEARCH_TOOL,
+    FIN_RULING_SEARCH_TOOL,
+    FIN_NTS_RULING_TOOL,
+    FIN_ANNEX_TOOL,
+    FIN_VERIFY_TOOL,
     {
       name: "fin_ping",
       description:
@@ -48,9 +62,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   ],
 }))
 
+const HANDLERS: Record<string, (client: LawApiClient, args: unknown) => Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>> = {
+  fin_article: handleFinArticle,
+  fin_law_search: handleFinLawSearch,
+  fin_ruling_search: handleFinRulingSearch,
+  fin_nts_ruling: handleFinNtsRuling,
+  fin_annex: handleFinAnnex,
+  fin_verify: handleFinVerify,
+}
+
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
-  if (req.params.name === "fin_article") {
-    return await handleFinArticle(apiClient, req.params.arguments ?? {})
+  const handler = HANDLERS[req.params.name]
+  if (handler) {
+    return await handler(apiClient, req.params.arguments ?? {})
   }
   if (req.params.name === "fin_ping") {
     const keyState = process.env.LAW_OC ? "설정됨" : "누락 — .env에 LAW_OC를 설정하세요"
