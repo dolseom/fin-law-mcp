@@ -56,9 +56,9 @@ export class LawApiClient {
     return t === "JSON" ? "JSON" : "XML"
   }
 
-  /** 응답 본문이 HTML 에러 페이지인지 확인 */
+  /** 응답 본문이 HTML 에러 페이지인지 확인 — 대소문자 무시 (<HTML> 변형이 통과한 실사고, fixture 테스트로 박제) */
   private checkHtmlError(text: string, context: string): void {
-    if (text.includes("<!DOCTYPE html") || text.includes("<html")) {
+    if (/<!doctype\s+html|<html[\s>]/i.test(text)) {
       const hint = this.getResponseType() === "XML"
         ? " XML 엔드포인트 장애 시 LAW_RESPONSE_TYPE=JSON 환경변수로 우회할 수 있습니다."
         : ""
