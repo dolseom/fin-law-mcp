@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * fin-law-mcp — 재무·회계·세무·자금 특화 한국 법령 MCP 서버 (stdio 전용)
  *
@@ -7,12 +8,10 @@
  * - 오류를 0건으로 위장하지 않는다 (3값 판정: ✓/✗/⚠).
  */
 
+import "./bootstrap.js" // ⚠ 반드시 첫 import — .env를 다른 모듈 평가 전에 로드
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js"
-import { config } from "dotenv"
-import { fileURLToPath } from "node:url"
-import path from "node:path"
 import { LawApiClient } from "./lib/api-client.js"
 import { FIN_ARTICLE_TOOL, handleFinArticle } from "./tools/article.js"
 import { FIN_LAW_SEARCH_TOOL, handleFinLawSearch } from "./tools/law-search.js"
@@ -21,10 +20,6 @@ import { FIN_NTS_RULING_TOOL, handleFinNtsRuling } from "./tools/nts-ruling.js"
 import { FIN_ANNEX_TOOL, handleFinAnnex } from "./tools/annex.js"
 import { FIN_VERIFY_TOOL, handleFinVerify } from "./tools/verify.js"
 import { FIN_CALC_TOOL, handleFinCalc } from "./tools/calc.js"
-
-// MCP 클라이언트가 임의 cwd에서 실행해도 .env를 찾도록 모듈 기준 경로로 로드
-const moduleDir = path.dirname(fileURLToPath(import.meta.url))
-config({ path: path.join(moduleDir, "..", ".env"), quiet: true })
 
 const VERSION = "0.1.0"
 

@@ -88,6 +88,46 @@ describe("api-client 계층 (최종 검출 — 오류의 정상 위장 금지)",
   })
 })
 
+describe("오류 XML의 0건 위장 방지 (루트 검증 — Codex 리뷰 차단 1)", () => {
+  it("정상 형식의 오류 XML(예상 밖 루트)이면 searchLaw가 0건 대신 오류를 던진다", async () => {
+    stubFetchSequence([{ body: '<?xml version="1.0"?><Message>사용자 정보 검증에 실패하였습니다</Message>' }])
+    await expect(client().searchLaw("법인세법")).rejects.toThrow(/예상 밖 응답/)
+  })
+
+  it("fetchApi expectedRoot 불일치도 오류로 던진다", async () => {
+    stubFetchSequence([{ body: '<?xml version="1.0"?><Error><msg>차단</msg></Error>' }])
+    await expect(
+      client().fetchApi({
+        endpoint: "lawSearch.do",
+        target: "ntsCgmExpc",
+        type: "XML",
+        extraParams: { query: "x" },
+        expectedRoot: "CgmExpc",
+      })
+    ).rejects.toThrow(/예상 밖 응답/)
+  })
+
+  it("정상 루트는 통과한다", async () => {
+    stubFetchSequence([{ body: '<?xml version="1.0"?><LawSearch><totalCnt>0</totalCnt></LawSearch>' }])
+    await expect(client().searchLaw("법인세법")).resolves.toContain("totalCnt")
+  })
+})
+
+describe("rate limit 배선 (PRD 04 운영 계약)", () => {
+  it("분당 한도 초과 시 RATE_LIMITED를 던진다 (0건 위장 아님)", async () => {
+    stubFetchSequence([{ body: '<?xml version="1.0"?><LawSearch><totalCnt>0</totalCnt></LawSearch>' }])
+    process.env.FIN_DRF_RATE_PER_MIN = "2"
+    try {
+      const c = client() // 생성 시점에 한도 읽음
+      await c.searchLaw("법인세법")
+      await c.searchLaw("소득세법")
+      await expect(c.searchLaw("부가가치세법")).rejects.toThrow(/RATE_LIMITED/)
+    } finally {
+      delete process.env.FIN_DRF_RATE_PER_MIN
+    }
+  })
+})
+
 describe("maskSensitiveUrl (키 노출 방지)", () => {
   it("OC·apikey류 쿼리 값만 마스킹한다", () => {
     expect(maskSensitiveUrl("https://x/y?OC=abc&target=law")).toBe("https://x/y?OC=***&target=law")

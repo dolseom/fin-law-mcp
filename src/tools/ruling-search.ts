@@ -91,7 +91,7 @@ async function searchDomain(apiClient: LawApiClient, domain: Domain, query: stri
     for (const q of queries) {
       let items: UnifiedItem[] = []
       if (domain === "nts") {
-        const xml = await apiClient.fetchApi({ endpoint: "lawSearch.do", target: "ntsCgmExpc", type: "XML", extraParams: { query: q, display: "10" } })
+        const xml = await apiClient.fetchApi({ endpoint: "lawSearch.do", target: "ntsCgmExpc", type: "XML", extraParams: { query: q, display: "10" }, expectedRoot: "CgmExpc" })
         items = parseNtsRulings(xml, 10).map((r) => ({
           domain,
           docNo: r.docNo,
@@ -102,7 +102,7 @@ async function searchDomain(apiClient: LawApiClient, domain: Domain, query: stri
           link: r.link,
         }))
       } else if (domain === "tax_tribunal") {
-        const xml = await apiClient.fetchApi({ endpoint: "lawSearch.do", target: "ttSpecialDecc", type: "XML", extraParams: { query: q, display: "10" } })
+        const xml = await apiClient.fetchApi({ endpoint: "lawSearch.do", target: "ttSpecialDecc", type: "XML", extraParams: { query: q, display: "10" }, expectedRoot: "Decc" })
         items = parseTaxTribunalXML(xml).items.map((r) => ({
           domain,
           docNo: r.청구번호,
@@ -113,7 +113,7 @@ async function searchDomain(apiClient: LawApiClient, domain: Domain, query: stri
           link: r.행정심판재결례상세링크,
         }))
       } else if (domain === "interpretation") {
-        const xml = await apiClient.fetchApi({ endpoint: "lawSearch.do", target: "expc", type: "XML", extraParams: { query: q, display: "10" } })
+        const xml = await apiClient.fetchApi({ endpoint: "lawSearch.do", target: "expc", type: "XML", extraParams: { query: q, display: "10" }, expectedRoot: "Expc" })
         items = parseInterpretationXML(xml).items.map((r) => ({
           domain,
           docNo: r.법령해석례번호,
@@ -124,7 +124,7 @@ async function searchDomain(apiClient: LawApiClient, domain: Domain, query: stri
           link: r.법령해석례상세링크,
         }))
       } else {
-        const xml = await apiClient.fetchApi({ endpoint: "lawSearch.do", target: "prec", type: "XML", extraParams: { query: q, display: "10" } })
+        const xml = await apiClient.fetchApi({ endpoint: "lawSearch.do", target: "prec", type: "XML", extraParams: { query: q, display: "10" }, expectedRoot: "PrecSearch" })
         items = parsePrecedentXML(xml).items.map((r) => ({
           domain,
           docNo: r.사건번호,

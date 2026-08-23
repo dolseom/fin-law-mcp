@@ -15,7 +15,8 @@ import { ladderQueries, parseNtsRulings, truncateWithHint, SOURCE_FOOTER } from 
 import { extractTag } from "../lib/xml-parser.js"
 
 const BUDGET_BODY = 6000
-const DEFAULT_TOP_N = Number(process.env.FIN_NTS_BODY_TOP_N) || 2
+// 환경변수 기본값도 0~5로 클램프 (zod .default()는 검증을 우회하므로 여기서 강제)
+const DEFAULT_TOP_N = Math.min(Math.max(Number(process.env.FIN_NTS_BODY_TOP_N) || 2, 0), 5)
 
 export const FinNtsRulingInputSchema = z.object({
   query: z.string().min(1).describe("예규 검색어 (예: 퇴직금 중간정산 손금)"),
@@ -41,7 +42,9 @@ export const FIN_NTS_RULING_TOOL = {
 
 function bodyEnabled(): boolean {
   const v = (process.env.FIN_NTS_BODY_ENABLED || "").toLowerCase()
-  return v !== "false" && v !== "0" // 개인 사용 기본 ON. 공개 배포판은 기본 OFF로 뒤집는다 (PRD)
+  // 기본 OFF — 비공식 경로(taxlaw.nts.go.kr)는 명시적 옵트인 (공개 배포 정책, Codex 리뷰 차단 3).
+  // 개인 사용자는 .env에 FIN_NTS_BODY_ENABLED=true 한 줄로 활성화.
+  return v === "true" || v === "1"
 }
 
 export async function handleFinNtsRuling(
@@ -68,6 +71,7 @@ export async function handleFinNtsRuling(
         target: "ntsCgmExpc",
         type: "XML",
         extraParams: { query: q, display: "10" },
+        expectedRoot: "CgmExpc",
       })
       totalCnt = extractTag(xml, "totalCnt") || "0"
       items = parseNtsRulings(xml, 10)
@@ -111,7 +115,7 @@ export async function handleFinNtsRuling(
   if (n === 0) {
     text += `\n\n(본문 미동봉 — top_n_bodies=0)`
   } else if (!bodyEnabled()) {
-    text += `\n\n(본문 동봉 비활성 — FIN_NTS_BODY_ENABLED=false. 목록의 링크에서 원문 확인)`
+    text += `\n\n(본문 동봉 비활성 — 활성화하려면 .env에 FIN_NTS_BODY_ENABLED=true 설정. 비공식 경로라 옵트인입니다. 원문은 목록의 링크에서 확인)`
   } else {
     const targets = items.slice(0, n)
     const bodies = await Promise.all(

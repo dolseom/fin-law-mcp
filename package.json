@@ -17,7 +17,21 @@
     "node": ">=20.19.0"
   },
   "license": "MIT",
-  "private": true,
+  "files": [
+    "build",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "keywords": [
+    "mcp",
+    "korean-law",
+    "tax",
+    "finance",
+    "accounting",
+    "법제처",
+    "세법"
+  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@xmldom/xmldom": "^0.9.12",

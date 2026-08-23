@@ -337,6 +337,7 @@ export async function handleFinArticle(
             target: "ntsCgmExpc",
             type: "XML",
             extraParams: { query: q, display: "3" },
+            expectedRoot: "CgmExpc",
           })
           const total = extractTag(xml, "totalCnt")
           const items = parseNtsRulings(xml, 3)

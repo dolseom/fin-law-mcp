@@ -55,10 +55,11 @@ interface Citation {
 }
 
 const IP = INTERPUNCT_CHARS // 가운뎃점 5종 — 추출 정규식과 정규화가 같은 집합을 봐야 한다
+// 40자: "고용보험 및 산업재해보상보험의 보험료징수 등에 관한 법률" 같은 장명 법령 수용 (Codex 리뷰)
 const LAW_NAME_CHARS = `[가-힣0-9${IP}\\s]`
 // "…법/…법률/…법 시행령/…법 시행규칙" + 제N조(의M)
 const LAW_ARTICLE_RE = new RegExp(
-  `(같은\\s*법|동법|동\\s*시행령|같은\\s*영|${LAW_NAME_CHARS}{1,30}?(?:법률|법))((?:\\s*시행령|\\s*시행규칙)?)\\s*(제\\s*\\d+\\s*조(?:의\\s*\\d+)?)`,
+  `(같은\\s*법|동법|동\\s*시행령|같은\\s*영|${LAW_NAME_CHARS}{1,40}?(?:법률|법))((?:\\s*시행령|\\s*시행규칙)?)\\s*(제\\s*\\d+\\s*조(?:의\\s*\\d+)?)`,
   "g"
 )
 // 「…」 인용 (행정규칙 포함)
@@ -67,7 +68,13 @@ const QUOTED_RE = /「([^」]{2,40})」/g
 const TONGCHIK_RE = new RegExp(`(${LAW_NAME_CHARS}{1,20}?법)\\s*(기본통칙|집행기준)\\s*([\\d\\-~의.]+)?`, "g")
 
 function cleanLawName(s: string): string {
-  return s.replace(/\s+/g, " ").trim().replace(/^(그|이|위|해당|관련)\s+/, "")
+  // 선행 접속사·지시어를 반복 제거 — "및 소득세법"이 법령명으로 캡처되어
+  // 조응("같은 법")까지 오염시키던 오탐 방지 (Codex 리뷰 중요 1)
+  return s
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^(?:(?:그|이|위|해당|관련|및|또는|같은|각|본|동|이하)\s+)+/, "")
+    .replace(/^(?:에\s*(?:따른|의한)|위한)\s+/, "")
 }
 
 export function extractCitations(text: string): Citation[] {

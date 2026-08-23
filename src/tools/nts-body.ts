@@ -18,6 +18,18 @@ import {
   getExternalHttpsProxyConfig,
   requestExternalHttps,
 } from "../lib/external-https-proxy.js"
+import { createTokenBucket, createDailyCap } from "../lib/rate-limit.js"
+
+// 국세청 비공식 경로 전용 한도 — 법제처 버킷과 분리, 보수적으로 (PRD 04)
+const ntsBucket = createTokenBucket(Math.max(Number(process.env.FIN_NTS_RATE_PER_MIN) || 10, 1))
+const ntsDaily = createDailyCap(Math.max(Number(process.env.FIN_NTS_DAILY_CAP) || 200, 1))
+
+function ntsGate(): void {
+  const v1 = ntsBucket.take(1)
+  if (!v1.ok) throw new Error(`RATE_LIMITED: 국세청 경로 분당 한도 초과 — ${v1.retryAfterSec}초 후 재시도하세요.`)
+  const v2 = ntsDaily.take(1)
+  if (!v2.ok) throw new Error(`RATE_LIMITED: 국세청 경로 일일 한도 초과 — ${v2.retryAfterSec}초 후 재시도하세요.`)
+}
 
 export const GetNtsDecisionBodySchema = z.object({
   id: z.string().describe(
@@ -153,6 +165,7 @@ export async function getNtsDecisionBody(
 
   const detailUrl = `https://taxlaw.nts.go.kr/qt/USEQTA002P.do?ntstDcmId=${ntstDcmId}`
   try {
+    ntsGate() // 비공식 경로 보호 — 한도 초과는 FETCH_FAILED 경로로 명시 (0건 위장 아님)
     const actionJson = await fetchTaxlawAction(ntstDcmId, detailUrl)
     const actionData = actionJson?.data?.ASIQTB002PR01
     const dcm = actionData?.dcmDVO
