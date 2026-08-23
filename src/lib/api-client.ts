@@ -9,8 +9,8 @@ import { fetchWithRetry } from "./fetch-with-retry.js"
 // (2026-07-19 행위시법 골드셋 R1에서 19콜 중 10콜 관측, 수초 내 자연 회복 —
 // lsHistory 페이징 연속 조회에서 특히 빈발). DRF 엔드포인트는 고정이라
 // 영구 404가 사실상 없으므로 404를 재시도 대상에 포함한다.
-// 재시도 2회·콜당 timeout 6초 (PRD 04 운영 계약 — 장애 시 요청 증폭 억제)
-const DRF_RETRY = { retryOn: [404, 429, 503, 504], retries: 2, timeout: 6000 }
+// 재시도 2회·콜당 timeout 3초 (PRD 04 운영 계약 — 콜 하나가 도구 deadline 6초를 다 먹지 않게)
+const DRF_RETRY = { retryOn: [404, 429, 503, 504], retries: 2, timeout: 3000 }
 import { requestContext } from "./session-state.js"
 import { getLawApiBaseUrl } from "./law-url-config.js"
 import { createTokenBucket, createDailyCap, type TokenBucket, type DailyCap } from "./rate-limit.js"
@@ -24,9 +24,10 @@ export class LawApiClient {
 
   constructor(config: { apiKey: string }) {
     this.defaultApiKey = config.apiKey
-    // PRD 04 초기값: 분당 60 / 일일 3,000. 기존 law-mcp 병행 시 절반 권장 — 환경변수로 조정
-    const ratePerMin = Number(process.env.FIN_DRF_RATE_PER_MIN) || 60
-    const daily = Number(process.env.FIN_DRF_DAILY_CAP) || 3000
+    // PRD 04: 기존 law-mcp와 같은 LAW_OC 키를 공유하는 병행 환경이 기본 전제 —
+    // 보수적으로 30/분·1,500/일로 시작, 단독 사용 시 환경변수로 상향 (Opus 리뷰 반영)
+    const ratePerMin = Number(process.env.FIN_DRF_RATE_PER_MIN) || 30
+    const daily = Number(process.env.FIN_DRF_DAILY_CAP) || 1500
     this.bucket = createTokenBucket(ratePerMin)
     this.dailyCap = createDailyCap(daily)
   }

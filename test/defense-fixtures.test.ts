@@ -2,10 +2,10 @@
  * 방어 로직 fixture 계약 테스트 — 실 API 없이 CI 상시 실행
  *
  * 계약 구조(2계층): fetch-with-retry는 불량 본문(HTML·빈 응답)을 재시도하고,
- * 재시도 소진 시 응답을 통과시킨다 → 최종 검출은 api-client(checkHtmlError 등)가 한다.
- * 이 테스트는 그 통합 경로가 오류를 "정상"으로 위장하지 않는지 검증한다.
+ * 재시도 소진 시 **오류를 throw한다** (통과시키면 JSON 경로에서 0건 위장 —
+ * Opus 리뷰 B1-2로 수정). api-client는 루트 검증(assertXmlRoot) 등 2차 검출을 맡는다.
  *
- * 근거 사고: 200+HTML 장애 페이지 정상 파싱, <HTML> 대문자 통과, 간헐 404
+ * 근거 사고: 200+HTML 장애 페이지 정상 파싱, <HTML> 대문자 통과, 오류 XML 0건 위장, 간헐 404
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest"
@@ -30,10 +30,27 @@ afterEach(() => vi.unstubAllGlobals())
 const client = () => new LawApiClient({ apiKey: "testkey" })
 
 describe("fetch-with-retry 계층 (재시도 동작)", () => {
-  it("200 + HTML 장애 페이지는 재시도를 소진한다 (조용한 1회 통과 금지)", async () => {
+  it("200 + HTML 장애 페이지는 재시도 소진 후 오류를 던진다 (통과 금지 — B1-2)", async () => {
     const mock = stubFetchSequence([{ body: "<!DOCTYPE html><html>점검 중</html>" }])
-    await fetchWithRetry(LAW_URL, { retries: 2, retryDelay: 1 })
-    expect(mock).toHaveBeenCalledTimes(3) // 1 + 재시도 2 — 소진 후엔 상위 계층이 검출
+    await expect(fetchWithRetry(LAW_URL, { retries: 2, retryDelay: 1 })).rejects.toThrow(/HTML 페이지/)
+    expect(mock).toHaveBeenCalledTimes(3) // 1 + 재시도 2
+  })
+
+  it("200 + 빈 본문도 재시도 소진 후 오류를 던진다", async () => {
+    stubFetchSequence([{ body: "   " }])
+    await expect(fetchWithRetry(LAW_URL, { retries: 1, retryDelay: 1 })).rejects.toThrow(/빈 본문/)
+  })
+
+  it("불량 본문 오류 메시지에서 API 키가 마스킹된다", async () => {
+    stubFetchSequence([{ body: "" }])
+    try {
+      await fetchWithRetry(LAW_URL, { retries: 0, retryDelay: 1 })
+      expect.unreachable("오류가 발생해야 함")
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      expect(msg).not.toContain("secret123")
+      expect(msg).toContain("OC=***")
+    }
   })
 
   it("장애가 회복되면 재시도 중에 정상 응답을 얻는다", async () => {

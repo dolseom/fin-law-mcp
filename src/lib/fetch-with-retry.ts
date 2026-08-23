@@ -111,7 +111,9 @@ export async function fetchWithRetry(
         // 재시도 소진 후 오류가 되며, 호출 측은 ⚠판정불가("법제처 접근 차단 가능성")로 처리한다.
         // 200인데 빈 본문/HTML(법제처 점검·과부하 페이지)이면 일시 장애로 보고 재시도.
         // 이를 막지 않으면 XML 파서가 "missing root element"로 터진다.
-        if (response.ok && attempt < retries) {
+        // ⚠ 마지막 시도도 검사한다 — 소진 후 불량 본문을 그대로 반환하면 JSON 경로
+        //   (assertXmlRoot를 안 타는 조문·3단비교·별표)에서 오류가 0건으로 위장된다 (Opus 리뷰 B1-2)
+        if (response.ok) {
           let bodyText: string | null = null
           try { bodyText = await response.clone().text() } catch { /* clone 실패 시 정상 처리 */ }
           if (bodyText !== null) {
@@ -120,8 +122,11 @@ export async function fetchWithRetry(
               lastError = new Error(
                 `법제처 API 비정상 응답(${bad === "empty" ? "빈 본문" : "HTML 페이지"}) - ${maskSensitiveUrl(url)}`
               )
-              await sleep(getRetryDelay(response, retryDelay, attempt))
-              continue
+              if (attempt < retries) {
+                await sleep(getRetryDelay(response, retryDelay, attempt))
+                continue
+              }
+              throw lastError // 재시도 소진 — 불량 응답을 정상으로 반환하지 않는다
             }
           }
         }

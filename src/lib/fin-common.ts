@@ -43,7 +43,9 @@ const RULING_STOPWORDS = new Set(["등의", "등", "및", "의", "에", "관한"
 export function ladderQueries(base: string, maxSteps = 4): string[] {
   const toks = base.split(/\s+/).filter((t) => t && !RULING_STOPWORDS.has(t))
   if (toks.length === 0) return [base]
-  const qs: string[] = []
+  // ⚠ 원본을 반드시 1순위로 — 불용어("및"·"관한")가 공식 법령명의 일부인 경우가 있어
+  //   ("상속세 및 증여세법" 등) 축약본만 검색하면 공식 명칭을 한 번도 안 친다 (Opus 리뷰 I2)
+  const qs: string[] = [base.replace(/\s+/g, " ").trim()]
   // 앞토막 축약 (3→2→1어절) 후, 남은 개별 토큰을 뒤에서부터 폴백
   // (예규 제목 어휘는 조문 제목의 마지막 명사구인 경우가 많다: "손금불산입" 등)
   for (let n = Math.min(toks.length, 3); n >= 1; n--) qs.push(toks.slice(0, n).join(" "))
