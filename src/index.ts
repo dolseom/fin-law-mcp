@@ -20,6 +20,7 @@ import { FIN_RULING_SEARCH_TOOL, handleFinRulingSearch } from "./tools/ruling-se
 import { FIN_NTS_RULING_TOOL, handleFinNtsRuling } from "./tools/nts-ruling.js"
 import { FIN_ANNEX_TOOL, handleFinAnnex } from "./tools/annex.js"
 import { FIN_VERIFY_TOOL, handleFinVerify } from "./tools/verify.js"
+import { FIN_CALC_TOOL, handleFinCalc } from "./tools/calc.js"
 
 // MCP 클라이언트가 임의 cwd에서 실행해도 .env를 찾도록 모듈 기준 경로로 로드
 const moduleDir = path.dirname(fileURLToPath(import.meta.url))
@@ -52,6 +53,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     FIN_NTS_RULING_TOOL,
     FIN_ANNEX_TOOL,
     FIN_VERIFY_TOOL,
+    FIN_CALC_TOOL,
     {
       name: "fin_ping",
       description:
@@ -69,6 +71,7 @@ const HANDLERS: Record<string, (client: LawApiClient, args: unknown) => Promise<
   fin_nts_ruling: handleFinNtsRuling,
   fin_annex: handleFinAnnex,
   fin_verify: handleFinVerify,
+  fin_calc: handleFinCalc,
 }
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
