@@ -1,0 +1,32 @@
+{
+  "name": "fin-law-mcp",
+  "version": "0.1.0",
+  "description": "재무·회계·세무·자금 특화 한국 법령 MCP 서버",
+  "type": "module",
+  "bin": {
+    "fin-law-mcp": "build/index.js"
+  },
+  "main": "build/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "node build/index.js"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "license": "MIT",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@xmldom/xmldom": "^0.9.12",
+    "dotenv": "^17.4.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}
