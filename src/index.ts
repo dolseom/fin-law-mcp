@@ -11,6 +11,8 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { config } from "dotenv"
+import { LawApiClient } from "./lib/api-client.js"
+import { FIN_ARTICLE_TOOL, handleFinArticle } from "./tools/article.js"
 
 config({ quiet: true })
 
@@ -31,8 +33,11 @@ const server = new Server(
   { capabilities: { tools: {} } }
 )
 
+const apiClient = new LawApiClient({ apiKey: process.env.LAW_OC || "" })
+
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
+    FIN_ARTICLE_TOOL,
     {
       name: "fin_ping",
       description:
@@ -44,6 +49,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 }))
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  if (req.params.name === "fin_article") {
+    return await handleFinArticle(apiClient, req.params.arguments ?? {})
+  }
   if (req.params.name === "fin_ping") {
     const keyState = process.env.LAW_OC ? "설정됨" : "누락 — .env에 LAW_OC를 설정하세요"
     return {
