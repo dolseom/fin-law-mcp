@@ -133,6 +133,8 @@ export async function handleFinNtsRuling(
     }
   }
 
-  text += `\n\n※ 이 목록·본문은 국세법령정보시스템(taxlaw.nts.go.kr) 기준\n${SOURCE_FOOTER}`
+  text += `\n\n※ 이 목록·본문은 국세법령정보시스템(taxlaw.nts.go.kr) 기준`
+  text += `\n※ 예규는 국세청 행정해석으로 법원을 구속하지 않습니다 — 조문 근거는 fin_article, 판례 대조는 fin_ruling_search`
+  text += `\n${SOURCE_FOOTER}`
   return { content: [{ type: "text", text }] }
 }

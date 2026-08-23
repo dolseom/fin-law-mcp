@@ -22,6 +22,7 @@ import {
   ladderQueries,
   parseNtsRulings,
   truncateWithHint,
+  AUTHORITY_FOOTER,
   SOURCE_FOOTER,
 } from "../lib/fin-common.js"
 
@@ -33,6 +34,14 @@ const DOMAIN_LABEL: Record<Domain, string> = {
   tax_tribunal: "조세심판원 재결례",
   interpretation: "법제처 해석례",
   precedent: "대법원 판례",
+}
+
+// 전거 서열 주석 — 각 자료의 법적 성격을 명시해 오용(예규를 확정 근거로 인용 등)을 막는다
+const DOMAIN_AUTHORITY: Record<Domain, string> = {
+  nts: "행정해석 — 과세실무 기준이나 법원 구속력 없음",
+  tax_tribunal: "불복 재결 — 인용 재결은 과세관청 기속",
+  interpretation: "정부유권해석",
+  precedent: "법원 판단 — 전거 최상위",
 }
 
 export const FinRulingSearchInputSchema = z.object({
@@ -180,7 +189,7 @@ export async function handleFinRulingSearch(
       text += `\n■ ${label} — 0건${ladderNote} (정상 조회 결과 없음)\n`
       continue
     }
-    text += `\n■ ${label} — 최신순 ${items.length}건${ladderNote}\n`
+    text += `\n■ ${label} [${DOMAIN_AUTHORITY[domain]}] — 최신순 ${items.length}건${ladderNote}\n`
     text += items.map((i) => `  · ${i.docNo || "(번호없음)"} (${i.dateDisplay}) ${i.title}`).join("\n") + "\n"
   }
   for (const { domain, r } of failedDomains) {
@@ -190,6 +199,7 @@ export async function handleFinRulingSearch(
   if (totalHits > 0) {
     text += `\n※ 예규 본문: fin_nts_ruling · 조문 근거: fin_article`
   }
+  text += `\n${AUTHORITY_FOOTER}`
   text += `\n\n${SOURCE_FOOTER}`
 
   return { content: [{ type: "text", text: truncateWithHint(text, 4000, "도메인을 좁혀 재검색") }] }

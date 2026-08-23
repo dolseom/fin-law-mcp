@@ -143,6 +143,37 @@ export function isFinLaw(lawName: string): boolean {
   return FIN_LAW_COMPACT.has(c)
 }
 
+// ── 시행예정 개정 감지 (eflaw 검색의 현행연혁코드=시행예정 행) ──────────
+// 세법은 개정이 공포된 뒤 시행까지 시차가 있다. 이미 공포된 미래 개정을
+// 모르고 현행 조문만 보면 개정 직전 검토에서 사고가 난다 — 경고를 동봉한다.
+
+export interface UpcomingVersion {
+  시행일자: string
+  공포일자: string
+}
+
+export function parseUpcomingVersions(xml: string, lawName: string): UpcomingVersion[] {
+  const blocks = xml.match(/<law [\s\S]*?<\/law>/g) || []
+  const target = compactName(lawName)
+  const out: UpcomingVersion[] = []
+  for (const b of blocks) {
+    const name = extractTag(b, "법령명한글")
+    if (compactName(name) !== target) continue
+    if (extractTag(b, "현행연혁코드") !== "시행예정") continue
+    out.push({ 시행일자: extractTag(b, "시행일자"), 공포일자: extractTag(b, "공포일자") })
+  }
+  out.sort((a, b) => (a.시행일자 < b.시행일자 ? -1 : 1))
+  return out
+}
+
+export function formatYmd(yyyymmdd: string): string {
+  return /^\d{8}$/.test(yyyymmdd) ? `${yyyymmdd.slice(0, 4)}-${yyyymmdd.slice(4, 6)}-${yyyymmdd.slice(6, 8)}` : yyyymmdd
+}
+
+// ── 전거 서열 (재무·세무 실무의 근거 우선순위 — 답변 신뢰도의 뼈대) ──────
+export const AUTHORITY_FOOTER =
+  "※ 전거 서열(높음→낮음): 법령 조문(법률·시행령·시행규칙) > 대법원 판례 > 심판례·유권해석 > 예규(행정해석 — 구속력 없음). 상충 시 상위 전거 우선"
+
 /** YYYYMMDD → 오늘 이후면 true (시행예정 판정) */
 export function isFutureDate(yyyymmdd: string): boolean {
   if (!/^\d{8}$/.test(yyyymmdd || "")) return false

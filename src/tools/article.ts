@@ -25,6 +25,9 @@ import {
   truncateWithHint,
   ladderQueries,
   parseNtsRulings,
+  parseUpcomingVersions,
+  formatYmd,
+  AUTHORITY_FOOTER,
   SOURCE_FOOTER,
 } from "../lib/fin-common.js"
 
@@ -300,10 +303,22 @@ export async function handleFinArticle(
     return { status: "성공" as const, text: out }
   })().catch((e) => failed(e instanceof Error ? e.message : String(e)))
 
-  const [articleR, threeTierR, annexR] = await Promise.all([
+  // 시행예정 개정 경고 — 이미 공포된 미래 개정을 모르면 개정 직전 검토에서 사고
+  const upcomingP: Promise<SectionResult> = (async () => {
+    const xml = await apiClient.searchLaw(law.lawName, undefined, 20, "eflaw")
+    const ups = parseUpcomingVersions(xml, law.lawName)
+    if (ups.length === 0) return { status: "성공" as const, text: "" }
+    return {
+      status: "성공" as const,
+      text: ups.map((u) => `${formatYmd(u.시행일자)} 시행 개정 공포됨(공포 ${formatYmd(u.공포일자)})`).join(" · "),
+    }
+  })().catch((e) => failed(e instanceof Error ? e.message : String(e)))
+
+  const [articleR, threeTierR, annexR, upcomingR] = await Promise.all([
     withDeadline(articleP, deadlineAt),
     withDeadline(threeTierP, deadlineAt),
     withDeadline(annexP, deadlineAt),
+    withDeadline(upcomingP, deadlineAt),
   ])
 
   // ── ③ 예규 검색 (조문 제목 확보 후) ──
@@ -372,9 +387,15 @@ export async function handleFinArticle(
     sec({ ...sections[3] }, `■ 별표`),
     ``,
     `■ 법령 정보 — 시행일자 ${law.effectiveDate || "미상"} · 원문: ${encodeURI(publicUrl)}`,
+    upcomingR.status === "성공"
+      ? upcomingR.text
+        ? `■ ⚠ 개정 예정 — ${upcomingR.text}. 개정 이후 기준 검토는 basis_date로 해당 시행일을 지정`
+        : ``
+      : `■ 개정 예정 여부 — ⚠ 확인 실패(${upcomingR.reason}). "개정 없음"으로 단정하지 말 것`,
     ``,
+    `※ 전거 서열: 이 응답의 조문(법률·시행령·시행규칙)이 1차 근거 — 예규는 행정해석(구속력 없음), 상충 시 조문 우선`,
     SOURCE_FOOTER,
-  ].join("\n")
+  ].join("\n").replace(/\n{3,}/g, "\n\n")
 
   return { content: [{ type: "text", text }] }
 }
