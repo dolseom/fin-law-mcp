@@ -122,6 +122,11 @@ interface Hit {
 }
 
 export function extractCitations(text: string): Citation[] {
+  return extractCitationsWithTotal(text).citations
+}
+
+/** 절단 전 총 발견 건수 포함 — 16번째 이후 인용이 조용히 사라지지 않게 (Opus I4) */
+export function extractCitationsWithTotal(text: string): { citations: Citation[]; total: number } {
   const hits: Hit[] = []
   const articleEnds = new Set<number>() // 같은 조문 토큰의 이중 매치 방지 (명시 우선)
   const quotedStarts = new Set<number>() // 「」+조문으로 소비된 「 위치 — 단독 「」 중복 방지
@@ -232,7 +237,7 @@ export function extractCitations(text: string): Citation[] {
     seen.add(key)
     out.push(h.c)
   }
-  return out.slice(0, MAX_CITATIONS)
+  return { citations: out.slice(0, MAX_CITATIONS), total: out.length }
 }
 
 // ── 검증 ────────────────────────────────────────────────────────────────
@@ -336,7 +341,7 @@ export async function handleFinVerify(
   const { text, basis_date } = parsed.data
   const efYd = basis_date ? basis_date.replace(/-/g, "") : undefined
 
-  const citations = extractCitations(text)
+  const { citations, total } = extractCitationsWithTotal(text)
   if (citations.length === 0) {
     return {
       content: [
@@ -367,7 +372,11 @@ export async function handleFinVerify(
   const counts = { "✓": 0, "✗": 0, "⚠": 0 }
   results.forEach((r) => counts[r.mark]++)
 
-  let out = `[기준: ${basis_date || "현행"}] 인용 검증 — ${citations.length}건: ✓${counts["✓"]} / ✗${counts["✗"]} / ⚠${counts["⚠"]}\n`
+  const coverage =
+    total > citations.length
+      ? `전체 ${total}건 중 ${citations.length}건 검증 (상한 ${MAX_CITATIONS}건 — 나머지 ${total - citations.length}건은 텍스트를 나눠 재검증하세요)`
+      : `${citations.length}건`
+  let out = `[기준: ${basis_date || "현행"}] 인용 검증 — ${coverage}: ✓${counts["✓"]} / ✗${counts["✗"]} / ⚠${counts["⚠"]}\n`
   if (counts["✗"] > 0) out += `⚠️ ✗ 항목은 초안에서 제거·수정 전까지 사용 금지\n`
   if (counts["⚠"] > 0) out += `※ ⚠는 "없음"이 아니라 확인 실패입니다 — 재시도하거나 원문으로 확인하세요\n`
   out += "\n" + results.map((r) => r.line).join("\n")

@@ -12,6 +12,7 @@ import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
 import { getNtsDecisionBody, parseNtstDcmId } from "./nts-body.js"
 import { ladderQueries, parseNtsRulings, truncateWithHint, SOURCE_FOOTER } from "../lib/fin-common.js"
+import { formatFetchFailure } from "../lib/errors.js"
 import { extractTag } from "../lib/xml-parser.js"
 
 const BUDGET_BODY = 6000
@@ -81,9 +82,8 @@ export async function handleFinNtsRuling(
       }
     }
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
     return {
-      content: [{ type: "text", text: `[EXTERNAL_API_ERROR] 예규 검색 실패 — ⚠판정불가 (0건이 아님)\n사유: ${msg}` }],
+      content: [{ type: "text", text: formatFetchFailure("예규 검색", e) }],
       isError: true,
     }
   }

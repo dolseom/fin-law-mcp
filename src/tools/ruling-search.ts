@@ -202,5 +202,10 @@ export async function handleFinRulingSearch(
   text += `\n${AUTHORITY_FOOTER}`
   text += `\n\n${SOURCE_FOOTER}`
 
-  return { content: [{ type: "text", text: truncateWithHint(text, 4000, "도메인을 좁혀 재검색") }] }
+  // 전 도메인 실패는 도구 실행 실패다 — 부분 성공과 달리 isError로 표기 (Opus I5: isError 통일)
+  const allFailed = okDomains.length === 0 && failedDomains.length > 0
+  return {
+    content: [{ type: "text", text: truncateWithHint(text, 4000, "도메인을 좁혀 재검색") }],
+    ...(allFailed ? { isError: true as const } : {}),
+  }
 }

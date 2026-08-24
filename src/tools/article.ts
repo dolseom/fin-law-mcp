@@ -14,6 +14,7 @@
 import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
 import { findLaws, resolvedLawMatches, sameLawFamily, type LawInfo } from "../lib/law-search.js"
+import { formatFetchFailure } from "../lib/errors.js"
 import { buildJO } from "../lib/law-parser.js"
 import { cleanHtml, flattenContent, groupMokByReset } from "../lib/article-parser.js"
 import { parseThreeTierDelegation } from "../lib/three-tier-parser.js"
@@ -217,14 +218,8 @@ export async function handleFinArticle(
     law = exact ?? laws[0]
     lawFallback = !exact
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
     return {
-      content: [
-        {
-          type: "text",
-          text: `[EXTERNAL_API_ERROR] 법령 검색 실패 — ⚠판정불가 (없음이 아님)\n사유: ${msg}\n💡 잠시 후 재시도하세요. 법제처 API 간헐 장애일 수 있습니다.`,
-        },
-      ],
+      content: [{ type: "text", text: formatFetchFailure("법령 검색", e) }],
       isError: true,
     }
   }

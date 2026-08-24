@@ -9,6 +9,7 @@
 import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
 import { sameLawFamily } from "../lib/law-search.js"
+import { formatFetchFailure } from "../lib/errors.js"
 import { flattenContent } from "../lib/article-parser.js"
 import { truncateWithHint, SOURCE_FOOTER, compactName } from "../lib/fin-common.js"
 
@@ -125,9 +126,8 @@ export async function handleFinAnnex(
 
     return { content: [{ type: "text", text: truncateWithHint(text, 8000, "키워드로 좁혀 재조회") }] }
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
     return {
-      content: [{ type: "text", text: `[EXTERNAL_API_ERROR] 별표 조회 실패 — ⚠판정불가 (0건이 아님)\n사유: ${msg}` }],
+      content: [{ type: "text", text: formatFetchFailure("별표 조회", e) }],
       isError: true,
     }
   }

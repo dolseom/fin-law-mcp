@@ -99,6 +99,37 @@ export function notFoundResponse(message: string, suggestions?: string[]): ToolR
   }
 }
 
+/**
+ * 에러 메시지 → 에러코드 분류. rate limit·timeout·파싱 실패가 전부
+ * EXTERNAL_API_ERROR로 뭉개지면 호출측(LLM)이 "재시도 대기"와 "장애 보고"를
+ * 구분할 수 없다 (Opus I5 — RATE_LIMITED·PARSE_ERROR가 실제로 생성되도록).
+ */
+export function classifyErrorCode(msg: string): ErrorCode {
+  if (/RATE_LIMITED|429|한도 초과/i.test(msg)) return ErrorCodes.RATE_LIMITED
+  if (/timeout|timed?\s*out|시간 초과|abort/i.test(msg)) return ErrorCodes.TIMEOUT
+  if (/JSON|XML|파싱|parse/i.test(msg)) return ErrorCodes.PARSE_ERROR
+  return ErrorCodes.API_ERROR
+}
+
+/**
+ * 외부 조회 실패의 공용 포맷 — 도구 catch 블록의 인라인 [EXTERNAL_API_ERROR]
+ * 문자열을 일원화한다. "0건 아님" 고지(조용한 실패 방지 계약)를 항상 포함한다.
+ */
+export function formatFetchFailure(what: string, error: unknown): string {
+  const rawMsg = error instanceof Error ? error.message : String(error)
+  const code = classifyErrorCode(rawMsg)
+  const msg = maskSensitiveUrl(rawMsg.replace(/^RATE_LIMITED:\s*/, ""))
+  const hint =
+    code === ErrorCodes.RATE_LIMITED
+      ? "\n💡 호출 한도 초과입니다 — 안내된 시간 후 재시도하세요."
+      : code === ErrorCodes.TIMEOUT
+        ? "\n💡 응답 지연입니다 — 잠시 후 재시도하세요."
+        : code === ErrorCodes.PARSE_ERROR
+          ? "\n💡 응답 형식 이상입니다 — 법제처 API 장애일 수 있으니 잠시 후 재시도하세요."
+          : "\n💡 잠시 후 재시도하세요. 법제처 API 간헐 장애일 수 있습니다."
+  return `[${code}] ${what} 실패 — ⚠판정불가 (0건이 아님)\n사유: ${msg}${hint}`
+}
+
 export function formatToolError(error: unknown, context?: string): ToolResponse {
   let code: string
   let msg: string

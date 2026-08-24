@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { extractCitations } from "./verify.js"
+import { extractCitations, extractCitationsWithTotal } from "./verify.js"
 
 describe("extractCitations — 접속사 오탐 방지 (Codex 리뷰 회귀)", () => {
   it("'및'으로 이어진 두 법령을 각각 정확히 추출한다", () => {
@@ -124,5 +124,19 @@ describe("extractCitations — 문맥 흡수·조응 오인·「」 우회 (Opus
     )
     const anaphor = cites[cites.length - 1]
     expect(anaphor.lawName).toBe("법인세법 시행령")
+  })
+})
+
+describe("extractCitationsWithTotal — 절단 고지 (Opus I4 회귀)", () => {
+  it("상한(15건) 초과 시 절단 전 총수를 함께 돌려준다", () => {
+    const many = Array.from({ length: 22 }, (_, i) => `법인세법 제${i + 1}조`).join(", ")
+    const { citations, total } = extractCitationsWithTotal(many)
+    expect(citations).toHaveLength(15)
+    expect(total).toBe(22)
+  })
+
+  it("상한 이내면 total === citations.length", () => {
+    const { citations, total } = extractCitationsWithTotal("법인세법 제26조 및 소득세법 제12조")
+    expect(total).toBe(citations.length)
   })
 })

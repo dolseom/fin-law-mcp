@@ -11,6 +11,7 @@
 import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
 import { stripNonLawKeywords } from "../lib/law-search.js"
+import { formatFetchFailure } from "../lib/errors.js"
 import { extractTag } from "../lib/xml-parser.js"
 import {
   FIN_MINISTRY_CODES,
@@ -183,9 +184,8 @@ export async function handleFinLawSearch(
     text += `\n\n${SOURCE_FOOTER}`
     return { content: [{ type: "text", text }] }
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
     return {
-      content: [{ type: "text", text: `[EXTERNAL_API_ERROR] 법령 검색 실패 — ⚠판정불가 (0건이 아님)\n사유: ${msg}` }],
+      content: [{ type: "text", text: formatFetchFailure("법령 검색", e) }],
       isError: true,
     }
   }
