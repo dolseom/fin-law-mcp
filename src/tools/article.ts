@@ -200,7 +200,6 @@ export async function handleFinArticle(
 
   // ── ① 법령 확정 ──
   let law: LawInfo
-  let lawFallback = false // 정확 일치 없이 최상위 검색 결과로 폴백했는가 — 무고지 금지 (Opus I1)
   try {
     const laws = await findLaws(apiClient, input.law, undefined, 5)
     if (laws.length === 0) {
@@ -214,10 +213,28 @@ export async function handleFinArticle(
         isError: true,
       }
     }
-    // 정확 매칭 우선(부분매칭 함정 방어: "지방세법"→지방교부세법), 다음 순위 폴백
+    // 정확 매칭 우선(부분매칭 함정 방어: "지방세법"→지방교부세법)
     const exact = laws.find((l) => resolvedLawMatches(input.law, l.lawName))
-    law = exact ?? laws[0]
-    lawFallback = !exact
+    if (!exact) {
+      // 정확 일치가 없으면 조문 본문을 주지 않는다 — 경고를 붙여도 LLM이 본문을
+      // 그대로 인용하면 무관한 법령의 조문이 검토서에 실린다
+      // ("국조법" → 「국정감사 및 조사에 관한 법률」 실측, Opus I-d)
+      const candidates = laws.slice(0, 5).map((l) => `  · ${l.lawName} [${l.lawType}]${l.status === "연혁" ? " ⚠연혁" : ""}`).join("\n")
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `[LAW_AMBIGUOUS] "${input.law}"과 정확히 일치하는 법령이 없습니다 — ⚠판정불가 (없음이 아님).\n` +
+              `조문 본문은 생략했습니다. 아래 후보 중 의도한 법령의 **정확한 명칭**으로 다시 요청하세요.\n\n` +
+              `검색된 유사 법령:\n${candidates}\n\n` +
+              `⚠️ LLM은 위 후보의 조문 내용을 추측하지 마세요. 약칭을 썼다면 정식 명칭으로 바꿔 재시도하세요.`,
+          },
+        ],
+        isError: true,
+      }
+    }
+    law = exact
   } catch (e) {
     return {
       content: [{ type: "text", text: formatFetchFailure("법령 검색", e) }],
@@ -262,7 +279,14 @@ export async function handleFinArticle(
   const articleP: Promise<SectionResult> = (async () => {
     const extraParams: Record<string, string> = { MST: law.mst, JO: buildJO(articleLabel) }
     if (efYd) extraParams.efYd = efYd
-    const jsonText = await apiClient.fetchApi({ endpoint: "lawService.do", target: "eflaw", type: "JSON", extraParams, signal: aborter.signal })
+    const jsonText = await apiClient.fetchApi({
+      endpoint: "lawService.do",
+      target: "eflaw",
+      type: "JSON",
+      extraParams,
+      signal: aborter.signal,
+      expectedJsonKey: "법령",
+    })
     const lawData = JSON.parse(jsonText)?.법령
     if (!lawData) return failed("법령 데이터 없음 (기준일이 시행일과 안 맞을 수 있음)")
     const units: any[] = toArray(lawData?.조문?.조문단위)
@@ -306,7 +330,14 @@ export async function handleFinArticle(
             try {
               const extra: Record<string, string> = { MST: decree.mst, JO: buildJO(d.joNum!) }
               if (efYd) extra.efYd = efYd
-              const jt = await apiClient.fetchApi({ endpoint: "lawService.do", target: "eflaw", type: "JSON", extraParams: extra, signal: bodyAborter.signal })
+              const jt = await apiClient.fetchApi({
+                endpoint: "lawService.do",
+                target: "eflaw",
+                type: "JSON",
+                extraParams: extra,
+                signal: bodyAborter.signal,
+                expectedJsonKey: "법령",
+              })
               const body = renderArticleUnits(JSON.parse(jt)?.법령)
               if (body) bodyMap.set(d.joNum!, body)
             } catch {
@@ -427,13 +458,8 @@ export async function handleFinArticle(
     return `${header}\n${truncateWithHint(s.r.text, s.budget, s.hint)}`
   }
 
-  const fallbackLine = lawFallback
-    ? `⚠ 요청 "${input.law}"과 정확히 일치하는 법령이 없어 최상위 검색 결과 「${law.lawName}」로 조회했습니다. 의도한 법령인지 확인하세요 (다르면 fin_law_search로 정확한 명칭 검색).`
-    : ``
-
   const text = [
     `${basisLine} ${overall}`,
-    fallbackLine,
     ``,
     sec({ ...sections[0] }, `■ ${law.lawName} ${articleLabel}${statusMark}`),
     ``,

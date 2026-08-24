@@ -192,6 +192,8 @@ const LAW_ALIAS_ENTRIES: LawAliasEntry[] = [
     aliases: ["소방시설법"],
   },
   // ── 세법 ──
+  // 실무 약칭이 미등재이면 법제처 LIKE 검색이 0건을 주고, verify가 이를
+  // "환각 의심(✗)"으로 낙인찍는다 (Opus B-2) — 다빈도 세법 약칭을 등재해 둔다
   {
     canonical: "국세기본법",
     aliases: ["국기법"],
@@ -199,6 +201,44 @@ const LAW_ALIAS_ENTRIES: LawAliasEntry[] = [
   {
     canonical: "부가가치세법",
     aliases: ["부가세법"],
+  },
+  {
+    canonical: "조세특례제한법",
+    aliases: ["조특법", "조특", "조세특례법"],
+    alternatives: ["조세특례제한법 시행령", "조세특례제한법 시행규칙"],
+  },
+  {
+    canonical: "조세특례제한법 시행령",
+    aliases: ["조특령", "조특법시행령"],
+  },
+  {
+    canonical: "지방세특례제한법",
+    aliases: ["지특법", "지방세특례법"],
+  },
+  {
+    canonical: "근로자퇴직급여 보장법",
+    aliases: ["근퇴법", "퇴직급여법", "근로자퇴직급여보장법"],
+  },
+  {
+    canonical: "주식회사 등의 외부감사에 관한 법률",
+    aliases: ["외감법", "외부감사법"],
+  },
+  {
+    canonical: "종합부동산세법",
+    aliases: ["종부세법", "종부세"],
+  },
+  {
+    canonical: "국제조세조정에 관한 법률",
+    aliases: ["국조법", "국제조세법"],
+  },
+  {
+    canonical: "상속세 및 증여세법",
+    aliases: ["상증법", "상증세법", "상속증여세법"],
+  },
+  {
+    canonical: "법인세법",
+    aliases: ["법세법"],
+    alternatives: ["법인세법 시행령", "법인세법 시행규칙"],
   },
   // ── 공정거래/소비자 ──
   {
@@ -304,6 +344,9 @@ const LAW_ALIAS_ENTRIES: LawAliasEntry[] = [
     aliases: ["전기통신법", "전사법"],
   },
 ]
+
+/** 별칭표에 등재된 정식 법령명 전체 — 인용 추출의 "알려진 법령명" 사전으로 공유 */
+export const LAW_ALIAS_CANONICALS: string[] = LAW_ALIAS_ENTRIES.map((e) => e.canonical)
 
 const aliasLookup = new Map<string, LawAliasEntry>()
 

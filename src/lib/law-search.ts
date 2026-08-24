@@ -67,7 +67,21 @@ export function resolvedLawMatches(requested: string, officialName: string): boo
   const officialTier = lawTierOf(officialName)
   if (lawTierOf(requested) === officialTier && looseMatchLawName(requested, officialName)) return true
   const canonical = resolveLawAlias(normalizeLawSearchText(requested)).canonical
-  return canonical !== requested && lawTierOf(canonical) === officialTier && looseMatchLawName(canonical, officialName)
+  if (canonical !== requested && lawTierOf(canonical) === officialTier && looseMatchLawName(canonical, officialName)) {
+    return true
+  }
+  // 약칭 + 종류 접미사("부가세법 시행령")는 resolveLawAlias가 전체 문자열 키로만
+  // 조회해 해소되지 않는다 — 접미사를 떼어 본체만 canonical로 바꾼 뒤 재결합한다
+  // (I1의 tier 필터는 정상인데 별칭 경로가 못 따라오던 문제, Opus I-b)
+  const m = requested.match(/^(.*?)\s*(시행령|시행규칙)$/)
+  if (m) {
+    const bodyCanonical = resolveLawAlias(normalizeLawSearchText(m[1])).canonical
+    if (bodyCanonical !== m[1]) {
+      const recombined = `${bodyCanonical} ${m[2]}`
+      return lawTierOf(recombined) === officialTier && looseMatchLawName(recombined, officialName)
+    }
+  }
+  return false
 }
 
 /**

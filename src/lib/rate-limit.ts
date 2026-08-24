@@ -64,18 +64,29 @@ export function createSemaphore(max: number): Semaphore {
   let running = 0
   const waiters: Array<() => void> = []
 
+  /**
+   * 해제 시 running을 줄이지 않고 **대기자에게 슬롯을 그대로 넘긴다**.
+   * running--을 먼저 하고 대기자를 마이크로태스크로 깨우면, 그 사이에 새 acquire가
+   * 동기적으로 빈 슬롯을 가로채고 깨어난 대기자가 뒤이어 running++을 해서
+   * 상한을 넘긴다 (Opus I-c: max=2인데 active=3 실측)
+   */
   function release(): void {
-    running--
     const next = waiters.shift()
-    if (next) next()
+    if (next) {
+      next() // 슬롯 양도 — running은 그대로 유지
+      return
+    }
+    running--
   }
 
   return {
     async acquire(): Promise<() => void> {
       if (running >= max) {
+        // 대기열에 들어간 시점에 슬롯을 넘겨받으므로 여기서 running++을 하지 않는다
         await new Promise<void>((resolve) => waiters.push(resolve))
+      } else {
+        running++
       }
-      running++
       let released = false
       return () => {
         if (released) return

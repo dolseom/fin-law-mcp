@@ -135,10 +135,27 @@ describe("조응 시행규칙 형태 (Codex 리뷰 중요 5 회귀)", () => {
     expect(cites[1].article).toBe("제3조")
   })
 
-  it("'같은 규칙 제N조'도 추출한다", () => {
+  it("본법 뒤의 '같은 규칙'은 시행규칙으로 넘겨짚지 않는다 (Opus B-0 — 넘겨짚으면 틀린 법령에 ✓)", () => {
+    // "같은 규칙"은 직전에 인용된 **규칙 자체**를 가리킨다. 규칙 선행사가 없으면
+    // 본법의 시행규칙으로 단정하지 말고 ⚠(선행사 불명) 경로로 보내야 한다
     const cites = extractCitations("소득세법 제12조를 본다. 같은 규칙 제5조도 확인한다.")
     expect(cites).toHaveLength(2)
-    expect(cites[1].lawName).toBe("소득세법 시행규칙")
+    expect(cites[1].lawName).toBe("")
+  })
+
+  it("'같은 규칙'은 직전에 인용된 「…에 관한 규칙」을 가리킨다", () => {
+    const cites = extractCitations(
+      "산업안전보건법 제38조 및 「산업안전보건기준에 관한 규칙」 제32조, 같은 규칙 제33조를 본다."
+    )
+    expect(cites).toHaveLength(3)
+    expect(cites[1].lawName).toBe("산업안전보건기준에 관한 규칙") // 「」 규칙 인용이 추출된다
+    expect(cites[2].lawName).toBe("산업안전보건기준에 관한 규칙") // 본법 시행규칙이 아니다
+  })
+
+  it("행정규칙(고시) 뒤의 '같은 규칙'은 두 칸 앞 본법을 끌어오지 않는다", () => {
+    const cites = extractCitations("법인세법 제26조와 「전자세금계산서 발급 고시」 제3조, 같은 규칙 제5조")
+    const anaphor = cites[cites.length - 1]
+    expect(anaphor.lawName).toBe("") // "법인세법 시행규칙"이면 회귀
   })
 
   it("'동 시행령'은 시행령으로 유지된다 (회귀 없음)", () => {
@@ -149,6 +166,38 @@ describe("조응 시행규칙 형태 (Codex 리뷰 중요 5 회귀)", () => {
   it("'같은 법 시행규칙' 형태도 계속 동작한다", () => {
     const cites = extractCitations("법인세법 제26조에 따라 처리하고 같은 법 시행규칙 제3조를 본다.")
     expect(cites[1].lawName).toBe("법인세법 시행규칙")
+  })
+})
+
+describe("정식 법령명 절단 방지 (Opus B-3 회귀)", () => {
+  it("'하는'이 든 정식 법령명을 자르지 않는다 (사전 최장 일치)", () => {
+    const cites = extractCitations("국가를 당사자로 하는 계약에 관한 법률 제7조에 따라 계약을 체결한다.")
+    expect(cites[0].lawName).toBe("국가를 당사자로 하는 계약에 관한 법률")
+  })
+
+  it("'위한'이 든 긴 법령명도 유지한다", () => {
+    const cites = extractCitations("자유무역협정의 이행을 위한 관세법의 특례에 관한 법률 제5조를 본다.")
+    expect(cites[0].lawName).toBe("자유무역협정의 이행을 위한 관세법의 특례에 관한 법률")
+  })
+
+  it("서로 다른 두 법의 같은 조문이 병합돼 사라지지 않는다", () => {
+    const { citations, total } = extractCitationsWithTotal(
+      "국가를 당사자로 하는 계약에 관한 법률 제7조와 지방자치단체를 당사자로 하는 계약에 관한 법률 제7조를 비교한다."
+    )
+    expect(total).toBe(2)
+    expect(citations).toHaveLength(2)
+    expect(citations[0].lawName).not.toBe(citations[1].lawName)
+  })
+
+  it("컷이 일어난 경우 컷 전 이름을 보존한다 (검증 단계 재시도·고지용)", () => {
+    const cites = extractCitations("당해 사업연도 귀속 법인세법 제26조를 적용한다.")
+    expect(cites[0].lawName).toBe("법인세법")
+    expect(cites[0].uncut).toContain("당해") // 원문 표기 보존
+  })
+
+  it("같은 법령명이 앞에도 나오면 raw에 문맥이 남지 않는다", () => {
+    const cites = extractCitations("소득세법에 따라 소득세법 제12조를 본다")
+    expect(cites[0].raw).toBe("소득세법 제12조")
   })
 })
 

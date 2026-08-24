@@ -11,11 +11,11 @@
 import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
 import { findLaws, resolvedLawMatches, INTERPUNCT_CHARS, type LawInfo } from "../lib/law-search.js"
-import { resolveLawAlias } from "../lib/search-normalizer.js"
+import { resolveLawAlias, LAW_ALIAS_CANONICALS } from "../lib/search-normalizer.js"
 import { buildJO } from "../lib/law-parser.js"
 import { toArray } from "../lib/xml-parser.js"
 import { isAdminRuleName, verifyAdminRuleCitation } from "./admin-rule-citation.js"
-import { SOURCE_FOOTER, truncateWithHint } from "../lib/fin-common.js"
+import { SOURCE_FOOTER, truncateWithHint, FIN_LAW_NAMES } from "../lib/fin-common.js"
 import { resolveVersionAt } from "../lib/historical-utils.js"
 
 const MAX_CITATIONS = 15
@@ -60,6 +60,8 @@ interface Citation {
   lawName: string // 조응 해석 후 법령명
   article?: string // 제N조(의M)
   kind: "법령조문" | "법령" | "행정규칙"
+  /** 어절 컷으로 잘라내기 전의 이름 — 컷이 정식 법령명을 잘랐을 때의 복구·고지용 */
+  uncut?: string
 }
 
 const IP = INTERPUNCT_CHARS // 가운뎃점 5종 — 추출 정규식과 정규화가 같은 집합을 봐야 한다
@@ -80,6 +82,10 @@ const LAW_ARTICLE_RE = new RegExp(`(${LAW_NAME_CHARS}{1,40}?(?:법률|법))${SUF
 // 「…」 + 제N조 — 표준 표기. 이 결합 패턴이 없으면 「」 인용은 명칭 실존만 확인하고
 // 조문 검증을 우회한다 (Opus B2: 「법인세법」 제26조가 조문 확인 없이 통과)
 const QUOTED_ARTICLE_RE = new RegExp(`「([^」]{2,40})」\\s*(${ARTICLE_PART})`, "g")
+// 「」 인용에서 법령으로 받아들일 접미사. 「산업안전보건기준에 관한 규칙」처럼 본법이
+// 아닌 '규칙·규정'류가 빠져 있으면 그 인용이 통째로 사라지고, 뒤따르는 "같은 규칙"이
+// 두 칸 앞 본법을 선행사로 삼아 엉뚱한 시행규칙에 ✓를 준다 (Opus B-0)
+const LAW_LIKE_SUFFIX_RE = /(법률|법|시행령|시행규칙|규칙|규정)$/
 // 「…」 단독 인용 (행정규칙 포함)
 const QUOTED_RE = /「([^」]{2,40})」/g
 // 기본통칙 인용: "법인세법 기본통칙 19-19…46" 류
@@ -93,11 +99,48 @@ const CUT_WORDS = new Set(["따라", "따른", "의한", "의해", "의하여", 
 // 조문 참조 어절("제26조", "제1항")도 문맥 — "「법인세법」 제26조 및 지방세법 제1조"에서
 // 앞 인용의 조문이 다음 법령명("제26조 및 지방세법")에 흡수되는 것 방지
 const CUT_REF_RE = /^제?\d+(?:조|항|호|목)(?:의\d+)?[.,]?$/
-const ANAPHOR_WORDS = new Set(["같은법", "동법", "동시행령", "같은영"])
+const ANAPHOR_WORDS = new Set(["같은법", "동법", "동시행령", "같은영", "동시행규칙", "같은규칙"])
 
-/** namePart에서 가장 오른쪽 종결 어절까지를 문맥으로 보고 제거 (마지막 어절 '…법'은 유지) */
+/**
+ * 미등재 약칭으로 보이는가 — 짧고 법/령/규칙으로 끝나는 형태("조특법", "근퇴법").
+ * 이런 이름에 검색 0건이 나오면 부존재가 아니라 별칭 사전의 공백일 가능성이 높다.
+ * 정식 명칭 형태(공백 포함·장문)는 대상이 아니다 — 그건 진짜 0건일 수 있다.
+ */
+function looksLikeAbbreviation(name: string): boolean {
+  const n = name.replace(/\s+/g, "")
+  return n.length <= 6 && /(법|령|규칙)$/.test(n) && !/시행(령|규칙)$/.test(n)
+}
+
+/** 「…규칙」·「…규정」처럼 그 자체가 규칙인 법령명인가 (본법의 시행규칙과 구분) */
+function isStandaloneRule(name: string): boolean {
+  const n = name.replace(/\s+/g, "")
+  return /(규칙|규정)$/.test(n) && !/시행규칙$/.test(n)
+}
+
+// 알려진 정식 법령명 — 어절 컷보다 **먼저** 최장 일치를 시도한다.
+// "국가를 당사자로 하는 계약에 관한 법률"의 '하는'이 컷 규칙(는$)에 걸려
+// "계약에 관한 법률"로 잘리던 문제 방지 (Opus B-3). 재무 사전 + 별칭 canonical 합집합.
+const KNOWN_LAW_NAMES: string[] = (() => {
+  const set = new Set<string>(FIN_LAW_NAMES)
+  for (const n of LAW_ALIAS_CANONICALS) set.add(n)
+  // 긴 이름부터 매칭해야 부분 일치에 먼저 걸리지 않는다
+  return [...set].sort((a, b) => b.length - a.length)
+})()
+const compact = (s: string) => s.replace(/\s+/g, "")
+
+/**
+ * namePart에서 법령명만 남긴다.
+ * ① 알려진 정식 법령명이 끝에 붙어 있으면 그대로 사용 (어절 컷보다 우선)
+ * ② 없으면 가장 오른쪽 종결 어절까지를 문맥으로 보고 제거
+ */
 function trimToLawName(namePart: string): string {
-  const words = namePart.replace(/\s+/g, " ").trim().split(" ")
+  const normalized = namePart.replace(/\s+/g, " ").trim()
+  const c = compact(normalized)
+  for (const known of KNOWN_LAW_NAMES) {
+    // 공백 표기 흔들림을 흡수해 비교하되, 반환은 공식 표기로 통일한다
+    if (c.endsWith(compact(known))) return known
+  }
+  const words = normalized.split(" ")
   for (let i = words.length - 2; i >= 0; i--) {
     if (CUT_ENDING_RE.test(words[i]) || CUT_WORDS.has(words[i]) || CUT_REF_RE.test(words[i])) {
       return words.slice(i + 1).join(" ")
@@ -124,7 +167,9 @@ interface Hit {
   idx: number
   c: Citation
   antecedent?: string // 이 인용이 조응에 남기는 본법명 (행정규칙은 갱신하지 않음)
+  ruleAntecedent?: string // "같은 규칙"이 가리킬 규칙류 선행사 (「…에 관한 규칙」 등)
   anaphorSuffix?: string // 조응 인용 — 단일 패스에서 선행사 + 이 접미사로 해소
+  anaphorKind?: "법" | "영" | "규칙" // 조응이 요구하는 대상 종류
 }
 
 export function extractCitations(text: string): Citation[] {
@@ -140,14 +185,17 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
   // 1) 명시 법령명 + 조문
   for (const m of text.matchAll(LAW_ARTICLE_RE)) {
     const [, namePart, suffix, article] = m
+    const uncutBase = cleanLawName(namePart)
     const base = cleanLawName(trimToLawName(namePart))
     // 어절 컷 후 남은 게 조응 표현("동법")이나 외자("법")면 명시 인용이 아니다 —
     // 조응 정규식이 같은 자리를 따로 매칭한다
     if (base.length < 2 || ANAPHOR_WORDS.has(base.replace(/\s+/g, ""))) continue
     const suffixNorm = suffix ? suffix.trim() : ""
     const end = m.index! + m[0].length
-    // raw는 컷으로 버린 선행 문맥을 제외해 재구성 ("임원 상여금은 부가가치세법 제1조" 방지)
-    const kept = m[0].indexOf(base.split(" ")[0])
+    // raw는 컷으로 버린 선행 문맥을 제외해 재구성 ("임원 상여금은 부가가치세법 제1조" 방지).
+    // lastIndexOf로 컷 지점을 잡는다 — indexOf는 같은 법령명이 앞에도 나오면 엉뚱한
+    // 위치를 집어 raw에 문맥이 남는다 ("소득세법에 따라 소득세법 제12조", Opus 개선)
+    const kept = m[0].lastIndexOf(base.split(" ")[0])
     hits.push({
       idx: m.index!,
       c: {
@@ -155,6 +203,7 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
         lawName: suffixNorm ? `${base} ${suffixNorm}` : base,
         article: normArticle(article),
         kind: "법령조문",
+        ...(compact(uncutBase) !== compact(base) ? { uncut: suffixNorm ? `${uncutBase} ${suffixNorm}` : uncutBase } : {}),
       },
       antecedent: base,
     })
@@ -166,8 +215,13 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     const [, anaphorPart, suffix, article] = m
     const end = m.index! + m[0].length
     if (articleEnds.has(end)) continue
-    // 조응 표현 자체가 종류를 함의하는 경우("동 시행령"→시행령, "동 시행규칙"→시행규칙)
-    const impliedTier = /동\s*시행규칙|같은\s*규칙/.test(anaphorPart)
+    // 조응 표현이 함의하는 종류.
+    // "동 시행규칙"은 "동(같은) 법의 시행규칙"이라 본법 선행사 + 시행규칙이지만,
+    // "같은 규칙"은 직전에 인용된 **규칙 그 자체**를 가리킨다 — 이를 구분하지 않으면
+    // 「산업안전보건기준에 관한 규칙」 뒤의 "같은 규칙"이 본법의 시행규칙으로
+    // 해소되어 전혀 다른 법령에 ✓가 나간다 (Opus B-0)
+    const isRuleAnaphor = /같은\s*규칙/.test(anaphorPart)
+    const impliedTier = /동\s*시행규칙/.test(anaphorPart)
       ? "시행규칙"
       : /동\s*시행령|같은\s*영/.test(anaphorPart)
         ? "시행령"
@@ -177,6 +231,7 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
       idx: m.index!,
       c: { raw: m[0].trim(), lawName: "", article: normArticle(article), kind: "법령조문" },
       anaphorSuffix: suffixNorm,
+      anaphorKind: isRuleAnaphor ? "규칙" : suffixNorm === "시행령" ? "영" : "법",
     })
     articleEnds.add(end)
   }
@@ -186,12 +241,16 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     const name = cleanLawName(m[1])
     quotedStarts.add(m.index!)
     if (isAdminRuleName(name)) {
+      // 고시·훈령류는 본법 선행사가 되지 않지만, "같은 규칙"의 대상도 아니다
       hits.push({ idx: m.index!, c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "행정규칙" } })
-    } else if (/(법률|법|시행령|시행규칙)$/.test(name)) {
+    } else if (LAW_LIKE_SUFFIX_RE.test(name)) {
+      const standalone = isStandaloneRule(name)
       hits.push({
         idx: m.index!,
         c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "법령조문" },
-        antecedent: name.replace(/\s*시행(?:령|규칙)$/, ""),
+        // 「…에 관한 규칙」은 본법이 아니므로 "같은 법"의 선행사가 되면 안 된다.
+        // 대신 "같은 규칙"의 선행사가 된다
+        ...(standalone ? { ruleAntecedent: name } : { antecedent: name.replace(/\s*시행(?:령|규칙)$/, "") }),
       })
     }
   }
@@ -202,11 +261,12 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     const name = cleanLawName(m[1])
     if (isAdminRuleName(name)) {
       hits.push({ idx: m.index!, c: { raw: m[0], lawName: name, kind: "행정규칙" } })
-    } else if (/(법률|법|시행령|시행규칙)$/.test(name)) {
+    } else if (LAW_LIKE_SUFFIX_RE.test(name)) {
+      const standalone = isStandaloneRule(name)
       hits.push({
         idx: m.index!,
         c: { raw: m[0], lawName: name, kind: "법령" },
-        antecedent: name.replace(/\s*시행(?:령|규칙)$/, ""),
+        ...(standalone ? { ruleAntecedent: name } : { antecedent: name.replace(/\s*시행(?:령|규칙)$/, "") }),
       })
     }
   }
@@ -233,17 +293,25 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
   // 7) 텍스트 순서로 정렬 → 단일 패스 조응 해소 (「」 인용도 선행사가 된다)
   hits.sort((a, b) => a.idx - b.idx)
   let lastLawName = "" // 조응 선행사 — 직전에 명시된 본법명으로 제한 (선행사 오염 사고 방지)
+  let lastRuleName = "" // "같은 규칙"의 선행사 — 「…에 관한 규칙」류 (본법과 별도로 추적)
   const out: Citation[] = []
   const seen = new Set<string>()
   for (const h of hits) {
     if (h.anaphorSuffix !== undefined) {
-      if (lastLawName) {
+      if (h.anaphorKind === "규칙") {
+        // "같은 규칙"은 직전에 인용된 규칙 자체를 가리킨다. 규칙 선행사가 없으면
+        // 본법으로 넘겨짚지 않고 ⚠로 보낸다 — 넘겨짚으면 틀린 법령에 ✓가 된다
+        if (lastRuleName) h.c.lawName = lastRuleName
+      } else if (lastLawName) {
         h.c.lawName = h.anaphorSuffix ? `${lastLawName} ${h.anaphorSuffix}` : lastLawName
       } // 선행사 없으면 lawName "" 유지 → ⚠ 판정 경로
-    } else if (h.antecedent) {
-      lastLawName = h.antecedent
+    } else {
+      if (h.antecedent) lastLawName = h.antecedent
+      if (h.ruleAntecedent) lastRuleName = h.ruleAntecedent
     }
-    const key = `${h.c.kind}|${h.c.lawName}|${h.c.article || ""}`
+    // dedup 키에 위치를 포함한다 — 서로 다른 법의 인용이 같은 lawName으로 절단됐을 때
+    // 한 건이 조용히 증발하던 문제 방지 (Opus B-3②)
+    const key = `${h.c.kind}|${h.c.lawName}|${h.c.article || ""}|${h.c.raw}`
     if (seen.has(key)) continue
     seen.add(key)
     out.push(h.c)
@@ -267,17 +335,30 @@ interface CheckResult {
 async function findVerifyTarget(
   apiClient: LawApiClient,
   lawName: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  uncut?: string
 ): Promise<{ laws: LawInfo[]; best?: LawInfo; usedName: string }> {
   const firstLaws = await findLaws(apiClient, lawName, undefined, 5, 100, signal)
   const firstBest = firstLaws.find((l) => resolvedLawMatches(lawName, l.lawName))
   if (firstBest) return { laws: firstLaws, best: firstBest, usedName: lawName }
+
+  // 어절 컷이 정식 법령명을 잘랐을 수 있다 — 컷 전 이름으로 먼저 확인한다
+  // ("국가를 당사자로 하는 계약에 관한 법률"의 '하는'이 컷되던 문제, Opus B-3)
+  if (uncut && uncut !== lawName && !signal?.aborted) {
+    const laws = await findLaws(apiClient, uncut, undefined, 5, 100, signal)
+    const best = laws.find((l) => resolvedLawMatches(uncut, l.lawName))
+    if (best) return { laws, best, usedName: uncut }
+  }
+
   let name = lawName
   for (let i = 0; i < 2; i++) {
     if (signal?.aborted) break // 시간 상한 도달 — 어절 제거 재시도를 더 돌지 않는다
     const words = name.split(" ")
     if (words.length < 2) break
-    name = words.slice(1).join(" ")
+    // 재시도 이름에도 선행 접속사 제거를 적용한다 — 없으면 "및 법인세법"이 되어
+    // 한 번 더 실패한다 (Opus I-a)
+    name = cleanLawName(words.slice(1).join(" "))
+    if (!name) break
     const laws = await findLaws(apiClient, name, undefined, 5, 100, signal)
     const best = laws.find((l) => resolvedLawMatches(name, l.lawName))
     if (best) return { laws, best, usedName: name }
@@ -298,22 +379,32 @@ async function verifyLawCitation(
   let best: LawInfo | undefined
   let usedName: string
   try {
-    ;({ laws, best, usedName } = await findVerifyTarget(apiClient, c.lawName, signal))
+    ;({ laws, best, usedName } = await findVerifyTarget(apiClient, c.lawName, signal, c.uncut))
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return { mark: "⚠", line: `⚠ ${c.raw} — 조회 실패로 판정 불가 (없음 아님): ${msg}` }
   }
   if (!best && laws.length === 0) {
+    // 미등재 약칭("조특법")에 대한 LIKE 0건은 법령 부존재의 증거가 아니라 별칭 사전의
+    // 공백일 뿐이다. ✗(환각 의심)로 단정하면 실무자가 맞는 인용을 지운다 (Opus B-2)
+    if (looksLikeAbbreviation(c.lawName)) {
+      return {
+        mark: "⚠",
+        line: `⚠ ${c.raw} — 「${c.lawName}」은 약칭으로 보이며 법제처 검색에 잡히지 않았습니다 (없음 아님). 정식 명칭으로 다시 확인하세요`,
+      }
+    }
     return { mark: "✗", line: `✗ ${c.raw} — 법령 「${c.lawName}」 실존하지 않음 (정상 조회 후 0건). 법령명 오기 또는 환각 의심` }
   }
   if (!best) {
     const alias = resolveLawAlias(c.lawName)
+    const cutNote = c.uncut ? ` / 원문 표기: 「${c.uncut}」 (문맥 제거 후 「${c.lawName}」로 조회)` : ""
     return {
       mark: "⚠",
-      line: `⚠ ${c.raw} — 정확 일치 법령 없음 (유사: ${laws.slice(0, 2).map((l) => `「${l.lawName}」`).join(", ")}${alias.canonical !== c.lawName ? ` / 별칭 해석: ${alias.canonical}` : ""}). 표기 확인 필요`,
+      line: `⚠ ${c.raw} — 정확 일치 법령 없음 (유사: ${laws.slice(0, 2).map((l) => `「${l.lawName}」`).join(", ")}${alias.canonical !== c.lawName ? ` / 별칭 해석: ${alias.canonical}` : ""}${cutNote}). 표기 확인 필요`,
     }
   }
-  const trimNote = usedName !== c.lawName ? ` · 표기 주의: 「${c.lawName}」에서 선행 문맥을 제외한 「${usedName}」로 해석` : ""
+  const trimNote =
+    usedName !== c.lawName ? ` · 표기 주의: 「${c.lawName}」에서 선행 문맥을 제외한 「${usedName}」로 해석` : ""
 
   if (!c.article) {
     const histNote = best.status === "연혁" ? " ⚠주의: 연혁(폐지·과거본)" : ""
@@ -336,7 +427,14 @@ async function verifyLawCitation(
     }
     const extra: Record<string, string> = { MST: mst, JO: buildJO(c.article) }
     if (efYd) extra.efYd = efYd
-    const jsonText = await apiClient.fetchApi({ endpoint: "lawService.do", target: "eflaw", type: "JSON", extraParams: extra, signal })
+    const jsonText = await apiClient.fetchApi({
+      endpoint: "lawService.do",
+      target: "eflaw",
+      type: "JSON",
+      extraParams: extra,
+      signal,
+      expectedJsonKey: "법령", // 루트 키가 다른 응답을 "조문 없음(✗)"으로 위장하지 않는다
+    })
     const lawData = JSON.parse(jsonText)?.법령
     const units: any[] = toArray(lawData?.조문?.조문단위)
     const article = units.find((u: any) => u.조문여부 === "조문")

@@ -76,6 +76,27 @@ export class LawApiClient {
   }
 
   /**
+   * JSON 응답의 기대 최상위 키 검증 — assertXmlRoot의 JSON 대응물.
+   * 법제처는 조회 조건이 안 맞으면 200 + 짧은 JSON(루트 키가 다름)을 돌려주는데,
+   * 이를 "조회는 됐고 내용이 없다"로 읽으면 오류가 0건으로 위장된다.
+   */
+  private assertJsonKey(text: string, expectedKey: string, context: string): void {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      throw new Error(`${context} - 법제처 API 응답을 JSON으로 파싱하지 못했습니다 — "0건"이 아니라 확인 실패로 처리하세요.`)
+    }
+    if (!parsed || typeof parsed !== "object" || !(expectedKey in (parsed as Record<string, unknown>))) {
+      const keys = parsed && typeof parsed === "object" ? Object.keys(parsed as Record<string, unknown>).slice(0, 3).join(", ") : "없음"
+      throw new Error(
+        `${context} - 법제처 API가 예상 밖 응답(최상위 키: ${keys || "없음"}, 기대: ${expectedKey})을 반환했습니다. ` +
+          `조회 조건 불일치·오류 응답일 수 있습니다 — "0건"이 아니라 확인 실패로 처리하세요.`
+      )
+    }
+  }
+
+  /**
    * API 키 결정 순서:
    * 1. 요청별 override 키
    * 2. 현재 요청 컨텍스트의 API 키 (HTTP stateless 모드)
@@ -453,6 +474,8 @@ export class LawApiClient {
     apiKey?: string
     /** 검색 XML의 기대 루트 (예: "CgmExpc") — 지정 시 불일치는 오류로 throw (0건 위장 방지) */
     expectedRoot?: string
+    /** JSON 응답의 기대 최상위 키 (예: "법령") — 부재 시 throw (JSON 경로의 0건 위장 방지) */
+    expectedJsonKey?: string
     /** 도구 deadline 취소 전파 — abort 시 재시도 없이 즉시 중단 (쿼터 보호) */
     signal?: AbortSignal
   }): Promise<string> {
@@ -488,6 +511,13 @@ export class LawApiClient {
     // 검색 XML은 루트 검증 — 정상 형식 오류 XML의 "0건" 위장 방지
     if (params.type === "XML" && params.expectedRoot) {
       this.assertXmlRoot(text, [params.expectedRoot], `fetchApi(${params.target})`)
+    }
+    // JSON도 같은 가드가 필요하다 — 법제처는 조회 실패 시 빈 본문이 아니라
+    // 루트 키가 다른 짧은 JSON(예: {"Law":{...}} 42바이트)을 200으로 돌려준다.
+    // 이걸 그대로 파싱하면 `?.법령`이 undefined가 되어 "조문 없음(✗)"으로 위장된다
+    // (Opus B-1: basis_date를 준 fin_verify가 모든 인용을 ✗로 판정하던 원인)
+    if (params.type === "JSON" && params.expectedJsonKey) {
+      this.assertJsonKey(text, params.expectedJsonKey, `fetchApi(${params.target})`)
     }
 
     return text
