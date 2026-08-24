@@ -36,19 +36,34 @@ export const FIN_CALC_TOOL = {
     "[재무·세무·회계 전용 — 법정 한도 계산은 직접 계산하지 말고 이 도구를 사용] " +
     "세법에 산식이 명문화된 한도를 결정형 코드로 계산한다 (계산 과정·근거 조문 동봉). " +
     "지원: 임원퇴직금한도(법인세법 시행령 §44④2), 기업업무추진비한도(법인세법 §25④).",
+  // properties(평면)와 oneOf(조건부 필수)를 함께 둔다 — 평면 목록만 보면 어떤 인자가
+  // 어느 계산에 필수인지 알 수 없어 LLM이 필수 인자를 빠뜨린다. oneOf를 못 읽는
+  // 클라이언트도 properties로 종전대로 동작한다 (Codex 리뷰)
   inputSchema: {
     type: "object",
     properties: {
       calc_type: { type: "string", enum: ["임원퇴직금한도", "기업업무추진비한도"], description: "계산 유형" },
-      annual_salary: { type: "number", description: "[임원퇴직금한도] 퇴직 직전 1년 총급여액 (원)" },
-      years: { type: "number", description: "[임원퇴직금한도] 근속 연수 (년)" },
-      months: { type: "number", description: "[임원퇴직금한도] 1년 미만 잔여 개월 (기본 0)" },
-      revenue: { type: "number", description: "[기업업무추진비한도] 일반 수입금액 (원)" },
-      related_party_revenue: { type: "number", description: "[기업업무추진비한도] 특수관계인 거래 수입금액 (원, 기본 0)" },
+      annual_salary: { type: "number", exclusiveMinimum: 0, description: "[임원퇴직금한도·필수] 퇴직 직전 1년 총급여액 (원)" },
+      years: { type: "integer", minimum: 0, description: "[임원퇴직금한도·필수] 근속 연수 (년)" },
+      months: { type: "integer", minimum: 0, maximum: 11, description: "[임원퇴직금한도] 1년 미만 잔여 개월 (기본 0)" },
+      revenue: { type: "number", minimum: 0, description: "[기업업무추진비한도·필수] 일반 수입금액 (원)" },
+      related_party_revenue: { type: "number", minimum: 0, description: "[기업업무추진비한도] 특수관계인 거래 수입금액 (원, 기본 0)" },
       is_sme: { type: "boolean", description: "[기업업무추진비한도] 중소기업 여부 (기본 false)" },
-      business_months: { type: "number", description: "[기업업무추진비한도] 사업연도 월수 (기본 12)" },
+      business_months: { type: "integer", minimum: 1, maximum: 12, description: "[기업업무추진비한도] 사업연도 월수 (기본 12)" },
     },
     required: ["calc_type"],
+    oneOf: [
+      {
+        title: "임원퇴직금한도",
+        properties: { calc_type: { const: "임원퇴직금한도" } },
+        required: ["calc_type", "annual_salary", "years"],
+      },
+      {
+        title: "기업업무추진비한도",
+        properties: { calc_type: { const: "기업업무추진비한도" } },
+        required: ["calc_type", "revenue"],
+      },
+    ],
   },
   annotations: { readOnlyHint: true, idempotentHint: true },
 } as const
@@ -90,13 +105,35 @@ export async function handleFinCalc(
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   const parsed = FinCalcInputSchema.safeParse(rawInput)
   if (!parsed.success) {
+    // 어떤 인자가 왜 필요한지 한글로 안내한다 — zod 기본 메시지는 영어이고
+    // "expected number, received undefined"만으로는 무엇을 채울지 알기 어렵다
+    const labels: Record<string, string> = {
+      annual_salary: "annual_salary(퇴직 직전 1년 총급여액, 원)",
+      years: "years(근속 연수, 년)",
+      months: "months(1년 미만 잔여 개월, 0~11)",
+      revenue: "revenue(일반 수입금액, 원)",
+      related_party_revenue: "related_party_revenue(특수관계인 거래 수입금액, 원)",
+      is_sme: "is_sme(중소기업 여부)",
+      business_months: "business_months(사업연도 월수, 1~12)",
+    }
+    const detail = parsed.error.issues
+      .map((i) => {
+        const key = String(i.path[0] ?? "")
+        const label = labels[key] || key || "입력"
+        if (key === "calc_type") {
+          return `calc_type은 "임원퇴직금한도" 또는 "기업업무추진비한도" 중 하나여야 합니다`
+        }
+        return i.code === "invalid_type" && /undefined/.test(i.message)
+          ? `${label}가 필요합니다`
+          : `${label}: ${i.message}`
+      })
+      .join("; ")
+    const example =
+      (rawInput as { calc_type?: string } | null)?.calc_type === "기업업무추진비한도"
+        ? `{ "calc_type": "기업업무추진비한도", "revenue": 15000000000, "is_sme": false }`
+        : `{ "calc_type": "임원퇴직금한도", "annual_salary": 120000000, "years": 5, "months": 3 }`
     return {
-      content: [
-        {
-          type: "text",
-          text: `[INVALID_PARAMETER] fin_calc: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}\n💡 예: { "calc_type": "임원퇴직금한도", "annual_salary": 120000000, "years": 5, "months": 3 }`,
-        },
-      ],
+      content: [{ type: "text", text: `[INVALID_PARAMETER] fin_calc: ${detail}\n💡 예: ${example}` }],
       isError: true,
     }
   }

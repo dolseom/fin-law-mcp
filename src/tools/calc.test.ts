@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { calcExecutiveSeveranceLimit, calcEntertainmentLimit, handleFinCalc } from "./calc.js"
+import { calcExecutiveSeveranceLimit, calcEntertainmentLimit, handleFinCalc, FIN_CALC_TOOL } from "./calc.js"
 
 describe("임원퇴직금한도 (법인세법 시행령 §44④2)", () => {
   it("총급여 1.2억 · 근속 5년 → 6,000만원", () => {
@@ -59,5 +59,47 @@ describe("handleFinCalc 계약", () => {
     const res = await handleFinCalc(null, { calc_type: "임원퇴직금한도" })
     expect(res.isError).toBe(true)
     expect(res.content[0].text).toContain("INVALID_PARAMETER")
+  })
+})
+
+describe("입력 스키마 — 조건부 필수 (Codex 리뷰: oneOf)", () => {
+  const branchOf = (t: string) =>
+    (FIN_CALC_TOOL.inputSchema as any).oneOf.find((b: any) => b.properties.calc_type.const === t)
+
+  it("계산 유형별 필수 인자가 스키마에 표현된다 (평면 목록만으론 알 수 없음)", () => {
+    expect(branchOf("임원퇴직금한도").required).toEqual(["calc_type", "annual_salary", "years"])
+    expect(branchOf("기업업무추진비한도").required).toEqual(["calc_type", "revenue"])
+  })
+
+  it("oneOf를 못 읽는 클라이언트도 쓸 수 있게 properties는 평면으로 남긴다", () => {
+    const props = (FIN_CALC_TOOL.inputSchema as any).properties
+    for (const k of ["calc_type", "annual_salary", "years", "months", "revenue", "related_party_revenue", "is_sme", "business_months"]) {
+      expect(props[k]).toBeDefined()
+    }
+  })
+
+  it("스키마의 필수 목록이 zod 런타임 검증과 일치한다 (문서와 구현 괴리 방지)", async () => {
+    // 스키마가 요구하는 것만 채우면 실제로 통과해야 한다
+    const ok1 = await handleFinCalc(null, { calc_type: "임원퇴직금한도", annual_salary: 120_000_000, years: 5 })
+    expect(ok1.isError).toBeFalsy()
+    const ok2 = await handleFinCalc(null, { calc_type: "기업업무추진비한도", revenue: 5_000_000_000 })
+    expect(ok2.isError).toBeFalsy()
+    // 하나라도 빠지면 실패해야 한다
+    const ng = await handleFinCalc(null, { calc_type: "기업업무추진비한도" })
+    expect(ng.isError).toBe(true)
+  })
+
+  it("오류 메시지가 한글로 무엇이 필요한지 알려준다", async () => {
+    const res = await handleFinCalc(null, { calc_type: "임원퇴직금한도" })
+    const t = res.content[0].text
+    expect(t).toContain("총급여액")
+    expect(t).toContain("근속 연수")
+    expect(t).not.toContain("expected number") // zod 기본 영어 메시지 노출 금지
+  })
+
+  it("계산 유형 오기는 선택지를 안내한다", async () => {
+    const res = await handleFinCalc(null, { calc_type: "없는유형" })
+    expect(res.content[0].text).toContain("임원퇴직금한도")
+    expect(res.content[0].text).toContain("기업업무추진비한도")
   })
 })
