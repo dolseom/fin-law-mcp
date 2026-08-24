@@ -37,6 +37,21 @@ describe("createSemaphore", () => {
     expect(order).toEqual([1, 2, 3])
   })
 
+  it("해제 직후 새 acquire가 대기자의 슬롯을 가로채지 못한다 (Opus I-c 회귀)", async () => {
+    // release가 running--을 먼저 하고 대기자를 마이크로태스크로 깨우면, 그 사이
+    // 새 acquire가 동기적으로 빈 슬롯을 차지해 상한을 넘긴다 (max=2인데 active=3)
+    const sem = createSemaphore(2)
+    const rels: Array<() => void> = []
+    for (let i = 0; i < 5; i++) void sem.acquire().then((r) => rels.push(r))
+    await tick()
+    expect(sem.active()).toBe(2)
+
+    rels[0]() // 1건 해제 — 대기자에게 슬롯이 넘어가야 한다
+    void sem.acquire() // 즉시 끼어드는 새 요청
+    await tick()
+    expect(sem.active()).toBe(2) // 3이면 상한 초과 (수정 전 실측값)
+  })
+
   it("release를 두 번 호출해도 카운트가 깨지지 않는다", async () => {
     const sem = createSemaphore(1)
     const release = await sem.acquire()
