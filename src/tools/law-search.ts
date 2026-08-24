@@ -27,6 +27,11 @@ import {
 export const FinLawSearchInputSchema = z.object({
   query: z.string().min(1).describe("검색어 (법령명 또는 법령명+키워드)"),
   include_ordinance: z.boolean().default(false).describe("자치법규(조례) 검색 포함 — 지방세 감면 조례 확인 시에만 true"),
+  basis_date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "기준일은 YYYY-MM-DD 형식이어야 합니다")
+    .optional()
+    .describe("기준일 (YYYY-MM-DD) — 해당 시점 시행 중이던 법령으로 검색"),
 })
 
 export const FIN_LAW_SEARCH_TOOL = {
@@ -40,6 +45,7 @@ export const FIN_LAW_SEARCH_TOOL = {
     properties: {
       query: { type: "string", description: "검색어 (법령명 또는 법령명+키워드)" },
       include_ordinance: { type: "boolean", description: "지방세 감면 조례 확인 시에만 true (기본 false)" },
+      basis_date: { type: "string", description: "기준일 YYYY-MM-DD (생략 시 현행) — 해당 시점 시행본으로 검색" },
     },
     required: ["query"],
   },
@@ -75,7 +81,23 @@ function parseLawBlocks(xml: string): ScoredLaw[] {
   }))
 }
 
-function scoreLaw(item: ScoredLaw, query: string): number {
+/**
+ * 기준일 범위 검색 결과에서 법령별로 "그 시점 시행 중이던 1건"만 남긴다.
+ * 범위 검색은 한 법령의 여러 개정본을 모두 돌려주므로, 그대로 두면 같은 법령이
+ * 시행일만 다른 채 여러 줄로 나와 어느 것이 그 시점 현행인지 알 수 없다.
+ */
+function pickVersionsAt(items: ScoredLaw[], basisYmd: string): ScoredLaw[] {
+  const best = new Map<string, ScoredLaw>()
+  for (const it of items) {
+    if (!/^\d{8}$/.test(it.시행일자) || it.시행일자 > basisYmd) continue
+    const key = compactName(it.법령명)
+    const prev = best.get(key)
+    if (!prev || it.시행일자 > prev.시행일자) best.set(key, it)
+  }
+  return [...best.values()]
+}
+
+function scoreLaw(item: ScoredLaw, query: string, basisMode = false): number {
   let s = 0
   const cQuery = compactName(query)
   const cName = compactName(item.법령명)
@@ -83,14 +105,16 @@ function scoreLaw(item: ScoredLaw, query: string): number {
   if (FIN_MINISTRY_CODES[item.소관부처코드]) s += 30
   if (cName === cQuery) s += 20
   else if (cName.startsWith(cQuery)) s += 10
-  if (item.현행연혁 === "연혁") s -= 30
+  // 기준일 검색에서는 연혁이 곧 정답이므로 강등하지 않는다
+  if (item.현행연혁 === "연혁" && !basisMode) s -= 30
   if (item.제개정구분 === "폐지") s -= 20
   return s
 }
 
-function formatLawLine(item: ScoredLaw): string {
+function formatLawLine(item: ScoredLaw, basisMode = false): string {
   const flags: string[] = []
-  if (item.현행연혁 === "연혁") flags.push("⚠연혁(과거본)")
+  // 기준일 검색에서는 과거본이 정상 결과다 — 경고를 붙이면 정상을 이상으로 읽게 된다
+  if (item.현행연혁 === "연혁" && !basisMode) flags.push("⚠연혁(과거본)")
   if (item.제개정구분 === "폐지") flags.push("⚠폐지")
   if (isFutureDate(item.시행일자)) flags.push("📅시행예정")
   const flagStr = flags.length ? ` ${flags.join(" ")}` : ""
@@ -108,7 +132,8 @@ export async function handleFinLawSearch(
       isError: true,
     }
   }
-  const { query, include_ordinance } = parsed.data
+  const { query, include_ordinance, basis_date } = parsed.data
+  const basisYmd = basis_date ? basis_date.replace(/-/g, "") : undefined
 
   // 검색어에서 부가 키워드 제거 ("관세법 과태료 기준" → "관세법")
   const stripped = stripNonLawKeywords(query).trim() || query
@@ -120,9 +145,20 @@ export async function handleFinLawSearch(
     let usedQuery = stripped
     let totalCnt = "0"
     for (const q of ladderQueries(stripped, 3)) {
-      const xml = await apiClient.searchLaw(q, undefined, 50)
+      // 기준일 검색은 eflaw + efYd **범위** 문법으로만 동작한다 —
+      // 단일 efYd는 법제처가 조용히 무시하고 현행 결과를 준다 (실측)
+      const xml = basisYmd
+        ? await apiClient.fetchApi({
+            endpoint: "lawSearch.do",
+            target: "eflaw",
+            type: "XML",
+            extraParams: { query: q, display: "100", efYd: `19000101~${basisYmd}` },
+            expectedRoot: "LawSearch",
+          })
+        : await apiClient.searchLaw(q, undefined, 50)
       totalCnt = extractTag(xml, "totalCnt") || "0"
       items = parseLawBlocks(xml)
+      if (basisYmd) items = pickVersionsAt(items, basisYmd)
       if (items.length > 0) {
         usedQuery = q
         break
@@ -132,7 +168,8 @@ export async function handleFinLawSearch(
     if (items.length === 0) {
       // 0건이어도 주제어 힌트는 준다 (주제어→법령 매핑 부재가 기존 병목)
       const hints = TOPIC_LAW_HINTS.filter((h) => h.pattern.test(query))
-      let text = `[LAW_NOT_FOUND] "${stripped}" 검색 결과 0건 (정상 조회 — ✗없음)${strippedNote}`
+      const basisSuffix = basis_date ? ` — ${basis_date} 시점에 시행 중이던 법령 없음 (제정 이전이거나 표기 확인 필요)` : ""
+      let text = `[LAW_NOT_FOUND] "${stripped}" 검색 결과 0건 (정상 조회 — ✗없음)${strippedNote}${basisSuffix}`
       if (hints.length > 0) {
         text += `\n💡 주제어 힌트: ${[...new Set(hints.flatMap((h) => h.laws))].join(" · ")} — 이 법령명으로 fin_article 또는 재검색을 시도하세요`
       }
@@ -140,16 +177,18 @@ export async function handleFinLawSearch(
       return { content: [{ type: "text", text }] }
     }
 
-    items.forEach((i) => (i.score = scoreLaw(i, usedQuery)))
+    items.forEach((i) => (i.score = scoreLaw(i, usedQuery, !!basisYmd)))
     items.sort((a, b) => b.score - a.score || (b.시행일자 > a.시행일자 ? 1 : -1))
 
     const top = items.slice(0, 10)
     const demoted = items.length - top.length
 
-    let text = `[기준: 현행] 법령 검색 — 전체 ${totalCnt}건 중 재무 관련도순 상위 ${top.length}건`
+    let text = basis_date
+      ? `[기준일: ${basis_date} 시행 기준] 법령 검색 — 해당 시점 시행본 ${items.length}건 중 재무 관련도순 상위 ${top.length}건`
+      : `[기준: 현행] 법령 검색 — 전체 ${totalCnt}건 중 재무 관련도순 상위 ${top.length}건`
     if (usedQuery !== stripped) text += ` — 검색어 축약: "${stripped}" → "${usedQuery}"`
     text += strippedNote + "\n"
-    text += top.map(formatLawLine).join("\n")
+    text += top.map((t) => formatLawLine(t, !!basisYmd)).join("\n")
     if (demoted > 0) text += `\n  (관련도 하위 ${demoted}건 생략 — 필요 시 더 구체적인 법령명으로 재검색)`
 
     // 주제어 힌트 (상위 결과에 힌트 법령이 이미 있으면 생략)
