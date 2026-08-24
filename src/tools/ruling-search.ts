@@ -47,6 +47,11 @@ const DOMAIN_AUTHORITY: Record<Domain, string> = {
 export const FinRulingSearchInputSchema = z.object({
   query: z.string().min(1).describe("쟁점 검색어 (예: 퇴직금 중간정산 손금)"),
   domains: z.array(z.enum(DOMAINS)).default([...DOMAINS]).describe("검색 도메인 (기본: 4곳 전부)"),
+  basis_date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "기준일은 YYYY-MM-DD 형식이어야 합니다")
+    .optional()
+    .describe("기준일 (YYYY-MM-DD) — 이 날짜까지 나온 예규·재결·판례만 (회신·의결·선고일 기준)"),
 })
 
 export const FIN_RULING_SEARCH_TOOL = {
@@ -64,6 +69,7 @@ export const FIN_RULING_SEARCH_TOOL = {
         items: { type: "string", enum: [...DOMAINS] },
         description: "검색 도메인 (기본: nts·tax_tribunal·interpretation·precedent 전부)",
       },
+      basis_date: { type: "string", description: "기준일 YYYY-MM-DD — 이 날짜까지 나온 자료만 (회신·의결·선고일 기준)" },
     },
     required: ["query"],
   },
@@ -85,7 +91,12 @@ function normDate(raw: string): string {
 }
 
 /** 도메인별 검색 — 0건이면 사다리 1회 축약 (오류에는 재시도 금지) */
-async function searchDomain(apiClient: LawApiClient, domain: Domain, query: string): Promise<SectionResult & { items?: UnifiedItem[]; usedQuery?: string }> {
+async function searchDomain(
+  apiClient: LawApiClient,
+  domain: Domain,
+  query: string,
+  basisYmd?: string
+): Promise<SectionResult & { items?: UnifiedItem[]; usedQuery?: string; excludedByBasis?: number }> {
   const queries = ladderQueries(query, 2)
   try {
     for (const q of queries) {
@@ -146,7 +157,21 @@ async function searchDomain(apiClient: LawApiClient, domain: Domain, query: stri
         })
         // 최신순 재정렬 (법제처는 가나다순 — 최신 예규가 묻히는 문제)
         deduped.sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : 0))
-        return { status: "성공", text: "", items: deduped.slice(0, 5), usedQuery: q }
+        // 기준일 필터는 상위 5건 자르기 **전에** 적용한다 — 뒤에 적용하면 상위가
+        // 전부 기준일 이후일 때 실제로는 있는 과거 자료가 0건으로 보인다.
+        // 예규·재결·판례는 시행일이 아니라 회신·의결·선고일 기준이라 API 필터
+        // 대신 파싱된 일자로 직접 거른다 (일자 미상은 남기고 아래에서 고지)
+        let excludedByBasis = 0
+        let filtered = deduped
+        if (basisYmd) {
+          filtered = deduped.filter((i) => {
+            if (!/^\d{8}$/.test(i.date)) return true // 일자 미상은 버리지 않는다
+            const keep = i.date <= basisYmd
+            if (!keep) excludedByBasis++
+            return keep
+          })
+        }
+        return { status: "성공", text: "", items: filtered.slice(0, 5), usedQuery: q, excludedByBasis }
       }
     }
     return { status: "성공", text: "", items: [], usedQuery: queries[queries.length - 1] }
@@ -166,9 +191,12 @@ export async function handleFinRulingSearch(
       isError: true,
     }
   }
-  const { query, domains } = parsed.data
+  const { query, domains, basis_date } = parsed.data
+  const basisYmd = basis_date ? basis_date.replace(/-/g, "") : undefined
 
-  const results = await Promise.all(domains.map((d) => searchDomain(apiClient, d, query).then((r) => ({ domain: d, r }))))
+  const results = await Promise.all(
+    domains.map((d) => searchDomain(apiClient, d, query, basisYmd).then((r) => ({ domain: d, r })))
+  )
 
   const failedDomains = results.filter(({ r }) => r.status !== "성공")
   const okDomains = results.filter(({ r }) => r.status === "성공")
@@ -179,17 +207,23 @@ export async function handleFinRulingSearch(
       ? "전체 성공"
       : `부분 성공 — 실패: ${failedDomains.map(({ domain, r }) => `${DOMAIN_LABEL[domain]}(${r.reason})`).join(", ")}`
 
-  let text = `[기준: 현행] 통합 해석·결정례 검색 — "${query}" · ${overall}\n`
+  let text = basis_date
+    ? `[기준일: ${basis_date}까지] 통합 해석·결정례 검색 — "${query}" · ${overall}\n※ 회신·의결·선고일이 기준일 이후인 자료는 제외했습니다 (일자 미상은 남김)\n`
+    : `[기준: 현행] 통합 해석·결정례 검색 — "${query}" · ${overall}\n`
 
   for (const { domain, r } of okDomains) {
     const label = DOMAIN_LABEL[domain]
     const items = r.items || []
     const ladderNote = r.usedQuery && r.usedQuery !== query ? ` (검색어 축약: "${r.usedQuery}")` : ""
+    const basisNote = r.excludedByBasis ? ` · 기준일 이후 ${r.excludedByBasis}건 제외` : ""
     if (items.length === 0) {
-      text += `\n■ ${label} — 0건${ladderNote} (정상 조회 결과 없음)\n`
+      // 기준일 때문에 비었으면 "자료 없음"과 구분해 표기한다 (조용한 실패 금지)
+      text += r.excludedByBasis
+        ? `\n■ ${label} — 0건${ladderNote} (검색된 ${r.excludedByBasis}건이 모두 기준일 이후 — 기준일 이전 자료는 검색 상위에 없을 수 있음)\n`
+        : `\n■ ${label} — 0건${ladderNote} (정상 조회 결과 없음)\n`
       continue
     }
-    text += `\n■ ${label} [${DOMAIN_AUTHORITY[domain]}] — 최신순 ${items.length}건${ladderNote}\n`
+    text += `\n■ ${label} [${DOMAIN_AUTHORITY[domain]}] — 최신순 ${items.length}건${ladderNote}${basisNote}\n`
     text += items.map((i) => `  · ${i.docNo || "(번호없음)"} (${i.dateDisplay}) ${i.title}`).join("\n") + "\n"
   }
   for (const { domain, r } of failedDomains) {
