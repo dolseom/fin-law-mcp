@@ -135,7 +135,7 @@ export async function fetchWithRetry(
                 `법제처 API 비정상 응답(${bad === "empty" ? "빈 본문" : "HTML 페이지"}) - ${maskSensitiveUrl(url)}`
               )
               if (attempt < retries) {
-                await sleep(getRetryDelay(response, retryDelay, attempt))
+                await sleep(getRetryDelay(response, retryDelay, attempt), outerSignal)
                 continue
               }
               throw lastError // 재시도 소진 — 불량 응답을 정상으로 반환하지 않는다
@@ -148,7 +148,7 @@ export async function fetchWithRetry(
       // Retryable error - check if we have retries left
       if (attempt < retries) {
         const delay = getRetryDelay(response, retryDelay, attempt)
-        await sleep(delay)
+        await sleep(delay, outerSignal)
         continue
       }
 
@@ -175,7 +175,7 @@ export async function fetchWithRetry(
       // Retry on network errors
       if (attempt < retries) {
         const delay = getRetryDelay(null, retryDelay, attempt)
-        await sleep(delay)
+        await sleep(delay, outerSignal)
         continue
       }
     }
@@ -199,6 +199,20 @@ function getRetryDelay(response: Response | null, retryDelay: number, attempt: n
   return baseDelay + Math.random() * baseDelay * 0.5
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+/**
+ * abort 가능한 대기. 외부 취소(도구 deadline)가 재시도 backoff 중에 걸리면
+ * 남은 대기를 건너뛰고 즉시 깨어난다 — 이게 없으면 20ms에 취소해도 backoff
+ * 1초를 다 기다린 뒤에야 끝난다 (Codex 리뷰 중요 4).
+ */
+function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
+  if (signal?.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms)
+    function done() {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", done)
+      resolve()
+    }
+    signal?.addEventListener("abort", done, { once: true })
+  })
 }

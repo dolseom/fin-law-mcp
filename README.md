@@ -56,8 +56,10 @@ npm install && npm run build
 | 변수 | 설명 |
 |------|------|
 | `LAW_OC` | 법제처 OPEN API 키 (필수) |
-| `FIN_NTS_BODY_ENABLED` | 국세청 예규 본문 조회 (기본 on — `false`로 목록만) |
+| `FIN_NTS_BODY_ENABLED` | 국세청 예규 본문 조회 (**기본 off** — 비공식 경로라 명시적 옵트인. `true`로 켜면 본문 동봉) |
 | `FIN_NTS_BODY_TOP_N` | 예규 본문 자동 동봉 건수 (기본 2, 최대 5) |
+| `FIN_DRF_RATE_PER_MIN` / `FIN_DRF_DAILY_CAP` | 법제처 호출 한도 (기본 30/분, 1,500/일) |
+| `FIN_DRF_MAX_CONCURRENCY` | 동시 호출 상한 (기본 4) |
 | `LAW_API_PROTOCOL` / `LAW_RESPONSE_TYPE` | 폐쇄망 http 전환 / XML 장애 시 JSON 우회 |
 
 ## 알아둘 것
@@ -69,9 +71,9 @@ npm install && npm run build
 ## 개발
 
 ```bash
-npm run typecheck   # 타입 검사
-npm test            # 회귀 테스트 (fixture 기반 — 실 API 불필요)
-npx vitest run test/golden-live.test.ts   # 골든셋 라이브 (LAW_OC 필요, 수동)
+npm run typecheck   # 타입 검사 (src + test 전체)
+npm test            # 회귀 테스트 (fixture 기반 — 실 API 불필요, CI 상시)
+npm run test:live   # 골든셋 라이브 (실 법제처 API 호출 — LAW_OC 필요, 수동)
 ```
 
 ## 로드맵

@@ -46,8 +46,12 @@ export class LawApiClient {
 
   /** 모든 DRF 호출의 단일 관문 — 동시 실행 상한(세마포어) + rate limit 게이트를 거친다 */
   private async drfFetch(url: string, opts: Parameters<typeof fetchWithRetry>[1] = DRF_RETRY): Promise<Response> {
+    const signal = opts?.signal as AbortSignal | undefined
     const release = await this.semaphore.acquire()
     try {
+      // 세마포어 대기 중 deadline이 지났으면 호출하지 않는다 — 뒤늦은 호출은
+      // 결과를 쓰지도 못하면서 쿼터만 소모한다 (Codex 리뷰 중요 4)
+      if (signal?.aborted) throw new Error("요청 취소됨(도구 deadline) — 대기 중 취소되어 호출하지 않음")
       this.gate() // 토큰 소모는 실제 호출 직전 — 세마포어 대기 중 소모하지 않는다
       return await fetchWithRetry(url, opts)
     } finally {

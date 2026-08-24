@@ -11,6 +11,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:live": "vitest run --config vitest.live.config.ts",
+    "prepack": "npm run build",
     "start": "node build/index.js"
   },
   "engines": {

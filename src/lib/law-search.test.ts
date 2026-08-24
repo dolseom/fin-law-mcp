@@ -5,7 +5,26 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { lawTierOf, resolvedLawMatches, sameLawFamily } from "./law-search.js"
+import { lawTierOf, resolvedLawMatches, sameLawFamily, stripNonLawKeywords } from "./law-search.js"
+
+describe("stripNonLawKeywords — 법령 종류 보존 (Codex 리뷰 중요 3 회귀)", () => {
+  it("시행령·시행규칙은 부가 키워드가 아니라 법령 종류이므로 보존한다", () => {
+    // 제거하면 검색이 본법으로 축약돼 I1의 종류 일치 필터가 검색 경로에서 무력해진다
+    expect(stripNonLawKeywords("법인세법 시행령")).toBe("법인세법 시행령")
+    expect(stripNonLawKeywords("법인세법 시행규칙")).toBe("법인세법 시행규칙")
+    expect(stripNonLawKeywords("소득세법 시행령 제163조")).toContain("시행령")
+  })
+
+  it("진짜 부가 키워드는 계속 제거한다", () => {
+    expect(stripNonLawKeywords("관세법 과태료 기준")).toBe("관세법")
+    expect(stripNonLawKeywords("법인세법 판례 해석")).toBe("법인세법")
+    expect(stripNonLawKeywords("부가가치세법 별표")).toBe("부가가치세법")
+  })
+
+  it("시행령 + 부가 키워드가 섞이면 종류만 남긴다", () => {
+    expect(stripNonLawKeywords("법인세법 시행령 별표")).toBe("법인세법 시행령")
+  })
+})
 
 describe("lawTierOf", () => {
   it("접미사로 본법/시행령/시행규칙을 판별한다", () => {

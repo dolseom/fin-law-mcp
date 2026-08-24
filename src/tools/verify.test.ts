@@ -127,6 +127,31 @@ describe("extractCitations — 문맥 흡수·조응 오인·「」 우회 (Opus
   })
 })
 
+describe("조응 시행규칙 형태 (Codex 리뷰 중요 5 회귀)", () => {
+  it("'동 시행규칙 제N조'를 추출한다 (누락되면 검증 없이 넘어감)", () => {
+    const cites = extractCitations("법인세법 제26조에 따라 처리하고 동 시행규칙 제3조를 본다.")
+    expect(cites).toHaveLength(2)
+    expect(cites[1].lawName).toBe("법인세법 시행규칙")
+    expect(cites[1].article).toBe("제3조")
+  })
+
+  it("'같은 규칙 제N조'도 추출한다", () => {
+    const cites = extractCitations("소득세법 제12조를 본다. 같은 규칙 제5조도 확인한다.")
+    expect(cites).toHaveLength(2)
+    expect(cites[1].lawName).toBe("소득세법 시행규칙")
+  })
+
+  it("'동 시행령'은 시행령으로 유지된다 (회귀 없음)", () => {
+    const cites = extractCitations("법인세법 제26조에 따라 처리하고 동 시행령 제43조를 본다.")
+    expect(cites[1].lawName).toBe("법인세법 시행령")
+  })
+
+  it("'같은 법 시행규칙' 형태도 계속 동작한다", () => {
+    const cites = extractCitations("법인세법 제26조에 따라 처리하고 같은 법 시행규칙 제3조를 본다.")
+    expect(cites[1].lawName).toBe("법인세법 시행규칙")
+  })
+})
+
 describe("extractCitationsWithTotal — 절단 고지 (Opus I4 회귀)", () => {
   it("상한(15건) 초과 시 절단 전 총수를 함께 돌려준다", () => {
     const many = Array.from({ length: 22 }, (_, i) => `법인세법 제${i + 1}조`).join(", ")

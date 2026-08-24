@@ -67,9 +67,11 @@ const LAW_NAME_CHARS = `[가-힣0-9${IP}\\s]`
 const ARTICLE_PART = `제\\s*\\d+\\s*조(?:의\\s*\\d+)?`
 const SUFFIX_PART = `((?:\\s*시행령|\\s*시행규칙)?)`
 // 조응 인용 — (?<![가-힣])가 없으면 "노동법 제5조"의 '동법'이 조응으로 매칭돼
-// 직전 법령의 조문으로 검증되고, 틀린 인용이 ✓를 받는다 (Opus B2)
+// 직전 법령의 조문으로 검증되고, 틀린 인용이 ✓를 받는다 (Opus B2).
+// 시행규칙 형태("동 시행규칙", "같은 규칙")도 포함 — 시행령만 있으면 시행규칙 인용이
+// 통째로 누락돼 검증 없이 넘어간다 (Codex 리뷰 중요 5)
 const ANAPHOR_ARTICLE_RE = new RegExp(
-  `(?<![가-힣])(같은\\s*법|동법|동\\s*시행령|같은\\s*영)${SUFFIX_PART}\\s*(${ARTICLE_PART})`,
+  `(?<![가-힣])(같은\\s*법|동법|동\\s*시행령|같은\\s*영|동\\s*시행규칙|같은\\s*규칙)${SUFFIX_PART}\\s*(${ARTICLE_PART})`,
   "g"
 )
 // 명시 법령명 + 제N조(의M)
@@ -163,8 +165,13 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     const [, anaphorPart, suffix, article] = m
     const end = m.index! + m[0].length
     if (articleEnds.has(end)) continue
-    const wantsDecree = /동\s*시행령|같은\s*영/.test(anaphorPart)
-    const suffixNorm = suffix ? suffix.trim() : wantsDecree ? "시행령" : ""
+    // 조응 표현 자체가 종류를 함의하는 경우("동 시행령"→시행령, "동 시행규칙"→시행규칙)
+    const impliedTier = /동\s*시행규칙|같은\s*규칙/.test(anaphorPart)
+      ? "시행규칙"
+      : /동\s*시행령|같은\s*영/.test(anaphorPart)
+        ? "시행령"
+        : ""
+    const suffixNorm = suffix ? suffix.trim() : impliedTier
     hits.push({
       idx: m.index!,
       c: { raw: m[0].trim(), lawName: "", article: normArticle(article), kind: "법령조문" },
