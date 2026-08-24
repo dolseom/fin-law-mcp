@@ -104,6 +104,7 @@ export async function handleFinAnnex(
     if (entries.length === 0) {
       let text = `[기준: 현행] ${law} ${kindLabel} — 0건 (정상 조회 결과 없음)`
       if (keyword) text += `\n💡 키워드 "${keyword}" 없이 재시도하거나, 내용연수표·세율표는 시행규칙(예: "${law.replace(/(시행령|시행규칙)?$/, "")} 시행규칙")에서 찾으세요`
+      text += `\n\n${SOURCE_FOOTER}`
       return { content: [{ type: "text", text }] }
     }
 

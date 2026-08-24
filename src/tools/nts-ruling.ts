@@ -93,7 +93,7 @@ export async function handleFinNtsRuling(
       content: [
         {
           type: "text",
-          text: `[기준: 현행] 국세청 예규 — 0건 (축약 사다리 ${ladderQueries(query, 4).map((q) => `"${q}"`).join(" → ")} 전부 0건 — 정상 조회 결과 없음)\n다른 실무 용어로 재시도하거나 fin_ruling_search로 심판례·판례를 함께 확인하세요.`,
+          text: `[기준: 현행] 국세청 예규 — 0건 (축약 사다리 ${ladderQueries(query, 4).map((q) => `"${q}"`).join(" → ")} 전부 0건 — 정상 조회 결과 없음)\n다른 실무 용어로 재시도하거나 fin_ruling_search로 심판례·판례를 함께 확인하세요.\n\n${SOURCE_FOOTER}`,
         },
       ],
     }

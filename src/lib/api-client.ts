@@ -80,7 +80,9 @@ export class LawApiClient {
    */
   private getApiKey(overrideKey?: string): string {
     const ctxApiKey = requestContext.getStore()?.apiKey
-    const key = overrideKey || ctxApiKey || process.env.LAW_OC || process.env.KOREAN_LAW_API_KEY || this.defaultApiKey
+    // KOREAN_LAW_API_KEY(기존 korean-law MCP의 변수) 폴백은 제거 — 문서 계약은
+    // "LAW_OC만"이고, 다른 서버의 키를 조용히 빌려 쓰면 rate limit 공유가 숨는다 (Codex 리뷰)
+    const key = overrideKey || ctxApiKey || process.env.LAW_OC || this.defaultApiKey
     if (!key) {
       throw new Error("API 키가 필요합니다. 법제처(https://open.law.go.kr/LSO/openApi/guideResult.do)에서 발급받으세요.")
     }

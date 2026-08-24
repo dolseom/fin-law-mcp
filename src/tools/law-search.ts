@@ -136,6 +136,7 @@ export async function handleFinLawSearch(
       if (hints.length > 0) {
         text += `\n💡 주제어 힌트: ${[...new Set(hints.flatMap((h) => h.laws))].join(" · ")} — 이 법령명으로 fin_article 또는 재검색을 시도하세요`
       }
+      text += `\n\n${SOURCE_FOOTER}`
       return { content: [{ type: "text", text }] }
     }
 

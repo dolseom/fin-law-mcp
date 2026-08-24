@@ -18,6 +18,9 @@ import { isAdminRuleName, verifyAdminRuleCitation } from "./admin-rule-citation.
 import { SOURCE_FOOTER, truncateWithHint } from "../lib/fin-common.js"
 
 const MAX_CITATIONS = 15
+// 전체 시간 상한 — 순차 검증(15건 × 조회 2~3회)이 무한정 길어지지 않게 (Codex 리뷰).
+// 초과분은 ⚠ 미검증으로 정직하게 표기한다 (조용한 실패 금지)
+const VERIFY_DEADLINE_MS = 20_000
 
 export const FinVerifyInputSchema = z.object({
   text: z.string().min(1).describe("검증할 초안 텍스트 (법령·조문·고시·예규 인용 포함)"),
@@ -347,15 +350,23 @@ export async function handleFinVerify(
       content: [
         {
           type: "text",
-          text: `[기준: ${basis_date || "현행"}] 인용 검증 — 추출된 인용 0건\n법령명+조문(예: 법인세법 제26조), 「고시명」, 기본통칙 표기가 없는 텍스트입니다. 검증 대상 표기를 확인하세요.`,
+          text: `[기준: ${basis_date || "현행"}] 인용 검증 — 추출된 인용 0건\n법령명+조문(예: 법인세법 제26조), 「고시명」, 기본통칙 표기가 없는 텍스트입니다. 검증 대상 표기를 확인하세요.\n\n${SOURCE_FOOTER}`,
         },
       ],
     }
   }
 
-  // 순차 검증 (rate limit 보호 — 인용 수는 15건 상한)
+  // 순차 검증 (rate limit 보호 — 인용 수는 15건 상한, 전체 시간 상한 20초)
+  const deadlineAt = Date.now() + VERIFY_DEADLINE_MS
   const results: CheckResult[] = []
   for (const c of citations) {
+    if (Date.now() > deadlineAt) {
+      results.push({
+        mark: "⚠",
+        line: `⚠ ${c.raw} — 전체 시간 상한(${VERIFY_DEADLINE_MS / 1000}초) 도달로 미검증 (없음 아님). 이 인용은 나눠서 재검증하세요`,
+      })
+      continue
+    }
     if (c.kind === "행정규칙") {
       try {
         const line = await verifyAdminRuleCitation(apiClient, [c.lawName], c.raw, c.lawName)
