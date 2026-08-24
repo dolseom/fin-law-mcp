@@ -15,6 +15,7 @@ import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
 import { findLaws, resolvedLawMatches, sameLawFamily, type LawInfo } from "../lib/law-search.js"
 import { formatFetchFailure } from "../lib/errors.js"
+import { resolveVersionAt } from "../lib/historical-utils.js"
 import { buildJO } from "../lib/law-parser.js"
 import { cleanHtml, flattenContent, groupMokByReset } from "../lib/article-parser.js"
 import { parseThreeTierDelegation } from "../lib/three-tier-parser.js"
@@ -224,6 +225,34 @@ export async function handleFinArticle(
     }
   }
 
+  // ── ①-b 기준일 버전 해소 ──
+  // 현행 MST에 과거 efYd만 붙이면 법제처는 빈 응답을 준다(실측) — 기준일 시점에
+  // 시행 중이던 버전의 MST를 먼저 확보해야 그 시점 조문이 나온다.
+  let basisNote = ""
+  if (efYd) {
+    const { slice, reason } = await resolveVersionAt(apiClient, law.lawName, efYd)
+    if (slice) {
+      law = { ...law, mst: slice.mst, effectiveDate: slice.efYd, status: slice.efYd === law.effectiveDate ? law.status : "연혁" }
+      basisNote =
+        slice.efYd === efYd
+          ? ""
+          : ` (해당일 시행본 없음 → 직전 개정본 ${formatYmd(slice.efYd)} 시행 기준으로 조회)`
+    } else {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `[BASIS_DATE_UNRESOLVED] "${input.law}"의 ${input.basis_date} 시점 시행본을 확정하지 못했습니다 — ⚠판정불가 (없음이 아님).\n` +
+              `사유: ${reason}\n` +
+              `💡 기준일을 빼고 현행으로 조회하거나, 법령명 표기를 확인하세요. LLM은 과거 조문을 추측하지 마세요.`,
+          },
+        ],
+        isError: true,
+      }
+    }
+  }
+
   // ── ② 병렬: 조문 본문 ∥ 3단 위임 ∥ 별표 ──
   let joTitleForRulings = ""
   // deadline 도달 시 진행 중 업스트림 호출을 함께 취소 — 백그라운드 쿼터 소모 방지 (Opus I3)
@@ -389,7 +418,7 @@ export async function handleFinArticle(
   const failedNames = sections.filter((s) => s.r.status !== "성공").map((s) => `${s.name}(${s.r.status}: ${s.r.reason})`)
   const overall = failedNames.length === 0 ? "전체 성공" : `부분 성공 — 실패 섹션: ${failedNames.join(", ")}`
 
-  const basisLine = input.basis_date ? `[기준일: ${input.basis_date} 시행 기준]` : `[기준: 현행]`
+  const basisLine = input.basis_date ? `[기준일: ${input.basis_date} 시행 기준${basisNote}]` : `[기준: 현행]`
   const statusMark = law.status === "연혁" ? " ⚠연혁(폐지·과거본)" : ""
   const publicUrl = `https://www.law.go.kr/법령/${law.lawName}/${articleLabel}`
 

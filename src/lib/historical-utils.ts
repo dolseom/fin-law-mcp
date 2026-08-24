@@ -190,7 +190,8 @@ export async function fetchEffectiveSlices(
   lawName: string,
   fromYmd: string,
   toYmd: string,
-  apiKey?: string
+  apiKey?: string,
+  signal?: AbortSignal
 ): Promise<EffectiveSlice[]> {
   const xml = await apiClient.fetchApi({
     endpoint: "lawSearch.do",
@@ -198,8 +199,56 @@ export async function fetchEffectiveSlices(
     type: "XML",
     extraParams: { query: lawName, display: "100", efYd: `${fromYmd}~${toYmd}` },
     apiKey,
+    signal,
   })
   return parseEffectiveSlices(xml, lawName)
+}
+
+/** 기준일 시점에 시행 중이던 법령 버전 */
+export interface VersionAtResult {
+  /** 기준일 이하 최신 시행본. 못 찾으면 undefined (호출부는 ⚠로 고지할 것) */
+  slice?: EffectiveSlice
+  /** 후보를 못 찾은 사유 — 응답에 그대로 실어 조용한 실패를 막는다 */
+  reason?: string
+}
+
+/**
+ * 기준일 시점에 시행 중이던 법령 버전을 해소한다.
+ *
+ * 왜 필요한가 (실측 2026-08-25):
+ *  - 검색 API에 **단일 efYd를 주면 조용히 무시**된다 (efYd=20200101 결과 = efYd 없음 결과).
+ *    범위 문법(`from~to`)만 실제 필터로 동작한다.
+ *  - 조회 API에 **현행 MST + 과거 efYd**를 주면 빈 응답이 온다.
+ *    → 기준일 버전의 MST를 먼저 확보해야 그 시점 조문을 볼 수 있다.
+ * 이 두 가지 때문에 "기준일을 그대로 efYd에 넘기는" 방식은 동작하지 않는다.
+ */
+export async function resolveVersionAt(
+  apiClient: LawApiClient,
+  lawName: string,
+  basisYmd: string,
+  apiKey?: string,
+  signal?: AbortSignal
+): Promise<VersionAtResult> {
+  let slices: EffectiveSlice[]
+  try {
+    // 1900년부터 기준일까지 — 법제처 display 상한(100)에 걸려도 기준일에 가까운
+    // 슬라이스가 반환분에 포함된다(실측 3케이스). 못 찾으면 아래에서 정직하게 고지한다.
+    slices = await fetchEffectiveSlices(apiClient, lawName, "19000101", basisYmd, apiKey, signal)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { reason: `기준일 버전 조회 실패 (${msg})` }
+  }
+  // parseEffectiveSlices는 시행일 내림차순 정렬 — 기준일 이하 첫 항목이 그 시점 현행
+  const eligible = slices.filter((s) => s.efYd <= basisYmd)
+  if (eligible.length === 0) {
+    return {
+      reason:
+        slices.length === 0
+          ? `기준일 이전 시행 이력을 찾지 못함 (법령명 표기 또는 기준일이 제정 이전인지 확인)`
+          : `기준일 이하 시행본 없음 (검색 상한에 걸렸을 수 있음)`,
+    }
+  }
+  return { slice: eligible[0] }
 }
 
 /** @deprecated Use fetchHistoricalVersionsFull. 단일 페이지(legacy 호환용). */

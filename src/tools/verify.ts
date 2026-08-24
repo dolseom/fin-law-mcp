@@ -16,6 +16,7 @@ import { buildJO } from "../lib/law-parser.js"
 import { toArray } from "../lib/xml-parser.js"
 import { isAdminRuleName, verifyAdminRuleCitation } from "./admin-rule-citation.js"
 import { SOURCE_FOOTER, truncateWithHint } from "../lib/fin-common.js"
+import { resolveVersionAt } from "../lib/historical-utils.js"
 
 const MAX_CITATIONS = 15
 // 전체 시간 상한 — 순차 검증(15건 × 조회 2~3회)이 무한정 길어지지 않게 (Codex 리뷰).
@@ -321,19 +322,31 @@ async function verifyLawCitation(
 
   // 조문 실존 확인
   try {
-    const extra: Record<string, string> = { MST: best.mst, JO: buildJO(c.article) }
+    // 기준일이 있으면 그 시점 시행본의 MST로 조회한다 — 현행 MST + 과거 efYd는
+    // 법제처가 빈 응답을 주므로 "조문 없음(✗)"으로 오판될 수 있다 (실측)
+    let mst = best.mst
+    let basisNote = ""
+    if (efYd) {
+      const { slice, reason } = await resolveVersionAt(apiClient, best.lawName, efYd, undefined, signal)
+      if (!slice) {
+        return { mark: "⚠", line: `⚠ ${c.raw} — 기준일 시행본을 확정하지 못해 판정 불가 (없음 아님): ${reason}` }
+      }
+      mst = slice.mst
+      basisNote = ` · 기준일 시행본: ${slice.efYd.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3")}`
+    }
+    const extra: Record<string, string> = { MST: mst, JO: buildJO(c.article) }
     if (efYd) extra.efYd = efYd
     const jsonText = await apiClient.fetchApi({ endpoint: "lawService.do", target: "eflaw", type: "JSON", extraParams: extra, signal })
     const lawData = JSON.parse(jsonText)?.법령
     const units: any[] = toArray(lawData?.조문?.조문단위)
     const article = units.find((u: any) => u.조문여부 === "조문")
     if (!article) {
-      return { mark: "✗", line: `✗ ${c.raw} — 법령 「${best.lawName}」은 실존하나 ${c.article}가 없음 (정상 조회 후 0건). 조문 번호 확인` }
+      return { mark: "✗", line: `✗ ${c.raw} — 법령 「${best.lawName}」은 실존하나 ${c.article}가 없음 (정상 조회 후 0건)${basisNote}. 조문 번호 확인` }
     }
     const title = article.조문제목 ? ` (${article.조문제목})` : ""
     const histNote = best.status === "연혁" ? " ⚠주의: 연혁(폐지·과거본) 인용" : ""
     const url = encodeURI(`https://www.law.go.kr/법령/${best.lawName}/${c.article}`)
-    return { mark: "✓", line: `✓ ${c.raw} — 실존${title}${histNote} · 검증범위: 조문 실존 확인${trimNote} · ${url}` }
+    return { mark: "✓", line: `✓ ${c.raw} — 실존${title}${histNote} · 검증범위: 조문 실존 확인${trimNote}${basisNote} · ${url}` }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return { mark: "⚠", line: `⚠ ${c.raw} — 조문 조회 실패로 판정 불가 (없음 아님): ${msg}` }
