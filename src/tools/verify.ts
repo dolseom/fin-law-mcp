@@ -265,17 +265,19 @@ interface CheckResult {
  */
 async function findVerifyTarget(
   apiClient: LawApiClient,
-  lawName: string
+  lawName: string,
+  signal?: AbortSignal
 ): Promise<{ laws: LawInfo[]; best?: LawInfo; usedName: string }> {
-  const firstLaws = await findLaws(apiClient, lawName, undefined, 5)
+  const firstLaws = await findLaws(apiClient, lawName, undefined, 5, 100, signal)
   const firstBest = firstLaws.find((l) => resolvedLawMatches(lawName, l.lawName))
   if (firstBest) return { laws: firstLaws, best: firstBest, usedName: lawName }
   let name = lawName
   for (let i = 0; i < 2; i++) {
+    if (signal?.aborted) break // 시간 상한 도달 — 어절 제거 재시도를 더 돌지 않는다
     const words = name.split(" ")
     if (words.length < 2) break
     name = words.slice(1).join(" ")
-    const laws = await findLaws(apiClient, name, undefined, 5)
+    const laws = await findLaws(apiClient, name, undefined, 5, 100, signal)
     const best = laws.find((l) => resolvedLawMatches(name, l.lawName))
     if (best) return { laws, best, usedName: name }
   }
@@ -285,7 +287,8 @@ async function findVerifyTarget(
 async function verifyLawCitation(
   apiClient: LawApiClient,
   c: Citation,
-  efYd?: string
+  efYd?: string,
+  signal?: AbortSignal
 ): Promise<CheckResult> {
   if (!c.lawName) {
     return { mark: "⚠", line: `⚠ ${c.raw} — 조응("같은 법") 선행 법령명을 찾지 못해 판정 불가. 법령명을 명시하세요` }
@@ -294,7 +297,7 @@ async function verifyLawCitation(
   let best: LawInfo | undefined
   let usedName: string
   try {
-    ;({ laws, best, usedName } = await findVerifyTarget(apiClient, c.lawName))
+    ;({ laws, best, usedName } = await findVerifyTarget(apiClient, c.lawName, signal))
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return { mark: "⚠", line: `⚠ ${c.raw} — 조회 실패로 판정 불가 (없음 아님): ${msg}` }
@@ -320,7 +323,7 @@ async function verifyLawCitation(
   try {
     const extra: Record<string, string> = { MST: best.mst, JO: buildJO(c.article) }
     if (efYd) extra.efYd = efYd
-    const jsonText = await apiClient.fetchApi({ endpoint: "lawService.do", target: "eflaw", type: "JSON", extraParams: extra })
+    const jsonText = await apiClient.fetchApi({ endpoint: "lawService.do", target: "eflaw", type: "JSON", extraParams: extra, signal })
     const lawData = JSON.parse(jsonText)?.법령
     const units: any[] = toArray(lawData?.조문?.조문단위)
     const article = units.find((u: any) => u.조문여부 === "조문")
@@ -363,28 +366,41 @@ export async function handleFinVerify(
     }
   }
 
-  // 순차 검증 (rate limit 보호 — 인용 수는 15건 상한, 전체 시간 상한 20초)
-  const deadlineAt = Date.now() + VERIFY_DEADLINE_MS
+  // 순차 검증 (rate limit 보호 — 인용 수는 15건 상한, 전체 시간 상한 20초).
+  // deadline은 인용 사이 확인만으로는 부족하다 — 한 인용의 조회가 길어지면 상한을
+  // 넘겨 계속 돈다. AbortController로 진행 중 호출까지 실제로 끊는다 (Codex 상세 리뷰)
+  const aborter = new AbortController()
+  const deadlineTimer = setTimeout(() => aborter.abort(), VERIFY_DEADLINE_MS)
+  const timedOutLine = (c: Citation) => ({
+    mark: "⚠" as const,
+    line: `⚠ ${c.raw} — 전체 시간 상한(${VERIFY_DEADLINE_MS / 1000}초) 도달로 미검증 (없음 아님). 이 인용은 나눠서 재검증하세요`,
+  })
   const results: CheckResult[] = []
-  for (const c of citations) {
-    if (Date.now() > deadlineAt) {
-      results.push({
-        mark: "⚠",
-        line: `⚠ ${c.raw} — 전체 시간 상한(${VERIFY_DEADLINE_MS / 1000}초) 도달로 미검증 (없음 아님). 이 인용은 나눠서 재검증하세요`,
-      })
-      continue
-    }
-    if (c.kind === "행정규칙") {
-      try {
-        const line = await verifyAdminRuleCitation(apiClient, [c.lawName], c.raw, c.lawName)
-        const mark: CheckResult["mark"] = line.startsWith("✓") ? "✓" : line.startsWith("✗") ? "✗" : "⚠"
-        results.push({ mark, line })
-      } catch (e) {
-        results.push({ mark: "⚠", line: `⚠ ${c.raw} — 행정규칙 조회 실패로 판정 불가: ${e instanceof Error ? e.message : String(e)}` })
+  try {
+    for (const c of citations) {
+      if (aborter.signal.aborted) {
+        results.push(timedOutLine(c))
+        continue
       }
-    } else {
-      results.push(await verifyLawCitation(apiClient, c, efYd))
+      if (c.kind === "행정규칙") {
+        try {
+          const line = await verifyAdminRuleCitation(apiClient, [c.lawName], c.raw, c.lawName)
+          const mark: CheckResult["mark"] = line.startsWith("✓") ? "✓" : line.startsWith("✗") ? "✗" : "⚠"
+          results.push({ mark, line })
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          results.push(
+            /취소됨/.test(msg)
+              ? timedOutLine(c)
+              : { mark: "⚠", line: `⚠ ${c.raw} — 행정규칙 조회 실패로 판정 불가: ${msg}` }
+          )
+        }
+      } else {
+        results.push(await verifyLawCitation(apiClient, c, efYd, aborter.signal))
+      }
     }
+  } finally {
+    clearTimeout(deadlineTimer)
   }
 
   const counts = { "✓": 0, "✗": 0, "⚠": 0 }

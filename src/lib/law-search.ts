@@ -146,7 +146,8 @@ export async function findLaws(
   query: string,
   apiKey?: string,
   max = 3,
-  searchDisplay = 100
+  searchDisplay = 100,
+  signal?: AbortSignal
 ): Promise<LawInfo[]> {
   const cacheKey = `law-search:${query}:${max}:${searchDisplay}`
   const cached = lawCache.get<LawInfo[]>(cacheKey)
@@ -159,9 +160,11 @@ export async function findLaws(
   let lastInfraError: unknown
   const trySearch = async (q: string): Promise<LawInfo[]> => {
     try {
-      const xmlText = await apiClient.searchLaw(q, apiKey, searchDisplay)
+      const xmlText = await apiClient.searchLaw(q, apiKey, searchDisplay, "law", signal)
       return parseLawXml(xmlText, effectiveMax)
     } catch (e) {
+      // 취소는 사다리를 계속 돌 이유가 없다 — 즉시 전파 (Codex 상세 리뷰: 취소 미전파)
+      if (e instanceof Error && /취소됨/.test(e.message)) throw e
       if (e instanceof Error && /429|401|403|API 키/.test(e.message)) throw e
       lastInfraError = e
       return []

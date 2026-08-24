@@ -258,10 +258,16 @@ export async function handleFinArticle(
     const bodyMap = new Map<string, string>()
     const needBody = dels.filter((d) => d.type === "시행령" && !(d.content || "").trim() && d.joNum).slice(0, 3)
     if (needBody.length > 0) {
+      // 본문 동봉은 3초 예산 안에서만 — 예산이 끝나면 자식 호출까지 실제로 끊는다.
+      // race만 걸고 두면 진행 중 fetch가 바깥 6초 deadline까지 살아 쿼터를 소모한다
+      // (Codex 상세 리뷰: delegated-body 3s race가 자식을 abort하지 않음)
+      const bodyAborter = new AbortController()
+      const onOuterAbort = () => bodyAborter.abort()
+      aborter.signal.addEventListener("abort", onOuterAbort, { once: true })
       const fetchBodies = (async () => {
         const decreeName = data.meta.sihyungryungName || needBody[0].lawName || ""
         if (!decreeName) return
-        const decreeLaws = await findLaws(apiClient, decreeName, undefined, 3)
+        const decreeLaws = await findLaws(apiClient, decreeName, undefined, 3, 100, bodyAborter.signal)
         // 정확 일치가 없으면 동봉을 생략하고 목록 표시로 폴백 — 엉뚱한 법령의 조문을
         // "시행령 본문"으로 동봉하는 것보다 안 싣는 쪽이 안전 (Opus I1: 무고지 폴백 제거)
         const decree = decreeLaws.find((l) => resolvedLawMatches(decreeName, l.lawName))
@@ -271,7 +277,7 @@ export async function handleFinArticle(
             try {
               const extra: Record<string, string> = { MST: decree.mst, JO: buildJO(d.joNum!) }
               if (efYd) extra.efYd = efYd
-              const jt = await apiClient.fetchApi({ endpoint: "lawService.do", target: "eflaw", type: "JSON", extraParams: extra, signal: aborter.signal })
+              const jt = await apiClient.fetchApi({ endpoint: "lawService.do", target: "eflaw", type: "JSON", extraParams: extra, signal: bodyAborter.signal })
               const body = renderArticleUnits(JSON.parse(jt)?.법령)
               if (body) bodyMap.set(d.joNum!, body)
             } catch {
@@ -280,10 +286,18 @@ export async function handleFinArticle(
           })
         )
       })()
-      // 본문 동봉은 3초 안에 되는 만큼만 — 못 받으면 목록만 표시 (deadline 보호)
       let bodyTimer: ReturnType<typeof setTimeout> | undefined
-      await Promise.race([fetchBodies, new Promise((r) => { bodyTimer = setTimeout(r, 3000) })]).catch(() => {})
+      await Promise.race([
+        fetchBodies,
+        new Promise((r) => {
+          bodyTimer = setTimeout(() => {
+            bodyAborter.abort() // 예산 초과 — 진행 중 자식 호출 취소
+            r(undefined)
+          }, 3000)
+        }),
+      ]).catch(() => {})
       clearTimeout(bodyTimer) // 타이머 잔존 방지 (Opus I3)
+      aborter.signal.removeEventListener("abort", onOuterAbort)
     }
 
     let out = ""
