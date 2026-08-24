@@ -8,7 +8,7 @@
 
 import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
-import { resolvedLawMatches } from "../lib/law-search.js"
+import { sameLawFamily } from "../lib/law-search.js"
 import { flattenContent } from "../lib/article-parser.js"
 import { truncateWithHint, SOURCE_FOOTER, compactName } from "../lib/fin-common.js"
 
@@ -92,8 +92,8 @@ export async function handleFinAnnex(
     const acc: AnnexEntry[] = []
     collectAnnexes(JSON.parse(jsonText), acc, law)
 
-    // 소속 법령 대조 (유사 법령 별표 혼입 방어)
-    let entries = acc.filter((a) => !a.owner || resolvedLawMatches(law, a.owner))
+    // 소속 법령 대조 (유사 법령 별표 혼입 방어 — 같은 패밀리의 하위법령 별표는 통과)
+    let entries = acc.filter((a) => !a.owner || sameLawFamily(law, a.owner))
     if (keyword) {
       const ck = compactName(keyword)
       entries = entries.filter((a) => compactName(a.name).includes(ck))

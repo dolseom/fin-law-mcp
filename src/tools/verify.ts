@@ -84,13 +84,18 @@ const TONGCHIK_RE = new RegExp(`(${LAW_NAME_CHARS}{1,20}?법)\\s*(기본통칙|�
 // ("산업재해보상보험의 보험료징수 등에 관한 법률") 컷 대상이 아니다.
 const CUT_ENDING_RE = /(?:은|는|을|를|이며|하며|이고|하고|에서|부터|까지|로써)$/
 const CUT_WORDS = new Set(["따라", "따른", "의한", "의해", "의하여", "위한", "위하여", "정한", "바와"])
+// 조문 참조 어절("제26조", "제1항")도 문맥 — "「법인세법」 제26조 및 지방세법 제1조"에서
+// 앞 인용의 조문이 다음 법령명("제26조 및 지방세법")에 흡수되는 것 방지
+const CUT_REF_RE = /^제?\d+(?:조|항|호|목)(?:의\d+)?[.,]?$/
 const ANAPHOR_WORDS = new Set(["같은법", "동법", "동시행령", "같은영"])
 
 /** namePart에서 가장 오른쪽 종결 어절까지를 문맥으로 보고 제거 (마지막 어절 '…법'은 유지) */
 function trimToLawName(namePart: string): string {
   const words = namePart.replace(/\s+/g, " ").trim().split(" ")
   for (let i = words.length - 2; i >= 0; i--) {
-    if (CUT_ENDING_RE.test(words[i]) || CUT_WORDS.has(words[i])) return words.slice(i + 1).join(" ")
+    if (CUT_ENDING_RE.test(words[i]) || CUT_WORDS.has(words[i]) || CUT_REF_RE.test(words[i])) {
+      return words.slice(i + 1).join(" ")
+    }
   }
   return words.join(" ")
 }

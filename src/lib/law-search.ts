@@ -43,16 +43,41 @@ export function looseMatchLawName(target: string, official: string): boolean {
     || targetNorm.startsWith(officialNorm.replace(/(법률|법)$/, "법"))
 }
 
+/** 법령 종류(본법/시행령/시행규칙) — 이름 끝 접미사로 판별 */
+export type LawTier = "본법" | "시행령" | "시행규칙"
+export function lawTierOf(name: string): LawTier {
+  const n = name.replace(/\s+/g, "")
+  if (n.endsWith("시행규칙")) return "시행규칙"
+  if (n.endsWith("시행령")) return "시행령"
+  return "본법"
+}
+
 /**
  * findLaws 결과 1위가 요청한 법령명과 실제로 관련 있는지 최종 확인.
  * 법제처 LIKE 검색은 관련 법령이 하나도 없어도 부분매칭 목록을 돌려주므로,
  * laws[0]을 맹신하면 「상법」 요청에 무관한 법의 분석을 확신형으로 내보내게 된다.
  * 별칭 입력("화관법"→화학물질관리법)은 canonical 해소 후에도 대조한다.
+ *
+ * 종류(본법/시행령/시행규칙)가 다르면 불일치 — looseMatch의 접두 허용 때문에
+ * "법인세법 시행령" 요청이 본법 「법인세법」과 매칭되어 본법 MST로 조문을 검증하고
+ * ✓와 본법 URL을 내보내던 결함 방지 (Opus I1). 별칭이 종류를 바꾸는 케이스
+ * ("관시령"→관세법 시행령)가 있어 tier 비교는 canonical 해소 후 경로별로 한다.
  */
 export function resolvedLawMatches(requested: string, officialName: string): boolean {
-  if (looseMatchLawName(requested, officialName)) return true
+  const officialTier = lawTierOf(officialName)
+  if (lawTierOf(requested) === officialTier && looseMatchLawName(requested, officialName)) return true
   const canonical = resolveLawAlias(normalizeLawSearchText(requested)).canonical
-  return canonical !== requested && looseMatchLawName(canonical, officialName)
+  return canonical !== requested && lawTierOf(canonical) === officialTier && looseMatchLawName(canonical, officialName)
+}
+
+/**
+ * 같은 법령 패밀리(본법·시행령·시행규칙)인지 — 종류는 무시하고 본법명만 대조.
+ * 별표 소속 대조처럼 "유사 법령 혼입은 막되 하위법령은 통과"가 필요한 곳에서 쓴다
+ * (기준내용연수표는 법인세법 '시행규칙' 별표지만 본법 조회의 별표 섹션에 나와야 한다).
+ */
+export function sameLawFamily(a: string, b: string): boolean {
+  const baseOf = (s: string) => s.replace(/\s*시행(?:령|규칙)\s*$/, "")
+  return resolvedLawMatches(baseOf(a), baseOf(b))
 }
 
 /** 법령명이 아닌 부가 키워드 제거 (법제처 lawSearch API는 법령명 검색이므로) */

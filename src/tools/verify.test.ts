@@ -107,6 +107,12 @@ describe("extractCitations — 문맥 흡수·조응 오인·「」 우회 (Opus
     expect(cites[0].article).toBe("제43조")
   })
 
+  it("앞 인용의 조문 어절이 다음 법령명에 흡수되지 않는다 (「법인세법」 제26조 및 지방세법 제1조)", () => {
+    const cites = extractCitations("「법인세법」 제26조 및 지방세법 제1조를 검토한다.")
+    expect(cites.map((c) => c.lawName)).toEqual(["법인세법", "지방세법"])
+    expect(cites[1].raw).toBe("지방세법 제1조")
+  })
+
   it("「」 인용이 조응('같은 법')의 선행사가 된다", () => {
     const cites = extractCitations("「소득세법」 제12조를 본다. 같은 법 시행령 제11조도 확인한다.")
     expect(cites.map((c) => c.lawName)).toEqual(["소득세법", "소득세법 시행령"])

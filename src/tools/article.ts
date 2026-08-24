@@ -13,7 +13,7 @@
 
 import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
-import { findLaws, resolvedLawMatches, type LawInfo } from "../lib/law-search.js"
+import { findLaws, resolvedLawMatches, sameLawFamily, type LawInfo } from "../lib/law-search.js"
 import { buildJO } from "../lib/law-parser.js"
 import { cleanHtml, flattenContent, groupMokByReset } from "../lib/article-parser.js"
 import { parseThreeTierDelegation } from "../lib/three-tier-parser.js"
@@ -162,10 +162,11 @@ function findAnnexItems(node: any, acc: AnnexItem[], lawName: string): void {
   if (typeof name === "string" && name.trim()) {
     // 삭제·이동된 별표 항목은 노이즈 — 제외
     if (/^삭제|^\[?별표\s*\d+[^\]]*(이동|삭제)/.test(name.trim())) return
-    // 별표 검색(search=2)이 유사 법령명까지 돌려주는 경우 방어: 법령명 필드가 있으면 대조
+    // 별표 검색(search=2)이 유사 법령명까지 돌려주는 경우 방어: 법령명 필드가 있으면 대조.
+    // 하위법령(시행령·시행규칙) 별표는 통과 — 기준내용연수표는 시행규칙 별표다 (골든셋 #1)
     const ownerRaw = node.법령명 || node.관련법령명 || ""
     const owner = typeof ownerRaw === "string" ? ownerRaw : flattenContent(ownerRaw)
-    if (!owner || resolvedLawMatches(lawName, owner)) {
+    if (!owner || sameLawFamily(lawName, owner)) {
       acc.push({ no: String(node.별표번호 ?? "").trim(), name: name.trim() })
     }
     return
@@ -197,6 +198,7 @@ export async function handleFinArticle(
 
   // ── ① 법령 확정 ──
   let law: LawInfo
+  let lawFallback = false // 정확 일치 없이 최상위 검색 결과로 폴백했는가 — 무고지 금지 (Opus I1)
   try {
     const laws = await findLaws(apiClient, input.law, undefined, 5)
     if (laws.length === 0) {
@@ -211,7 +213,9 @@ export async function handleFinArticle(
       }
     }
     // 정확 매칭 우선(부분매칭 함정 방어: "지방세법"→지방교부세법), 다음 순위 폴백
-    law = laws.find((l) => resolvedLawMatches(input.law, l.lawName)) ?? laws[0]
+    const exact = laws.find((l) => resolvedLawMatches(input.law, l.lawName))
+    law = exact ?? laws[0]
+    lawFallback = !exact
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return {
@@ -260,7 +264,9 @@ export async function handleFinArticle(
         const decreeName = data.meta.sihyungryungName || needBody[0].lawName || ""
         if (!decreeName) return
         const decreeLaws = await findLaws(apiClient, decreeName, undefined, 3)
-        const decree = decreeLaws.find((l) => resolvedLawMatches(decreeName, l.lawName)) ?? decreeLaws[0]
+        // 정확 일치가 없으면 동봉을 생략하고 목록 표시로 폴백 — 엉뚱한 법령의 조문을
+        // "시행령 본문"으로 동봉하는 것보다 안 싣는 쪽이 안전 (Opus I1: 무고지 폴백 제거)
+        const decree = decreeLaws.find((l) => resolvedLawMatches(decreeName, l.lawName))
         if (!decree) return
         await Promise.all(
           needBody.map(async (d) => {
@@ -376,8 +382,13 @@ export async function handleFinArticle(
     return `${header}\n${truncateWithHint(s.r.text, s.budget, s.hint)}`
   }
 
+  const fallbackLine = lawFallback
+    ? `⚠ 요청 "${input.law}"과 정확히 일치하는 법령이 없어 최상위 검색 결과 「${law.lawName}」로 조회했습니다. 의도한 법령인지 확인하세요 (다르면 fin_law_search로 정확한 명칭 검색).`
+    : ``
+
   const text = [
     `${basisLine} ${overall}`,
+    fallbackLine,
     ``,
     sec({ ...sections[0] }, `■ ${law.lawName} ${articleLabel}${statusMark}`),
     ``,
