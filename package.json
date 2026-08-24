@@ -8,7 +8,7 @@
   },
   "main": "build/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "start": "node build/index.js"

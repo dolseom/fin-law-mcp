@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 import type { LawApiClient } from "../lib/api-client.js"
 import { isAdminRuleName, tryVerifyAdminRuleCitation, verifyAdminRuleCitation } from "./admin-rule-citation.js"
 // fin-law-mcp: upstream verify-citations 대신 자체 verify.ts의 추출기로 연결
-// (두 번째 인자 max는 자체 구현에서 무시된다 — 상한 15 고정)
+// (상한 15은 추출기 내부 고정)
 import { extractCitations as parseCitations } from "./verify.js"
 
 const MATCH_XML = `<?xml version="1.0" encoding="UTF-8"?>
@@ -39,12 +39,12 @@ describe("isAdminRuleName", () => {
 
 describe("parseCitations 행정규칙 추출 (접미사 확장)", () => {
   it("「식품등의 표시기준」 제N조에서 규칙명을 추출한다", () => {
-    const cites = parseCitations("「식품등의 표시기준」 제4조에 따라 표시하여야 한다.", 15)
+    const cites = parseCitations("「식품등의 표시기준」 제4조에 따라 표시하여야 한다.")
     expect(cites).toHaveLength(1)
     expect(cites[0].lawName).toBe("식품등의 표시기준")
   })
   it("기존 법령 추출은 그대로 동작한다", () => {
-    const cites = parseCitations("법인세법 제19조에 따른 손금", 15)
+    const cites = parseCitations("법인세법 제19조에 따른 손금")
     expect(cites[0].lawName).toBe("법인세법")
   })
 
@@ -52,7 +52,7 @@ describe("parseCitations 행정규칙 추출 (접미사 확장)", () => {
     const text =
       "법인세법 제19조의2에 따른 대손금은 인정된다. 국세청의 실무 판단 기준 제3조도 참고한다. " +
       "같은 법 시행령 제19조의2 제1항도 확인하라."
-    const cites = parseCitations(text, 15)
+    const cites = parseCitations(text)
     expect(cites).toHaveLength(3)
     expect(cites[0].lawName).toBe("법인세법")
     expect(cites[1].lawName).toBe("국세청의 실무 판단 기준")
@@ -61,7 +61,7 @@ describe("parseCitations 행정규칙 추출 (접미사 확장)", () => {
 
   it("산문 '기준' 캡처 뒤 '같은 법' 단독 조응도 법령으로 해소된다", () => {
     const text = "소득세법 제12조에 따라 비과세된다. 회사 내부 지급 기준 제2조 참조. 같은 법 제20조도 본다."
-    const cites = parseCitations(text, 15)
+    const cites = parseCitations(text)
     expect(cites[2].lawName).toBe("소득세법")
   })
 })
