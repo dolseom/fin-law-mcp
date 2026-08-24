@@ -85,3 +85,19 @@ describe("fin_ruling_search — 기준일 필터", () => {
     expect(r.content[0].text).toContain("INVALID_PARAMETER")
   })
 })
+
+describe("fin_ruling_search — 커버 범위·절단 고지 (조용한 실패 금지)", () => {
+  it("표시 상한(5건)을 넘긴 검색 결과 건수를 밝힌다", async () => {
+    const r = await handleFinRulingSearch(stub, { query: "퇴직금", domains: ["precedent"] })
+    // fixture는 8건 — 5건 표시 + 3건 절단
+    expect(r.content[0].text).toContain("검색 8건 중 최신 5건 표시")
+  })
+
+  it("검색한 도메인과 전체 도메인 수를 밝힌다 (0건을 '해석 없음'으로 오독 방지)", async () => {
+    const r = await handleFinRulingSearch(stub, { query: "퇴직금", domains: ["precedent"] })
+    const text = r.content[0].text
+    expect(text).toContain("검색 범위: 대법원 판례 (1곳)")
+    expect(text).toContain("18곳")
+    expect(text).toContain(`0건이 "해석 없음"을 뜻하지 않습니다`)
+  })
+})

@@ -96,7 +96,7 @@ async function searchDomain(
   domain: Domain,
   query: string,
   basisYmd?: string
-): Promise<SectionResult & { items?: UnifiedItem[]; usedQuery?: string; excludedByBasis?: number }> {
+): Promise<SectionResult & { items?: UnifiedItem[]; usedQuery?: string; excludedByBasis?: number; truncated?: number }> {
   const queries = ladderQueries(query, 2)
   try {
     for (const q of queries) {
@@ -171,7 +171,15 @@ async function searchDomain(
             return keep
           })
         }
-        return { status: "성공", text: "", items: filtered.slice(0, 5), usedQuery: q, excludedByBasis }
+        // 표시 상한(5건)을 넘긴 분량은 조용히 버리지 않고 건수를 넘긴다
+        return {
+          status: "성공",
+          text: "",
+          items: filtered.slice(0, 5),
+          usedQuery: q,
+          excludedByBasis,
+          truncated: Math.max(filtered.length - 5, 0),
+        }
       }
     }
     return { status: "성공", text: "", items: [], usedQuery: queries[queries.length - 1] }
@@ -223,7 +231,8 @@ export async function handleFinRulingSearch(
         : `\n■ ${label} — 0건${ladderNote} (정상 조회 결과 없음)\n`
       continue
     }
-    text += `\n■ ${label} [${DOMAIN_AUTHORITY[domain]}] — 최신순 ${items.length}건${ladderNote}${basisNote}\n`
+    const truncNote = r.truncated ? ` · 검색 ${items.length + r.truncated}건 중 최신 ${items.length}건 표시` : ""
+    text += `\n■ ${label} [${DOMAIN_AUTHORITY[domain]}] — 최신순 ${items.length}건${truncNote}${ladderNote}${basisNote}\n`
     text += items.map((i) => `  · ${i.docNo || "(번호없음)"} (${i.dateDisplay}) ${i.title}`).join("\n") + "\n"
   }
   for (const { domain, r } of failedDomains) {
@@ -233,6 +242,10 @@ export async function handleFinRulingSearch(
   if (totalHits > 0) {
     text += `\n※ 예규 본문: fin_nts_ruling · 조문 근거: fin_article`
   }
+  // 커버 범위를 매번 밝힌다 — 이 4곳이 "전부"가 아님을 모르면 0건을 "그런 해석 없음"으로
+  // 단정하게 된다 (법제처 해석·결정례 도메인은 18곳, 여기선 재무 실무 1순위 4곳만 검색)
+  const covered = domains.map((d) => DOMAIN_LABEL[d]).join(" · ")
+  text += `\n※ 검색 범위: ${covered} (${domains.length}곳). 법제처 해석·결정례 도메인 전체(18곳) 중 재무 실무 1순위만 검색하므로, 0건이 "해석 없음"을 뜻하지 않습니다`
   text += `\n${AUTHORITY_FOOTER}`
   text += `\n\n${SOURCE_FOOTER}`
 
