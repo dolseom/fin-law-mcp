@@ -44,3 +44,79 @@ describe("extractCitations — 접속사 오탐 방지 (Codex 리뷰 회귀)", (
     expect(tongchik?.lawName).toBe("법인세법 기본통칙")
   })
 })
+
+describe("extractCitations — 문맥 흡수·조응 오인·「」 우회 (Opus 리뷰 B2 회귀 — 6문장)", () => {
+  it("1. '…바와 같은'이 조응으로 오인되지 않고 명시 법령명을 추출한다", () => {
+    const cites = extractCitations("법인세법 제26조 제1항에서 정하는 바와 같은 법인세법 시행령 제43조")
+    expect(cites.map((c) => c.lawName)).toEqual(["법인세법", "법인세법 시행령"])
+  })
+
+  it("2. 주제격 조사 어절('상여금은')이 법령명에 흡수되지 않는다", () => {
+    const cites = extractCitations("임원 상여금은 부가가치세법 제1조 및 근로기준법 제2조에 따라 판단한다")
+    expect(cites.map((c) => c.lawName)).toEqual(["부가가치세법", "근로기준법"])
+  })
+
+  it("3. 연결어미 어절('비과세소득이며')이 법령명에 흡수되지 않는다", () => {
+    const cites = extractCitations("소득세법 제12조 규정에 의한 비과세소득이며 상법 제169조도 참고한다")
+    expect(cites.map((c) => c.lawName)).toEqual(["소득세법", "상법"])
+  })
+
+  it("4. 지시어('이는')·'취지이며' 문맥이 잘려나간다", () => {
+    const cites = extractCitations(
+      "이는 국세기본법 제14조 실질과세 원칙과 같은 취지이며 법인세법 제52조 부당행위계산부인이 적용된다"
+    )
+    expect(cites.map((c) => c.lawName)).toEqual(["국세기본법", "법인세법"])
+  })
+
+  it("5. '산정하고 동법'의 동법이 조응으로 해소된다 (문맥 흡수 없이)", () => {
+    const cites = extractCitations("관세법 제30조 과세가격 결정 원칙에 따라 산정하고 동법 제31조를 보충 적용한다")
+    expect(cites.map((c) => c.lawName)).toEqual(["관세법", "관세법"])
+    expect(cites[1].article).toBe("제31조")
+  })
+
+  it("6. 실존하지 않는 법령명('부동산 관련법')은 문맥 없이 그대로 추출되어 ✗ 경로로 간다", () => {
+    const cites = extractCitations("지방세법 제105조 취득세 과세대상이며 부동산 관련법 제3조도 검토한다")
+    expect(cites.map((c) => c.lawName)).toEqual(["지방세법", "부동산 관련법"])
+  })
+
+  it("'노동법'의 '동법'이 조응으로 오인되지 않는다 (룩비하인드)", () => {
+    // 오인되면 직전 법령(지방세법)의 제5조로 검증되어 틀린 인용에 ✓가 나온다
+    const cites = extractCitations("지방세법 제1조. 노동법 제5조.")
+    expect(cites.map((c) => c.lawName)).toEqual(["지방세법", "노동법"])
+  })
+
+  it("문장 시작의 '노동법'도 명시 법령명으로 추출된다", () => {
+    const cites = extractCitations("노동법 제5조에 따른다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).toBe("노동법")
+  })
+
+  it("「법인세법」 제26조 표준 표기가 조문 검증 경로(법령조문)로 추출된다", () => {
+    const cites = extractCitations("「법인세법」 제26조에 따라 손금불산입한다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].kind).toBe("법령조문")
+    expect(cites[0].lawName).toBe("법인세법")
+    expect(cites[0].article).toBe("제26조")
+  })
+
+  it("「법인세법 시행령」 제43조도 조문 포함 추출된다", () => {
+    const cites = extractCitations("「법인세법 시행령」 제43조 제2항")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].kind).toBe("법령조문")
+    expect(cites[0].lawName).toBe("법인세법 시행령")
+    expect(cites[0].article).toBe("제43조")
+  })
+
+  it("「」 인용이 조응('같은 법')의 선행사가 된다", () => {
+    const cites = extractCitations("「소득세법」 제12조를 본다. 같은 법 시행령 제11조도 확인한다.")
+    expect(cites.map((c) => c.lawName)).toEqual(["소득세법", "소득세법 시행령"])
+  })
+
+  it("행정규칙 인용은 조응 선행사를 갱신하지 않는다 (기존 회귀 유지)", () => {
+    const cites = extractCitations(
+      "법인세법 제26조를 본다. 법인세법 기본통칙 19-19…46을 참고한다. 같은 법 시행령 제43조를 적용한다."
+    )
+    const anaphor = cites[cites.length - 1]
+    expect(anaphor.lawName).toBe("법인세법 시행령")
+  })
+})
