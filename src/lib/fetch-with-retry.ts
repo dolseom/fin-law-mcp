@@ -82,14 +82,26 @@ export async function fetchWithRetry(
     retryDelay = DEFAULT_RETRY_DELAY,
     retryOn = DEFAULT_RETRY_ON,
     allowHtmlBody = false,
+    signal: outerSignal,
     ...fetchOptions
   } = options
 
   let lastError: Error | null = null
 
   for (let attempt = 0; attempt <= retries; attempt++) {
+    // 외부 취소(도구 deadline)는 재시도하지 않고 즉시 중단 — deadline이 지난 뒤에도
+    // fetch가 백그라운드에서 살아 쿼터를 소모하던 문제 (Opus I3)
+    if (outerSignal?.aborted) {
+      throw new Error(`요청 취소됨(도구 deadline) - ${maskSensitiveUrl(url)}`)
+    }
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), timeout)
+    const onOuterAbort = () => controller.abort()
+    outerSignal?.addEventListener("abort", onOuterAbort, { once: true })
+    const cleanup = () => {
+      clearTimeout(timeoutId)
+      outerSignal?.removeEventListener("abort", onOuterAbort)
+    }
 
     const headers = new Headers(fetchOptions.headers)
     if (!headers.has("user-agent")) headers.set("user-agent", DEFAULT_USER_AGENT)
@@ -102,7 +114,7 @@ export async function fetchWithRetry(
         signal: controller.signal,
       })
 
-      clearTimeout(timeoutId)
+      cleanup()
 
       // Success or non-retryable error
       if (response.ok || !retryOn.includes(response.status)) {
@@ -143,11 +155,15 @@ export async function fetchWithRetry(
       // No retries left
       return response
     } catch (error) {
-      clearTimeout(timeoutId)
+      cleanup()
 
       // Timeout or network error — URL에서 API 키 제거 후 에러 생성
       if (error instanceof Error) {
         if (error.name === "AbortError") {
+          // 외부 취소(도구 deadline)는 timeout과 구분 — 재시도 없이 즉시 중단
+          if (outerSignal?.aborted) {
+            throw new Error(`요청 취소됨(도구 deadline) - ${maskSensitiveUrl(url)}`)
+          }
           lastError = new Error(`Request timeout after ${timeout}ms for ${maskSensitiveUrl(url)}`)
         } else {
           // fetch 네이티브 에러 메시지에도 URL이 포함될 수 있음

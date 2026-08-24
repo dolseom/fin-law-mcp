@@ -226,11 +226,14 @@ export async function handleFinArticle(
 
   // ── ② 병렬: 조문 본문 ∥ 3단 위임 ∥ 별표 ──
   let joTitleForRulings = ""
+  // deadline 도달 시 진행 중 업스트림 호출을 함께 취소 — 백그라운드 쿼터 소모 방지 (Opus I3)
+  const aborter = new AbortController()
+  const abortOnDeadline = () => aborter.abort()
 
   const articleP: Promise<SectionResult> = (async () => {
     const extraParams: Record<string, string> = { MST: law.mst, JO: buildJO(articleLabel) }
     if (efYd) extraParams.efYd = efYd
-    const jsonText = await apiClient.fetchApi({ endpoint: "lawService.do", target: "eflaw", type: "JSON", extraParams })
+    const jsonText = await apiClient.fetchApi({ endpoint: "lawService.do", target: "eflaw", type: "JSON", extraParams, signal: aborter.signal })
     const lawData = JSON.parse(jsonText)?.법령
     if (!lawData) return failed("법령 데이터 없음 (기준일이 시행일과 안 맞을 수 있음)")
     const units: any[] = toArray(lawData?.조문?.조문단위)
@@ -242,7 +245,7 @@ export async function handleFinArticle(
   })().catch((e) => failed(e instanceof Error ? e.message : String(e)))
 
   const threeTierP: Promise<SectionResult> = (async () => {
-    const jsonText = await apiClient.getThreeTier({ mst: law.mst, knd: "2" })
+    const jsonText = await apiClient.getThreeTier({ mst: law.mst, knd: "2", signal: aborter.signal })
     const data = parseThreeTierDelegation(JSON.parse(jsonText))
     const target = data.articles.find((a) => a.joNum.replace(/\s+/g, "") === articleLabel.replace(/\s+/g, ""))
     if (!target || target.delegations.length === 0) {
@@ -268,7 +271,7 @@ export async function handleFinArticle(
             try {
               const extra: Record<string, string> = { MST: decree.mst, JO: buildJO(d.joNum!) }
               if (efYd) extra.efYd = efYd
-              const jt = await apiClient.fetchApi({ endpoint: "lawService.do", target: "eflaw", type: "JSON", extraParams: extra })
+              const jt = await apiClient.fetchApi({ endpoint: "lawService.do", target: "eflaw", type: "JSON", extraParams: extra, signal: aborter.signal })
               const body = renderArticleUnits(JSON.parse(jt)?.법령)
               if (body) bodyMap.set(d.joNum!, body)
             } catch {
@@ -278,7 +281,9 @@ export async function handleFinArticle(
         )
       })()
       // 본문 동봉은 3초 안에 되는 만큼만 — 못 받으면 목록만 표시 (deadline 보호)
-      await Promise.race([fetchBodies, new Promise((r) => setTimeout(r, 3000))]).catch(() => {})
+      let bodyTimer: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([fetchBodies, new Promise((r) => { bodyTimer = setTimeout(r, 3000) })]).catch(() => {})
+      clearTimeout(bodyTimer) // 타이머 잔존 방지 (Opus I3)
     }
 
     let out = ""
@@ -293,7 +298,7 @@ export async function handleFinArticle(
   })().catch((e) => failed(e instanceof Error ? e.message : String(e)))
 
   const annexP: Promise<SectionResult> = (async () => {
-    const jsonText = await apiClient.getAnnexes({ lawName: law.lawName, knd: "1" }) // 1=별표만 (서식 노이즈 제외)
+    const jsonText = await apiClient.getAnnexes({ lawName: law.lawName, knd: "1", signal: aborter.signal }) // 1=별표만 (서식 노이즈 제외)
     const acc: AnnexItem[] = []
     findAnnexItems(JSON.parse(jsonText), acc, law.lawName)
     if (acc.length === 0) return { status: "성공" as const, text: "없음" }
@@ -306,7 +311,7 @@ export async function handleFinArticle(
 
   // 시행예정 개정 경고 — 이미 공포된 미래 개정을 모르면 개정 직전 검토에서 사고
   const upcomingP: Promise<SectionResult> = (async () => {
-    const xml = await apiClient.searchLaw(law.lawName, undefined, 20, "eflaw")
+    const xml = await apiClient.searchLaw(law.lawName, undefined, 20, "eflaw", aborter.signal)
     const ups = parseUpcomingVersions(xml, law.lawName)
     if (ups.length === 0) return { status: "성공" as const, text: "" }
     return {
@@ -316,10 +321,10 @@ export async function handleFinArticle(
   })().catch((e) => failed(e instanceof Error ? e.message : String(e)))
 
   const [articleR, threeTierR, annexR, upcomingR] = await Promise.all([
-    withDeadline(articleP, deadlineAt),
-    withDeadline(threeTierP, deadlineAt),
-    withDeadline(annexP, deadlineAt),
-    withDeadline(upcomingP, deadlineAt),
+    withDeadline(articleP, deadlineAt, abortOnDeadline),
+    withDeadline(threeTierP, deadlineAt, abortOnDeadline),
+    withDeadline(annexP, deadlineAt, abortOnDeadline),
+    withDeadline(upcomingP, deadlineAt, abortOnDeadline),
   ])
 
   // ── ③ 예규 검색 (조문 제목 확보 후) ──
@@ -339,6 +344,7 @@ export async function handleFinArticle(
             type: "XML",
             extraParams: { query: q, display: "3" },
             expectedRoot: "CgmExpc",
+            signal: aborter.signal,
           })
           const total = extractTag(xml, "totalCnt")
           const items = parseNtsRulings(xml, 3)
@@ -354,7 +360,8 @@ export async function handleFinArticle(
           text: `0건 (축약 사다리 ${ladderQueries(rulingQuery).map((q) => `"${q}"`).join(" → ")} 전부 0건 — 정상 조회 결과 없음. fin_nts_ruling으로 다른 키워드 시도 가능)`,
         }
       })().catch((e) => failed(e instanceof Error ? e.message : String(e))),
-      deadlineAt
+      deadlineAt,
+      abortOnDeadline
     )
   }
 

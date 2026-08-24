@@ -48,6 +48,45 @@ export function createTokenBucket(ratePerMin: number, burst = ratePerMin): Token
   }
 }
 
+export interface Semaphore {
+  /** 슬롯 확보 — 반환된 함수로 해제한다 (두 번 호출해도 안전) */
+  acquire(): Promise<() => void>
+  /** 현재 실행 중 수 (테스트·관측용) */
+  active(): number
+}
+
+/**
+ * 동시 실행 상한 세마포어. rate limit(분당 총량)과 별개로, 한 도구 호출이
+ * 병렬 fan-out(fin_article 4섹션 + 시행령 본문 3건)으로 법제처에 동시 버스트를
+ * 만드는 것을 막는다 — DRF는 연속 버스트에 간헐 404를 내는 특성이 있다 (Opus I3).
+ */
+export function createSemaphore(max: number): Semaphore {
+  let running = 0
+  const waiters: Array<() => void> = []
+
+  function release(): void {
+    running--
+    const next = waiters.shift()
+    if (next) next()
+  }
+
+  return {
+    async acquire(): Promise<() => void> {
+      if (running >= max) {
+        await new Promise<void>((resolve) => waiters.push(resolve))
+      }
+      running++
+      let released = false
+      return () => {
+        if (released) return
+        released = true
+        release()
+      }
+    },
+    active: () => running,
+  }
+}
+
 export interface DailyCap {
   take(n: number, now?: number): Verdict
   used(now?: number): number

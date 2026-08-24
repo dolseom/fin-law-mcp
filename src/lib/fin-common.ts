@@ -15,13 +15,27 @@ export function failed(reason: string): SectionResult {
   return { status: "실패", text: "", reason }
 }
 
-/** deadline 내 완료 못 하면 시간초과 처리. (진행 중 호출 자체는 취소하지 않음 — MVP 한계) */
-export async function withDeadline(p: Promise<SectionResult>, deadlineAt: number): Promise<SectionResult> {
+/**
+ * deadline 내 완료 못 하면 시간초과 처리.
+ * onTimeout으로 AbortController.abort를 넘기면 진행 중 호출도 함께 취소된다 —
+ * deadline 후 fetch가 백그라운드에서 살아 쿼터를 소모하던 문제 (Opus I3).
+ */
+export async function withDeadline(
+  p: Promise<SectionResult>,
+  deadlineAt: number,
+  onTimeout?: () => void
+): Promise<SectionResult> {
   const remain = deadlineAt - Date.now()
-  if (remain <= 0) return { status: "시간초과", text: "", reason: "도구 deadline 초과" }
+  if (remain <= 0) {
+    onTimeout?.()
+    return { status: "시간초과", text: "", reason: "도구 deadline 초과" }
+  }
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<SectionResult>((resolve) => {
-    timer = setTimeout(() => resolve({ status: "시간초과", text: "", reason: `deadline 초과` }), remain)
+    timer = setTimeout(() => {
+      onTimeout?.()
+      resolve({ status: "시간초과", text: "", reason: `deadline 초과` })
+    }, remain)
   })
   try {
     return await Promise.race([p, timeout])
