@@ -188,6 +188,20 @@ export async function findLaws(
   // 1차: 원본 쿼리
   let results: LawInfo[] = await trySearch(query)
 
+  // 1.5차: 약칭+종류 접미사("근퇴법 시행령") — searchLaw의 별칭 해소는 전체 문자열
+  // 키로만 조회해 이 형태를 못 푼다. 본체만 canonical로 바꿔 재결합해 한 번 더
+  // (resolvedLawMatches의 I-b 로직을 검색 경로에도 적용. 접미사 없는 약칭은
+  //  searchLaw가 이미 canonical로 바꿔 던지므로 여기서 또 할 필요 없다)
+  if (results.length === 0) {
+    const m = normalizeLawSearchText(query).match(/^(.*?)\s*(시행령|시행규칙)$/)
+    if (m) {
+      const bodyCanonical = resolveLawAlias(m[1]).canonical
+      if (bodyCanonical !== m[1]) {
+        results = await trySearch(`${bodyCanonical} ${m[2]}`)
+      }
+    }
+  }
+
   // 2차: 부가 키워드 제거
   if (results.length === 0) {
     const stripped = stripNonLawKeywords(query)
@@ -244,7 +258,14 @@ export function pickRepealed(rows: LawInfo[], query: string): LawInfo | undefine
   return rows
     .filter((r) => r.status === "연혁"
       && (norm(r.lawName) === q || norm(r.lawName).startsWith(q)))
-    .sort((a, b) => (b.effectiveDate || "").localeCompare(a.effectiveDate || ""))[0]
+    .sort((a, b) => {
+      // 완전 일치 우선 — 접두 허용만으로 정렬하면 본법 질의에 하위법령
+      // ("…법" 질의 → "…법시행규칙")이 최신 시행일로 이겨버린다 (실측)
+      const exactA = norm(a.lawName) === q ? 1 : 0
+      const exactB = norm(b.lawName) === q ? 1 : 0
+      if (exactA !== exactB) return exactB - exactA
+      return (b.effectiveDate || "").localeCompare(a.effectiveDate || "")
+    })[0]
 }
 
 /**
@@ -254,11 +275,12 @@ export function pickRepealed(rows: LawInfo[], query: string): LawInfo | undefine
 export async function findRepealedLaw(
   apiClient: LawApiClient,
   query: string,
-  apiKey?: string
+  apiKey?: string,
+  signal?: AbortSignal
 ): Promise<LawInfo | undefined> {
   let xmlText: string
   try {
-    xmlText = await apiClient.searchLaw(query, apiKey, 30, "eflaw")
+    xmlText = await apiClient.searchLaw(query, apiKey, 30, "eflaw", signal)
   } catch {
     return undefined  // eflaw 조회 실패는 조용히 폴백(기존 NOT_FOUND 경로 유지)
   }

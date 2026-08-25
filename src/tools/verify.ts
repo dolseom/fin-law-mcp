@@ -10,7 +10,7 @@
 
 import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
-import { findLaws, resolvedLawMatches, INTERPUNCT_CHARS, type LawInfo } from "../lib/law-search.js"
+import { findLaws, findRepealedLaw, resolvedLawMatches, INTERPUNCT_CHARS, type LawInfo } from "../lib/law-search.js"
 import { resolveLawAlias, LAW_ALIAS_CANONICALS } from "../lib/search-normalizer.js"
 import { buildJO } from "../lib/law-parser.js"
 import { toArray } from "../lib/xml-parser.js"
@@ -364,6 +364,8 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
 interface CheckResult {
   mark: "✓" | "✗" | "⚠"
   line: string
+  /** 미확인 약칭 — 정식 명칭 재검증 전까지 사용 보류를 요약 헤더로 띄운다 */
+  hold?: boolean
 }
 
 /**
@@ -443,18 +445,40 @@ async function verifyLawCitation(
         return { mark: "⚠", line: `⚠ ${c.raw} — 법령 DB 0건, 행정규칙 DB 조회 실패로 판정 불가 (없음 아님): ${msg}` }
       }
     }
+    // 폐지·연혁 확인 — 현행 0건이 '지어낸 법령'인지 '폐지된 법령'인지 가른다.
+    // findRepealedLaw는 이 용도로 만들어졌으나 배선이 안 돼 있었다 (Opus 재검증 개선)
+    let histChecked = false
+    if (!signal?.aborted) {
+      const repealed = await findRepealedLaw(apiClient, c.lawName, undefined, signal)
+      if (repealed) {
+        const ef = repealed.effectiveDate
+          ? `(마지막 시행 ${repealed.effectiveDate.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3")})`
+          : ""
+        return {
+          mark: "⚠",
+          line: `⚠ ${c.raw} — 현행 법령에는 없고 폐지·연혁 법령 「${repealed.lawName}」${ef}으로 추정 (환각 아님). 연혁 인용이면 basis_date를 지정해 재검증하세요`,
+        }
+      }
+      if (!signal?.aborted) histChecked = true
+    }
     // 미등재 약칭("조특법")에 대한 LIKE 0건은 법령 부존재의 증거가 아니라 별칭 사전의
-    // 공백일 뿐이다. ✗(환각 의심)로 단정하면 실무자가 맞는 인용을 지운다 (Opus B-2)
+    // 공백일 뿐이다. ✗(환각 의심)로 단정하면 실무자가 맞는 인용을 지운다 (Opus B-2).
+    // 단, ⚠로만 두면 순수 환각("탄소세법")이 '사용 금지' 경고 없이 빠져나간다 —
+    // hold로 표시해 요약 헤더에서 사용 보류를 요구한다 (Opus 재검증 개선)
     if (looksLikeAbbreviation(c.lawName)) {
       return {
         mark: "⚠",
-        line: `⚠ ${c.raw} — 「${c.lawName}」은 약칭으로 보이며 법제처 검색에 잡히지 않았습니다 (없음 아님). 정식 명칭으로 다시 확인하세요`,
+        hold: true,
+        line: `⚠ ${c.raw} — 「${c.lawName}」은 약칭 형태이나 ${histChecked ? "현행·연혁 법령 DB 어디에도 없습니다" : "법제처 검색에 잡히지 않았습니다"} (미등재 약칭 또는 환각 — 없음 단정 아님). 정식 명칭으로 재검증 전까지 이 인용의 사용을 보류하세요`,
       }
     }
-    return {
-      mark: "✗",
-      line: `✗ ${c.raw} — ${adminChecked ? `「${c.lawName}」 법령·행정규칙 DB 모두 0건 (정상 조회)` : `법령 「${c.lawName}」 실존하지 않음 (정상 조회 후 0건)`}. 법령명 오기 또는 환각 의심`,
-    }
+    const dbNote =
+      adminChecked && histChecked
+        ? `「${c.lawName}」 법령·행정규칙·연혁 DB 모두 0건 (정상 조회)`
+        : histChecked
+          ? `법령 「${c.lawName}」 실존하지 않음 — 현행·연혁 모두 0건 (정상 조회)`
+          : `법령 「${c.lawName}」 실존하지 않음 (정상 조회 후 0건)`
+    return { mark: "✗", line: `✗ ${c.raw} — ${dbNote}. 법령명 오기 또는 환각 의심` }
   }
   if (!best) {
     const alias = resolveLawAlias(c.lawName)
@@ -584,6 +608,8 @@ export async function handleFinVerify(
       : `${citations.length}건`
   let out = `[기준: ${basis_date || "현행"}] 인용 검증 — ${coverage}: ✓${counts["✓"]} / ✗${counts["✗"]} / ⚠${counts["⚠"]}\n`
   if (counts["✗"] > 0) out += `⚠️ ✗ 항목은 초안에서 제거·수정 전까지 사용 금지\n`
+  // 미확인 약칭은 ⚠(없음 단정 아님)이지만 환각일 수도 있다 — 조용히 통과시키지 않는다
+  if (results.some((r) => r.hold)) out += `⚠️ 미확인 약칭 인용 있음 — 정식 명칭으로 재검증 전까지 해당 인용 사용 보류\n`
   if (counts["⚠"] > 0) out += `※ ⚠는 "없음"이 아니라 확인 실패입니다 — 재시도하거나 원문으로 확인하세요\n`
   out += "\n" + results.map((r) => r.line).join("\n")
   out += `\n\n${SOURCE_FOOTER}`

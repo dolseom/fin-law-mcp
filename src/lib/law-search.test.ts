@@ -4,8 +4,9 @@
  * 매칭되어 본법 MST로 조문을 검증하고 ✓를 내던 결함을 박제한다.
  */
 
-import { describe, it, expect } from "vitest"
-import { lawTierOf, resolvedLawMatches, sameLawFamily, stripNonLawKeywords } from "./law-search.js"
+import { describe, it, expect, vi, afterEach } from "vitest"
+import { findLaws, lawTierOf, pickRepealed, resolvedLawMatches, sameLawFamily, stripNonLawKeywords } from "./law-search.js"
+import { LawApiClient } from "./api-client.js"
 
 describe("stripNonLawKeywords — 법령 종류 보존 (Codex 리뷰 중요 3 회귀)", () => {
   it("시행령·시행규칙은 부가 키워드가 아니라 법령 종류이므로 보존한다", () => {
@@ -89,5 +90,47 @@ describe("sameLawFamily — 별표 소속 대조 (하위법령 통과, 유사 �
   it("유사 법령은 여전히 차단된다", () => {
     expect(sameLawFamily("지방세법", "지방교부세법 시행규칙")).toBe(false)
     expect(sameLawFamily("법인세법", "소득세법 시행규칙")).toBe(false)
+  })
+})
+
+describe("pickRepealed — 완전 일치 우선 (실측 회귀)", () => {
+  it("본법 질의에 하위법령이 최신 시행일로 이기지 않는다", () => {
+    const rows = [
+      { lawName: "택지소유상한에관한법률시행규칙", lawId: "1", mst: "1", lawType: "부령", status: "연혁", effectiveDate: "19990101" },
+      { lawName: "택지소유상한에관한법률", lawId: "2", mst: "2", lawType: "법률", status: "연혁", effectiveDate: "19980925" },
+    ]
+    expect(pickRepealed(rows, "택지소유상한에 관한 법률")?.lawName).toBe("택지소유상한에관한법률")
+  })
+
+  it("완전 일치가 없으면 접두 일치 중 최신본을 고른다 (기존 동작 유지)", () => {
+    const rows = [
+      { lawName: "택지소유상한에관한법률시행령", lawId: "1", mst: "1", lawType: "대통령령", status: "연혁", effectiveDate: "19980101" },
+      { lawName: "택지소유상한에관한법률시행규칙", lawId: "2", mst: "2", lawType: "부령", status: "연혁", effectiveDate: "19990101" },
+    ]
+    expect(pickRepealed(rows, "택지소유상한에 관한 법률")?.lawName).toBe("택지소유상한에관한법률시행규칙")
+  })
+})
+
+describe("findLaws — 약칭+접미사 확장 사다리 (Opus 재검증 개선, fixture)", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("법제처가 모르는 '근퇴법 시행령'을 본체 canonical 재결합으로 찾는다", async () => {
+    // searchLaw의 별칭 해소는 전체 문자열 키("근퇴법시행령")로만 조회해 이 형태를 못 푼다 —
+    // 1.5차 사다리가 본체("근퇴법")만 canonical로 바꿔 재결합해야 한다
+    const HIT =
+      '<?xml version="1.0"?><LawSearch><totalCnt>1</totalCnt><law id="1">' +
+      "<법령명한글>근로자퇴직급여 보장법 시행령</법령명한글><법령ID>1</법령ID>" +
+      "<법령일련번호>111</법령일련번호><법령구분명>대통령령</법령구분명></law></LawSearch>"
+    const EMPTY = '<?xml version="1.0"?><LawSearch><totalCnt>0</totalCnt></LawSearch>'
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input)
+        return new Response(url.includes(encodeURIComponent("근로자퇴직급여")) ? HIT : EMPTY, { status: 200 })
+      })
+    )
+    const laws = await findLaws(new LawApiClient({ apiKey: "testkey" }), "근퇴법 시행령", undefined, 5, 100)
+    expect(laws).toHaveLength(1)
+    expect(laws[0].lawName).toBe("근로자퇴직급여 보장법 시행령")
   })
 })

@@ -292,13 +292,57 @@ describe("「…규정」 법령 DB 0건 → 행정규칙 폴백 (Opus B-0① �
     expect(text).not.toContain("환각 의심")
   })
 
-  it("법령·행정규칙 DB 모두 0건이면 두 DB를 확인했음을 밝히고 ✗", async () => {
+  it("법령·행정규칙·연혁 DB 모두 0건이면 확인 범위를 밝히고 ✗", async () => {
     stubFetchByUrl([{ match: "target=admrul", body: ADMRUL_EMPTY_XML }])
     const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
       text: "「가공무역거래처리규정」 제5조를 준수한다.",
     })
     const text = res.content[0].text
     expect(text).toContain("✗")
-    expect(text).toContain("법령·행정규칙 DB 모두 0건")
+    expect(text).toContain("법령·행정규칙·연혁 DB 모두 0건")
+  })
+})
+
+describe("현행 0건 → 폐지·연혁 확인 (Opus 재검증 개선 — findRepealedLaw 배선)", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const REPEALED_XML =
+    '<?xml version="1.0"?><LawSearch><totalCnt>1</totalCnt><law id="1">' +
+    "<법령명한글>택지소유상한에 관한 법률</법령명한글><법령ID>1</법령ID>" +
+    "<법령일련번호>222</법령일련번호><법령구분명>법률</법령구분명>" +
+    "<현행연혁코드>연혁</현행연혁코드><시행일자>19980925</시행일자></law></LawSearch>"
+
+  it("폐지 법령 인용은 ✗ 환각 의심이 아니라 ⚠ 폐지 추정으로 판정된다", async () => {
+    stubFetchByUrl([{ match: "target=eflaw", body: REPEALED_XML }])
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "택지소유상한에 관한 법률 제5조에 따라 부담금을 부과한다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("⚠")
+    expect(text).toContain("폐지·연혁 법령")
+    expect(text).toContain("basis_date")
+    expect(text).not.toContain("환각 의심")
+  })
+
+  it("연혁에도 없는 환각 약칭은 ⚠이되 요약 헤더로 사용 보류를 요구한다", async () => {
+    stubFetchByUrl([]) // 전 경로 0건
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "탄소세법 제5조를 적용한다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("⚠")
+    expect(text).toContain("미확인 약칭 인용 있음") // 요약 헤더 (조용한 통과 금지)
+    expect(text).toContain("사용을 보류")
+    expect(text).toContain("현행·연혁 법령 DB 어디에도 없습니다")
+  })
+
+  it("정식 명칭 형태(7자+)의 순수 환각은 연혁 확인 후에도 ✗를 유지한다", async () => {
+    stubFetchByUrl([]) // 전 경로 0건
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "가상자산투기억제법 제3조를 검토한다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("✗")
+    expect(text).toContain("현행·연혁 모두 0건")
   })
 })
