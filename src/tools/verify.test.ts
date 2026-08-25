@@ -3,8 +3,9 @@
  * Codex 코드 리뷰 중요 1의 오탐 케이스를 박제한다.
  */
 
-import { describe, it, expect } from "vitest"
-import { extractCitations, extractCitationsWithTotal } from "./verify.js"
+import { describe, it, expect, vi, afterEach } from "vitest"
+import { extractCitations, extractCitationsWithTotal, handleFinVerify } from "./verify.js"
+import { LawApiClient } from "../lib/api-client.js"
 
 describe("extractCitations — 접속사 오탐 방지 (Codex 리뷰 회귀)", () => {
   it("'및'으로 이어진 두 법령을 각각 정확히 추출한다", () => {
@@ -212,5 +213,92 @@ describe("extractCitationsWithTotal — 절단 고지 (Opus I4 회귀)", () => {
   it("상한 이내면 total === citations.length", () => {
     const { citations, total } = extractCitationsWithTotal("법인세법 제26조 및 소득세법 제12조")
     expect(total).toBe(citations.length)
+  })
+})
+
+describe("사전 최장 일치 어절 경계 (Opus B-3 재검증 회귀 — 꼬리 일치 오검증)", () => {
+  it("'국가배상법'이 사전의 「상법」으로 절단되지 않는다 (절단되면 무관한 법 조문에 ✓)", () => {
+    const cites = extractCitations("국가배상법 제2조에 따라 국가는 손해를 배상할 책임이 있다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).toBe("국가배상법")
+    expect(cites[0].raw).toContain("국가배상법") // "상법 제2조"로 변조되면 회귀
+  })
+
+  it("'난민법'→민법, '군형법'→형법 절단도 일어나지 않는다", () => {
+    const cites = extractCitations("난민법 제99조와 군형법 제41조를 본다.")
+    expect(cites.map((c) => c.lawName)).toEqual(["난민법", "군형법"])
+  })
+
+  it("시행령 표기도 오염되지 않는다 ('난민법 시행령'이 '민법 시행령'이 되면 회귀)", () => {
+    const cites = extractCitations("난민법 시행령 제2조를 본다.")
+    expect(cites[0].lawName).toBe("난민법 시행령")
+  })
+
+  it("어절 경계에서 시작하는 사전명은 계속 최장 일치로 잡힌다 (문맥 어절 뒤 상법)", () => {
+    const cites = extractCitations("손해배상 청구는 상법 제2조를 본다.")
+    expect(cites[0].lawName).toBe("상법")
+  })
+})
+
+describe("규칙·규정 선행사 분리 (Opus B-0③ 재검증 회귀)", () => {
+  it("'같은 규칙'은 「…규정」을 선행사로 삼지 않는다 (규칙·규정 혼재 문장)", () => {
+    const cites = extractCitations(
+      "「산업안전보건기준에 관한 규칙」 제32조와 「공무원보수규정」 제31조를 보면, 같은 규칙 제33조에 따라야 한다."
+    )
+    expect(cites).toHaveLength(3)
+    expect(cites[1].lawName).toBe("공무원보수규정")
+    expect(cites[2].lawName).toBe("산업안전보건기준에 관한 규칙") // 「공무원보수규정」이면 회귀
+  })
+
+  it("「…규정」만 있는 문장의 '같은 규칙'은 넘겨짚지 않고 ⚠ 경로로 간다", () => {
+    const cites = extractCitations("「공무원보수규정」 제31조를 본다. 같은 규칙 제32조를 본다.")
+    expect(cites).toHaveLength(2)
+    expect(cites[1].lawName).toBe("")
+  })
+})
+
+// ── 「…규정」 법령 DB 0건 → 행정규칙 폴백 (Opus B-0① 재검증 회귀 — fixture) ──
+
+const EMPTY_LAW_XML = '<?xml version="1.0"?><LawSearch><totalCnt>0</totalCnt></LawSearch>'
+const ADMRUL_HIT_XML =
+  '<?xml version="1.0"?><AdmRulSearch><totalCnt>1</totalCnt><admrul>' +
+  "<행정규칙명>조사사무처리규정</행정규칙명><행정규칙종류>훈령</행정규칙종류>" +
+  "<소관부처명>국세청</소관부처명><발령일자>20240101</발령일자></admrul></AdmRulSearch>"
+const ADMRUL_EMPTY_XML = '<?xml version="1.0"?><AdmRulSearch><totalCnt>0</totalCnt></AdmRulSearch>'
+
+function stubFetchByUrl(routes: Array<{ match: string; body: string }>) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: unknown) => {
+      const url = String(input)
+      const hit = routes.find((r) => url.includes(r.match))
+      return new Response(hit ? hit.body : EMPTY_LAW_XML, { status: 200 })
+    })
+  )
+}
+
+describe("「…규정」 법령 DB 0건 → 행정규칙 폴백 (Opus B-0① 재검증 회귀)", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("실존 행정규칙(훈령)이 ✗ 환각 의심이 아니라 ✓ 명칭 실존으로 판정된다", async () => {
+    stubFetchByUrl([{ match: "target=admrul", body: ADMRUL_HIT_XML }])
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "「조사사무처리규정」 제23조에 따라 세무조사를 실시한다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("✓")
+    expect(text).toContain("행정규칙 「조사사무처리규정」 실존")
+    expect(text).toContain("명칭 실존만") // 검증범위 정직 표기 유지
+    expect(text).not.toContain("환각 의심")
+  })
+
+  it("법령·행정규칙 DB 모두 0건이면 두 DB를 확인했음을 밝히고 ✗", async () => {
+    stubFetchByUrl([{ match: "target=admrul", body: ADMRUL_EMPTY_XML }])
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "「가공무역거래처리규정」 제5조를 준수한다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("✗")
+    expect(text).toContain("법령·행정규칙 DB 모두 0건")
   })
 })

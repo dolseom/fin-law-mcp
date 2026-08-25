@@ -14,7 +14,7 @@ import { findLaws, resolvedLawMatches, INTERPUNCT_CHARS, type LawInfo } from "..
 import { resolveLawAlias, LAW_ALIAS_CANONICALS } from "../lib/search-normalizer.js"
 import { buildJO } from "../lib/law-parser.js"
 import { toArray } from "../lib/xml-parser.js"
-import { isAdminRuleName, verifyAdminRuleCitation } from "./admin-rule-citation.js"
+import { isAdminRuleName, verifyAdminRuleCitation, tryVerifyAdminRuleCitation } from "./admin-rule-citation.js"
 import { SOURCE_FOOTER, truncateWithHint, FIN_LAW_NAMES } from "../lib/fin-common.js"
 import { resolveVersionAt } from "../lib/historical-utils.js"
 
@@ -95,7 +95,10 @@ const TONGCHIK_RE = new RegExp(`(${LAW_NAME_CHARS}{1,20}?법)\\s*(기본통칙|�
 // 앞은 문맥 흡수로 보고 잘라낸다. 조사 '의/에/과/와'는 법령명 내부에 흔해
 // ("산업재해보상보험의 보험료징수 등에 관한 법률") 컷 대상이 아니다.
 const CUT_ENDING_RE = /(?:은|는|을|를|이며|하며|이고|하고|에서|부터|까지|로써)$/
-const CUT_WORDS = new Set(["따라", "따른", "의한", "의해", "의하여", "위한", "위하여", "정한", "바와"])
+// 단독 어절 "와"·"과"는 앞 인용이 "제99조와"처럼 조사를 남기고 끝났을 때의 고아 조사다 —
+// 법령명 내부의 단독 접속은 "및"뿐이므로 컷해도 정식 명칭이 잘리지 않는다 (Opus B-3 재검증).
+// "및"은 넣으면 안 된다 ("고용보험 및 산업재해보상보험의 …"이 잘린다)
+const CUT_WORDS = new Set(["따라", "따른", "의한", "의해", "의하여", "위한", "위하여", "정한", "바와", "와", "과"])
 // 조문 참조 어절("제26조", "제1항")도 문맥 — "「법인세법」 제26조 및 지방세법 제1조"에서
 // 앞 인용의 조문이 다음 법령명("제26조 및 지방세법")에 흡수되는 것 방지
 const CUT_REF_RE = /^제?\d+(?:조|항|호|목)(?:의\d+)?[.,]?$/
@@ -111,10 +114,22 @@ function looksLikeAbbreviation(name: string): boolean {
   return n.length <= 6 && /(법|령|규칙)$/.test(n) && !/시행(령|규칙)$/.test(n)
 }
 
-/** 「…규칙」·「…규정」처럼 그 자체가 규칙인 법령명인가 (본법의 시행규칙과 구분) */
-function isStandaloneRule(name: string): boolean {
+/**
+ * 「…규칙」·「…규정」처럼 그 자체가 규칙·규정류인 이름인가 (본법·시행규칙과 구분).
+ * 이런 이름은 "같은 법"의 선행사가 아니고, 법령 DB 0건이어도 행정규칙(고시·훈령)일 수 있다.
+ */
+function isRuleLikeName(name: string): boolean {
   const n = name.replace(/\s+/g, "")
   return /(규칙|규정)$/.test(n) && !/시행규칙$/.test(n)
+}
+
+/**
+ * "같은 규칙"의 선행사가 될 수 있는 이름 — 규칙만. 규정을 포함하면
+ * 「…규칙」과 「…규정」이 섞인 문장에서 "같은 규칙"이 규정 쪽으로 해소된다 (Opus B-0③ 재검증)
+ */
+function isRuleAntecedentName(name: string): boolean {
+  const n = name.replace(/\s+/g, "")
+  return /규칙$/.test(n) && !/시행규칙$/.test(n)
 }
 
 // 알려진 정식 법령명 — 어절 컷보다 **먼저** 최장 일치를 시도한다.
@@ -129,6 +144,21 @@ const KNOWN_LAW_NAMES: string[] = (() => {
 const compact = (s: string) => s.replace(/\s+/g, "")
 
 /**
+ * normalized(공백 정규화됨)에서 앞쪽 비공백 문자 skip개를 지난 지점이
+ * 어절 시작(문두 또는 공백 바로 뒤)인가 — 압축 비교로 잃은 어절 경계를 원문에서 복원
+ */
+function startsAtWordBoundary(normalized: string, skip: number): boolean {
+  if (skip === 0) return true
+  let count = 0
+  for (let i = 0; i < normalized.length; i++) {
+    if (normalized[i] === " ") continue
+    if (count === skip) return normalized[i - 1] === " "
+    count++
+  }
+  return false
+}
+
+/**
  * namePart에서 법령명만 남긴다.
  * ① 알려진 정식 법령명이 끝에 붙어 있으면 그대로 사용 (어절 컷보다 우선)
  * ② 없으면 가장 오른쪽 종결 어절까지를 문맥으로 보고 제거
@@ -137,8 +167,12 @@ function trimToLawName(namePart: string): string {
   const normalized = namePart.replace(/\s+/g, " ").trim()
   const c = compact(normalized)
   for (const known of KNOWN_LAW_NAMES) {
-    // 공백 표기 흔들림을 흡수해 비교하되, 반환은 공식 표기로 통일한다
-    if (c.endsWith(compact(known))) return known
+    const ck = compact(known)
+    // 공백 표기 흔들림을 흡수해 비교하되, 반환은 공식 표기로 통일한다.
+    // 압축 꼬리 일치만으로는 부족하다 — "국가배상법"의 꼬리가 「상법」과 일치해
+    // 전혀 다른 법의 조문에 경고 없는 ✓가 나간다 ("난민법"→민법, "군형법"→형법도 동일).
+    // 사전명이 어절 경계에서 시작할 때만 인정한다 (Opus B-3 재검증 차단)
+    if (c.endsWith(ck) && startsAtWordBoundary(normalized, c.length - ck.length)) return known
   }
   const words = normalized.split(" ")
   for (let i = words.length - 2; i >= 0; i--) {
@@ -244,13 +278,16 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
       // 고시·훈령류는 본법 선행사가 되지 않지만, "같은 규칙"의 대상도 아니다
       hits.push({ idx: m.index!, c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "행정규칙" } })
     } else if (LAW_LIKE_SUFFIX_RE.test(name)) {
-      const standalone = isStandaloneRule(name)
       hits.push({
         idx: m.index!,
         c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "법령조문" },
         // 「…에 관한 규칙」은 본법이 아니므로 "같은 법"의 선행사가 되면 안 된다.
-        // 대신 "같은 규칙"의 선행사가 된다
-        ...(standalone ? { ruleAntecedent: name } : { antecedent: name.replace(/\s*시행(?:령|규칙)$/, "") }),
+        // 대신 "같은 규칙"의 선행사가 된다. 「…규정」은 어느 쪽 선행사도 아니다
+        ...(isRuleLikeName(name)
+          ? isRuleAntecedentName(name)
+            ? { ruleAntecedent: name }
+            : {}
+          : { antecedent: name.replace(/\s*시행(?:령|규칙)$/, "") }),
       })
     }
   }
@@ -262,11 +299,14 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     if (isAdminRuleName(name)) {
       hits.push({ idx: m.index!, c: { raw: m[0], lawName: name, kind: "행정규칙" } })
     } else if (LAW_LIKE_SUFFIX_RE.test(name)) {
-      const standalone = isStandaloneRule(name)
       hits.push({
         idx: m.index!,
         c: { raw: m[0], lawName: name, kind: "법령" },
-        ...(standalone ? { ruleAntecedent: name } : { antecedent: name.replace(/\s*시행(?:령|규칙)$/, "") }),
+        ...(isRuleLikeName(name)
+          ? isRuleAntecedentName(name)
+            ? { ruleAntecedent: name }
+            : {}
+          : { antecedent: name.replace(/\s*시행(?:령|규칙)$/, "") }),
       })
     }
   }
@@ -385,6 +425,24 @@ async function verifyLawCitation(
     return { mark: "⚠", line: `⚠ ${c.raw} — 조회 실패로 판정 불가 (없음 아님): ${msg}` }
   }
   if (!best && laws.length === 0) {
+    // 「…규정」·「…규칙」은 법령(대통령령·부령)일 수도, 행정규칙(고시·훈령)일 수도 있다.
+    // 법령 DB 0건만으로 ✗를 찍으면 「외국환거래규정」(기재부 고시)·「조사사무처리규정」
+    // (국세청 훈령) 같은 실존 문서에 '환각 의심' 낙인이 찍힌다 — 행정규칙 DB를
+    // 확인한 뒤 판정한다 (Opus B-0① 재검증)
+    let adminChecked = false
+    if (isRuleLikeName(c.lawName)) {
+      if (signal?.aborted) {
+        return { mark: "⚠", line: `⚠ ${c.raw} — 법령 DB 0건, 시간 상한 도달로 행정규칙 DB 미확인 — 판정 불가 (없음 아님)` }
+      }
+      try {
+        const adminHit = await tryVerifyAdminRuleCitation(apiClient, [c.lawName], c.raw)
+        if (adminHit) return { mark: "✓", line: adminHit }
+        adminChecked = true
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        return { mark: "⚠", line: `⚠ ${c.raw} — 법령 DB 0건, 행정규칙 DB 조회 실패로 판정 불가 (없음 아님): ${msg}` }
+      }
+    }
     // 미등재 약칭("조특법")에 대한 LIKE 0건은 법령 부존재의 증거가 아니라 별칭 사전의
     // 공백일 뿐이다. ✗(환각 의심)로 단정하면 실무자가 맞는 인용을 지운다 (Opus B-2)
     if (looksLikeAbbreviation(c.lawName)) {
@@ -393,7 +451,10 @@ async function verifyLawCitation(
         line: `⚠ ${c.raw} — 「${c.lawName}」은 약칭으로 보이며 법제처 검색에 잡히지 않았습니다 (없음 아님). 정식 명칭으로 다시 확인하세요`,
       }
     }
-    return { mark: "✗", line: `✗ ${c.raw} — 법령 「${c.lawName}」 실존하지 않음 (정상 조회 후 0건). 법령명 오기 또는 환각 의심` }
+    return {
+      mark: "✗",
+      line: `✗ ${c.raw} — ${adminChecked ? `「${c.lawName}」 법령·행정규칙 DB 모두 0건 (정상 조회)` : `법령 「${c.lawName}」 실존하지 않음 (정상 조회 후 0건)`}. 법령명 오기 또는 환각 의심`,
+    }
   }
   if (!best) {
     const alias = resolveLawAlias(c.lawName)
