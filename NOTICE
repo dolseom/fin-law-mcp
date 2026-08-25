@@ -9,6 +9,10 @@ fin-law-mcp
 src/lib/ 의 공통 모듈은 korean-law-mcp (MIT, https://github.com/chrisryugj/korean-law-mcp,
 기준 커밋 cc2c2f0b94af3cb43fcb09d9df17c018277a5b81)에서 가져와 수정한 것이다.
 
+src/tools/annex.ts 의 별표 파일 추출 로직(별표 선택값 해석·제목 매칭·묶음 별표
+섹션 추출·이미지 PDF 폴백)은 korean-law-mcp의 get_annexes 구현을 이식해
+법령 별표 전용으로 단순화한 것이다. 표 파싱은 kordoc(MIT, 동일 저작자)에 위임한다.
+
 - 원 저장소의 src/lib/law-antibot.ts 는 제3자 구현(LexLink-ko-mcp) 참조부의
   라이선스가 불명확하여 이 프로젝트에는 **포함하지 않았다**.
   이에 따라 fetch-with-retry.ts 의 해당 호출부도 제거했다.
