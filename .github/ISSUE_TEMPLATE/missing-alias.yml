@@ -1,0 +1,58 @@
+name: 미등재 약칭 제보 (실무 약칭이 안 풀립니다)
+description: 실무에서 쓰는 법령 약칭이 별칭 사전에 없어 조회·검증이 안 되는 경우를 제보합니다
+title: "[약칭] "
+labels: ["약칭", "search"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        법제처 검색은 실무 약칭("조특법", "근퇴법")을 모릅니다. 별칭 사전에 없으면 0건이 나오고,
+        그 0건이 "실존하지 않는 법령"으로 오해될 수 있습니다.
+
+        **약칭 하나면 충분합니다.** 나머지는 저희가 확인해 사전에 등재하겠습니다.
+
+  - type: input
+    id: alias
+    attributes:
+      label: 약칭
+      description: 실무에서 쓰는 표기 그대로
+      placeholder: "조특법"
+    validations:
+      required: true
+
+  - type: input
+    id: canonical
+    attributes:
+      label: 정식 법령명
+      description: 국가법령정보센터에 등재된 정확한 명칭
+      placeholder: "조세특례제한법"
+    validations:
+      required: true
+
+  - type: input
+    id: other_aliases
+    attributes:
+      label: 같이 쓰이는 다른 표기 (선택)
+      description: 쉼표로 구분해 주세요
+      placeholder: "조특, 조세특례법"
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 어떤 도구에서 막혔나요 (선택)
+      description: 도구 이름과 넣은 값, 받은 응답
+      placeholder: "fin_article(law=\"조특법\", article=\"제10조\") → 법령을 찾을 수 없음"
+      render: text
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 법령 종류
+      options:
+        - "법률"
+        - "시행령"
+        - "시행규칙"
+        - "행정규칙 (고시·훈령·예규·통칙)"
+        - "모르겠습니다"
+    validations:
+      required: true

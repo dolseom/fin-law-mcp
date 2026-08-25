@@ -4,6 +4,8 @@
  * 절대 깨지면 안 되는 회귀 기준 (PRD 04_PROJECT_SPEC):
  *   1. 소득세법 §12 조회 시 목(目)이 45개 이상 전부 나온다 (352자 절단 사고 재발 방지)
  *   2. fin_article(법인세법 제26조)에 시행령 위임조문 본문이 동봉된다 (묶음 = 제품)
+ *   3. fin_annex(법인세법 시행규칙 별표 6)가 기준내용연수표의 **값**을 표 구조 그대로 준다
+ *      (별표명 목록만 나오는 것은 통과가 아니다 — 실무자는 "제조업 몇 년"을 알아야 한다)
  *
  * CI 상시 실행 대상이 아니다 — 실 API 골든셋은 수동/야간 잡 (법제처 장애가 CI를 깨지 않게).
  * 실행: npx vitest run test/golden-live.test.ts
@@ -13,6 +15,7 @@ import { describe, it, expect, beforeAll } from "vitest"
 import { config } from "dotenv"
 import { LawApiClient } from "../src/lib/api-client.js"
 import { handleFinArticle } from "../src/tools/article.js"
+import { handleFinAnnex } from "../src/tools/annex.js"
 
 config({ quiet: true })
 
@@ -68,6 +71,48 @@ d("골든셋: fin_article", () => {
       expect(mokCount).toBeGreaterThanOrEqual(45)
       // 과거 사고: 352자로 절단 — 본문 길이 하한
       expect(text.length).toBeGreaterThan(4_000)
+    }
+  )
+})
+
+d("골든셋: fin_annex", () => {
+  it(
+    "법인세법 시행규칙 별표 6 — 기준내용연수표의 값이 표 구조로 추출된다",
+    { timeout: 60_000 },
+    async () => {
+      const res = await handleFinAnnex(apiClient, { law: "법인세법 시행규칙", annex_no: "6" })
+      expect(res.isError).toBeFalsy()
+      const text = res.content[0].text
+
+      // 어느 법령의 몇 번 별표인지 (다른 법령 별표 혼입 방어)
+      expect(text).toContain("법인세법 시행규칙 [별표 6]")
+      expect(text).toContain("업종별 자산의 기준내용연수 및 내용연수범위")
+      // 표 구조 보존 — 평문으로 뭉개지면 "업종↔연수" 대응이 깨져 값 인용이 불가능해진다
+      expect(text).toContain("<table>")
+
+      // 값 대조: 줄바꿈 태그·물결표(～ ∼ ~) 표기 흔들림을 흡수한 뒤 실값을 확인한다
+      const flat = text
+        .replace(/<br\s*\/?>/g, "")
+        .replace(/[～∼~]/g, "~")
+        .replace(/\s+/g, "")
+
+      // 제1호 4년(3년~5년) — 가죽·가방·신발 제조업 / 교육 서비스업
+      expect(flat).toContain("4년(3년~5년)")
+      expect(flat).toContain("15.가죽,가방및신발제조업")
+      expect(flat).toContain("85.교육서비스업")
+      // 제4호 8년(6년~10년) — 종합 건설업
+      expect(flat).toContain("8년(6년~10년)")
+      expect(flat).toContain("41.종합건설업")
+      // 제5호 10년(8년~12년) — 식료품 제조업
+      expect(flat).toContain("10년(8년~12년)")
+      expect(flat).toContain("10.식료품제조업")
+      // 제9호 20년(15년~25년) — 수도업 (표의 최장 구간)
+      expect(flat).toContain("20년(15년~25년)")
+      expect(flat).toContain("36.수도업")
+      // 표 하단 비고까지 절단 없이 도달한다 (중간에서 잘리면 마지막 구간이 사라진다)
+      expect(flat).toContain("별표3또는별표5의적용을받는자산을제외한")
+      // 출처 고지
+      expect(text).toContain("국가법령정보센터")
     }
   )
 })
