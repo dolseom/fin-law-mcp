@@ -13,6 +13,7 @@ import type { LawApiClient } from "../lib/api-client.js"
 import { stripNonLawKeywords } from "../lib/law-search.js"
 import { formatFetchFailure } from "../lib/errors.js"
 import { extractTag } from "../lib/xml-parser.js"
+import { isAdminRuleName, findAdminRule } from "./admin-rule-citation.js"
 import {
   FIN_MINISTRY_CODES,
   FIN_LAW_NAMES,
@@ -166,10 +167,38 @@ export async function handleFinLawSearch(
     }
 
     if (items.length === 0) {
+      // 「외국환거래규정」(기재부 고시)처럼 법령 DB에 없어도 행정규칙으로 실존하는
+      // 이름을 "✗없음"으로 단정하면 틀린 단정이 된다 — 같은 서버의 fin_verify는 ✓를
+      // 주는데 law_search가 ✗를 주던 모순 (실사용 시뮬레이션 A8). 행정규칙 DB를 확인한다
+      const ruleLike = /(규칙|규정)$/.test(compactName(stripped)) && !/시행규칙$/.test(compactName(stripped))
+      let adminNote = ""
+      if (ruleLike || isAdminRuleName(stripped)) {
+        try {
+          const rule = await findAdminRule(apiClient, stripped)
+          if (rule) {
+            const meta = [rule.ruleType, rule.orgName, rule.promDate ? `발령 ${rule.promDate}` : ""].filter(Boolean).join(" · ")
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `[행정규칙] "${stripped}" — 법령(법률·시행령·부령) DB에는 없지만 **행정규칙 「${rule.name}」**${meta ? ` (${meta})` : ""}로 실존합니다.\n` +
+                    `※ 행정규칙은 조문 단위 조회 미지원 — 인용 검증은 fin_verify, 원문은 국가법령정보센터(law.go.kr)에서 행정규칙으로 검색하세요.` +
+                    (basis_date ? `\n※ 기준일 검색은 법령만 지원 — 위 행정규칙 실존은 현행 기준입니다` : "") +
+                    `\n\n${SOURCE_FOOTER}`,
+                },
+              ],
+            }
+          }
+          adminNote = " · 행정규칙 DB에도 0건"
+        } catch {
+          adminNote = " · 행정규칙 DB는 확인 실패(없음 단정 아님)"
+        }
+      }
       // 0건이어도 주제어 힌트는 준다 (주제어→법령 매핑 부재가 기존 병목)
       const hints = TOPIC_LAW_HINTS.filter((h) => h.pattern.test(query))
       const basisSuffix = basis_date ? ` — ${basis_date} 시점에 시행 중이던 법령 없음 (제정 이전이거나 표기 확인 필요)` : ""
-      let text = `[LAW_NOT_FOUND] "${stripped}" 검색 결과 0건 (정상 조회 — ✗없음)${strippedNote}${basisSuffix}`
+      let text = `[LAW_NOT_FOUND] "${stripped}" 검색 결과 0건 (정상 조회 — ✗없음)${adminNote}${strippedNote}${basisSuffix}`
       if (hints.length > 0) {
         text += `\n💡 주제어 힌트: ${[...new Set(hints.flatMap((h) => h.laws))].join(" · ")} — 이 법령명으로 fin_article 또는 재검색을 시도하세요`
       }

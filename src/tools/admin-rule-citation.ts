@@ -23,14 +23,15 @@ export function isAdminRuleName(name: string): boolean {
   return STRICT_ADMIN_SUFFIX.test(trimmed) || SOFT_ADMIN_SUFFIX.test(trimmed)
 }
 
-interface AdminRuleMatch {
+export interface AdminRuleMatch {
   name: string
   promDate?: string
   orgName?: string
   ruleType?: string
 }
 
-async function findAdminRule(
+/** 행정규칙 DB(admrul)에서 명칭 실존 확인 — verify 외에 law_search의 0건 폴백도 사용 */
+export async function findAdminRule(
   apiClient: LawApiClient,
   name: string,
   apiKey?: string

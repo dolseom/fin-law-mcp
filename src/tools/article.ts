@@ -298,6 +298,17 @@ export async function handleFinArticle(
   })().catch((e) => failed(e instanceof Error ? e.message : String(e)))
 
   const threeTierP: Promise<SectionResult> = (async () => {
+    if (efYd) {
+      // 3단비교는 현행 기준만 제공된다 — 기준일 시행본에 현행 위임 매핑을 붙이면
+      // 무관한 조문이 "위임"으로 실린다 (1995년 §55 국내원천소득에 현행 세율 조문의
+      // 시행령 §92가 붙던 실사용 시뮬레이션 실측). 확정 불가는 생략+고지가 정직하다.
+      // 이 분기가 없으면 아래 시행령 본문 조회도 현행 MST+과거 efYd로 빈 응답을 받아
+      // 조용히 삼켜진다 (CLAUDE.local에 기록된 함정)
+      return {
+        status: "성공" as const,
+        text: "(기준일 조회 미지원 — 법제처 3단비교는 현행 기준만 제공되어 기준일 시행본의 위임 관계를 확정할 수 없습니다. 현행 위임은 basis_date 없이 조회하세요)",
+      }
+    }
     const jsonText = await apiClient.getThreeTier({ mst: law.mst, knd: "2", signal: aborter.signal })
     const data = parseThreeTierDelegation(JSON.parse(jsonText))
     const target = data.articles.find((a) => a.joNum.replace(/\s+/g, "") === articleLabel.replace(/\s+/g, ""))
@@ -306,10 +317,14 @@ export async function handleFinArticle(
     }
     const dels = target.delegations
 
-    // 3단비교가 본문(content)을 안 실어주는 경우: 시행령 위임조문 상위 3건은 직접 조회해 동봉
-    // (묶음이 곧 제품 — 실무자가 다음에 물을 것을 미리 답한다)
+    // 3단비교가 본문(content)을 안 실어주는 경우: 시행령·시행규칙 위임조문 상위 3건은
+    // 직접 조회해 동봉 (묶음이 곧 제품 — 실무자가 다음에 물을 것을 미리 답한다).
+    // 시행규칙 제외는 조용한 누락이었다 — 내용연수·상각률·이자율이 다 시행규칙에 있다
+    // (실사용 시뮬레이션 ③: 법인세법 §26의 시행규칙 §22가 제목만 나오던 실측)
     const bodyMap = new Map<string, string>()
-    const needBody = dels.filter((d) => d.type === "시행령" && !(d.content || "").trim() && d.joNum).slice(0, 3)
+    const needBody = dels
+      .filter((d) => (d.type === "시행령" || d.type === "시행규칙") && !(d.content || "").trim() && d.joNum)
+      .slice(0, 3)
     if (needBody.length > 0) {
       // 본문 동봉은 3초 예산 안에서만 — 예산이 끝나면 자식 호출까지 실제로 끊는다.
       // race만 걸고 두면 진행 중 fetch가 바깥 6초 deadline까지 살아 쿼터를 소모한다
@@ -318,31 +333,42 @@ export async function handleFinArticle(
       const onOuterAbort = () => bodyAborter.abort()
       aborter.signal.addEventListener("abort", onOuterAbort, { once: true })
       const fetchBodies = (async () => {
-        const decreeName = data.meta.sihyungryungName || needBody[0].lawName || ""
-        if (!decreeName) return
-        const decreeLaws = await findLaws(apiClient, decreeName, undefined, 3, 100, bodyAborter.signal)
-        // 정확 일치가 없으면 동봉을 생략하고 목록 표시로 폴백 — 엉뚱한 법령의 조문을
-        // "시행령 본문"으로 동봉하는 것보다 안 싣는 쪽이 안전 (Opus I1: 무고지 폴백 제거)
-        const decree = decreeLaws.find((l) => resolvedLawMatches(decreeName, l.lawName))
-        if (!decree) return
+        // 소속 법령별로 묶어 각자 MST를 해소한다 — 시행규칙 조문을 시행령 MST로
+        // 조회하면 엉뚱한 조문이 "본문"으로 동봉된다
+        const byName = new Map<string, typeof needBody>()
+        for (const d of needBody) {
+          const name =
+            d.lawName || (d.type === "시행령" ? data.meta.sihyungryungName : data.meta.sihyungkyuchikName) || ""
+          if (!name) continue
+          const group = byName.get(name)
+          if (group) group.push(d)
+          else byName.set(name, [d])
+        }
         await Promise.all(
-          needBody.map(async (d) => {
-            try {
-              const extra: Record<string, string> = { MST: decree.mst, JO: buildJO(d.joNum!) }
-              if (efYd) extra.efYd = efYd
-              const jt = await apiClient.fetchApi({
-                endpoint: "lawService.do",
-                target: "eflaw",
-                type: "JSON",
-                extraParams: extra,
-                signal: bodyAborter.signal,
-                expectedJsonKey: "법령",
+          [...byName.entries()].map(async ([decreeName, items]) => {
+            const decreeLaws = await findLaws(apiClient, decreeName, undefined, 3, 100, bodyAborter.signal)
+            // 정확 일치가 없으면 동봉을 생략하고 목록 표시로 폴백 — 엉뚱한 법령의 조문을
+            // "시행령 본문"으로 동봉하는 것보다 안 싣는 쪽이 안전 (Opus I1: 무고지 폴백 제거)
+            const decree = decreeLaws.find((l) => resolvedLawMatches(decreeName, l.lawName))
+            if (!decree) return
+            await Promise.all(
+              items.map(async (d) => {
+                try {
+                  const jt = await apiClient.fetchApi({
+                    endpoint: "lawService.do",
+                    target: "eflaw",
+                    type: "JSON",
+                    extraParams: { MST: decree.mst, JO: buildJO(d.joNum!) },
+                    signal: bodyAborter.signal,
+                    expectedJsonKey: "법령",
+                  })
+                  const body = renderArticleUnits(JSON.parse(jt)?.법령)
+                  if (body) bodyMap.set(`${d.type}|${d.joNum!}`, body)
+                } catch {
+                  /* 개별 조문 실패는 목록 표시로 폴백 (부분 실패 계약) */
+                }
               })
-              const body = renderArticleUnits(JSON.parse(jt)?.법령)
-              if (body) bodyMap.set(d.joNum!, body)
-            } catch {
-              /* 개별 조문 실패는 목록 표시로 폴백 (부분 실패 계약) */
-            }
+            )
           })
         )
       })()
@@ -364,7 +390,7 @@ export async function handleFinArticle(
     for (const d of dels) {
       const label = d.type === "시행령" ? "[시행령]" : d.type === "시행규칙" ? "[시행규칙]" : "[행정규칙]"
       out += `${label} ${d.lawName || ""} ${d.joNum || ""}${d.title ? ` (${d.title})` : ""}\n`
-      const body = (d.content || "").trim() || (d.joNum ? bodyMap.get(d.joNum) : "")
+      const body = (d.content || "").trim() || (d.joNum ? bodyMap.get(`${d.type}|${d.joNum}`) : "")
       if (body) out += `${cleanHtml(body).trim()}\n`
       out += `\n`
     }
@@ -385,6 +411,11 @@ export async function handleFinArticle(
 
   // 시행예정 개정 경고 — 이미 공포된 미래 개정을 모르면 개정 직전 검토에서 사고
   const upcomingP: Promise<SectionResult> = (async () => {
+    if (efYd) {
+      // 개정 예정은 현행 조회 전용 — 1995년 기준 응답에 "2027-01-01 시행 개정 공포됨"이
+      // 붙던 혼입 제거 (실사용 시뮬레이션 d). 기준일 모드의 생략은 상단 조회 범위 고지가 설명한다
+      return { status: "성공" as const, text: "" }
+    }
     const xml = await apiClient.searchLaw(law.lawName, undefined, 20, "eflaw", aborter.signal)
     const ups = parseUpcomingVersions(xml, law.lawName)
     if (ups.length === 0) return { status: "성공" as const, text: "" }
@@ -450,6 +481,11 @@ export async function handleFinArticle(
   const overall = failedNames.length === 0 ? "전체 성공" : `부분 성공 — 실패 섹션: ${failedNames.join(", ")}`
 
   const basisLine = input.basis_date ? `[기준일: ${input.basis_date} 시행 기준${basisNote}]` : `[기준: 현행]`
+  // 기준일 헤더 아래 현행 데이터가 무고지로 섞이면 "헤더는 기준일, 내용은 현행"인
+  // 조용한 거짓이 된다 (실사용 시뮬레이션 차단 지적) — 섹션별 기준을 상단에 못박는다
+  const basisScope = efYd
+    ? `※ 기준일 조회 범위: 조문 본문·시행일자만 ${input.basis_date} 시행본입니다. 위임(3단비교)·개정 예정은 법제처가 현행 기준만 제공하여 생략했고, [현행 기준] 표시 섹션은 현행 데이터입니다`
+    : ""
   const statusMark = law.status === "연혁" ? " ⚠연혁(폐지·과거본)" : ""
   const publicUrl = `https://www.law.go.kr/법령/${law.lawName}/${articleLabel}`
 
@@ -460,14 +496,15 @@ export async function handleFinArticle(
 
   const text = [
     `${basisLine} ${overall}`,
+    basisScope,
     ``,
     sec({ ...sections[0] }, `■ ${law.lawName} ${articleLabel}${statusMark}`),
     ``,
     sec({ ...sections[1] }, `■ 시행령·시행규칙 위임`),
     ``,
-    sec({ ...sections[2] }, `■ 관련 국세청 예규`),
+    sec({ ...sections[2] }, `■ 관련 국세청 예규${efYd ? " [현행 기준 — 기준일 필터 없음]" : ""}`),
     ``,
-    sec({ ...sections[3] }, `■ 별표`),
+    sec({ ...sections[3] }, `■ 별표${efYd ? " [현행 기준 — 기준일 별표 조회는 법제처 미지원]" : ""}`),
     ``,
     `■ 법령 정보 — 시행일자 ${law.effectiveDate || "미상"} · 원문: ${encodeURI(publicUrl)}`,
     upcomingR.status === "성공"

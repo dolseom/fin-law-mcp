@@ -124,39 +124,39 @@ const LOCAL_INCOME_TAX_RATIO = 0.1
 export const FinCalcInputSchema = z.discriminatedUnion("calc_type", [
   z.object({
     calc_type: z.literal("임원퇴직금한도"),
-    annual_salary: z.number().positive().describe("퇴직 직전 1년 총급여액 (원) — 손금불산입 상여·비과세소득 제외액"),
-    years: z.number().int().min(0).describe("근속 연수 (년 단위 정수)"),
-    months: z.number().int().min(0).max(11).default(0).describe("1년 미만 잔여 개월 수 (1개월 미만 절사)"),
+    annual_salary: z.number().positive("annual_salary(총급여액)는 0보다 커야 합니다").describe("퇴직 직전 1년 총급여액 (원) — 손금불산입 상여·비과세소득 제외액"),
+    years: z.number().int("years(근속 연수)는 정수여야 합니다").min(0, "years(근속 연수)는 0 이상이어야 합니다").describe("근속 연수 (년 단위 정수)"),
+    months: z.number().int("months(잔여 개월)는 정수여야 합니다").min(0, "months(잔여 개월)는 0 이상이어야 합니다").max(11, "months(잔여 개월)는 11 이하여야 합니다").default(0).describe("1년 미만 잔여 개월 수 (1개월 미만 절사)"),
   }),
   z.object({
     calc_type: z.literal("기업업무추진비한도"),
-    revenue: z.number().min(0).describe("일반 수입금액 (원)"),
-    related_party_revenue: z.number().min(0).default(0).describe("특수관계인 거래 수입금액 (원)"),
+    revenue: z.number().min(0, "revenue(수입금액)는 0 이상이어야 합니다").describe("일반 수입금액 (원)"),
+    related_party_revenue: z.number().min(0, "related_party_revenue(특수관계인 수입금액)는 0 이상이어야 합니다").default(0).describe("특수관계인 거래 수입금액 (원)"),
     is_sme: z.boolean().default(false).describe("중소기업 여부"),
-    business_months: z.number().int().min(1).max(12).default(12).describe("사업연도 월수 (기본 12)"),
+    business_months: z.number().int("business_months(월수)는 정수여야 합니다").min(1, "business_months(월수)는 1 이상이어야 합니다").max(12, "business_months(월수)는 12 이하여야 합니다").default(12).describe("사업연도 월수 (기본 12)"),
   }),
   z.object({
     calc_type: z.literal("감가상각비"),
-    acquisition_cost: z.number().positive().describe("취득가액 (원) — 법인세법 시행령 §72의 취득가액"),
-    useful_life: z.number().int().min(2).max(60).describe("내용연수 (년) — 별표 4 수록 범위는 2~60년"),
+    acquisition_cost: z.number().positive("acquisition_cost(취득가액)는 0보다 커야 합니다").describe("취득가액 (원) — 법인세법 시행령 §72의 취득가액"),
+    useful_life: z.number().int("useful_life(내용연수)는 정수여야 합니다").min(2, "useful_life(내용연수)는 2년 이상이어야 합니다 (별표 4 수록 범위)").max(60, "useful_life(내용연수)는 60년 이하여야 합니다 (별표 4 수록 범위)").describe("내용연수 (년) — 별표 4 수록 범위는 2~60년"),
     method: z.enum(["정액법", "정률법"]).describe("상각방법"),
-    remaining_value: z.number().min(0).optional().describe("[정률법 필수] 기초 미상각잔액 (원) = 취득가액 − 감가상각누계액"),
-    business_months: z.number().int().min(1).max(12).default(12).describe("상각 대상 월수 (사업연도 월수 또는 기중 취득 시 사업사용 월수, 기본 12)"),
+    remaining_value: z.number().min(0, "remaining_value(기초 미상각잔액)는 0 이상이어야 합니다").optional().describe("[정률법 필수] 기초 미상각잔액 (원) = 취득가액 − 감가상각누계액"),
+    business_months: z.number().int("business_months(월수)는 정수여야 합니다").min(1, "business_months(월수)는 1 이상이어야 합니다").max(12, "business_months(월수)는 12 이하여야 합니다").default(12).describe("상각 대상 월수 (사업연도 월수 또는 기중 취득 시 사업사용 월수, 기본 12)"),
   }),
   z.object({
     calc_type: z.literal("가지급금인정이자"),
-    balance_days: z.number().min(0).optional().describe("가지급금 적수 (원×일) — principal·days 대신 직접 입력"),
-    principal: z.number().min(0).optional().describe("가지급금 잔액 (원) — days와 함께 쓰면 적수를 계산한다"),
-    days: z.number().int().min(0).optional().describe("대여 일수 (일) — 발생 초일 산입, 회수일 제외"),
+    balance_days: z.number().min(0, "balance_days(적수)는 0 이상이어야 합니다").optional().describe("가지급금 적수 (원×일) — principal·days 대신 직접 입력"),
+    principal: z.number().min(0, "principal(가지급금 잔액)은 0 이상이어야 합니다").optional().describe("가지급금 잔액 (원) — days와 함께 쓰면 적수를 계산한다"),
+    days: z.number().int("days(대여 일수)는 정수여야 합니다").min(0, "days(대여 일수)는 0 이상이어야 합니다").optional().describe("대여 일수 (일) — 발생 초일 산입, 회수일 제외"),
     rate_type: z.enum(["당좌대출이자율", "가중평균차입이자율"]).default("당좌대출이자율").describe("적용 이자율 종류"),
-    weighted_average_rate: z.number().min(0).max(100).optional().describe("[가중평균차입이자율 선택 시 필수] 연 이자율을 %로 (예: 9 = 연 9%)"),
-    paid_interest: z.number().min(0).default(0).describe("실제 수령한 약정이자 (원, 기본 0)"),
+    weighted_average_rate: z.number().min(0, "weighted_average_rate(이자율)는 0 이상이어야 합니다").max(100, "weighted_average_rate(이자율)는 100 이하로, %단위로 입력하세요 (예: 9 = 연 9%)").optional().describe("[가중평균차입이자율 선택 시 필수] 연 이자율을 %로 (예: 9 = 연 9%)"),
+    paid_interest: z.number().min(0, "paid_interest(수령 약정이자)는 0 이상이어야 합니다").default(0).describe("실제 수령한 약정이자 (원, 기본 0)"),
     is_leap_year: z.boolean().default(false).describe("윤년 여부 — true면 366일로 나눈다 (기본 false=365일)"),
   }),
   z.object({
     calc_type: z.literal("퇴직소득세"),
-    severance_pay: z.number().min(0).describe("퇴직소득금액 (원) = 퇴직급여액 − 비과세 퇴직소득"),
-    service_years: z.number().positive().describe("근속연수 (년) — 1년 미만은 1년으로 올림한다 (소득세법 §48①)"),
+    severance_pay: z.number().min(0, "severance_pay(퇴직소득금액)는 0 이상이어야 합니다").describe("퇴직소득금액 (원) = 퇴직급여액 − 비과세 퇴직소득"),
+    service_years: z.number().positive("service_years(근속연수)는 0보다 커야 합니다").describe("근속연수 (년) — 1년 미만은 1년으로 올림한다 (소득세법 §48①)"),
   }),
 ])
 
@@ -165,7 +165,8 @@ export const FIN_CALC_TOOL = {
   description:
     "[재무·세무·회계 전용 — 법정 한도·세액 계산은 직접 계산하지 말고 이 도구를 사용] " +
     "세법에 산식이 명문화된 항목을 결정형 코드로 계산한다 (계산 과정·근거 조문 동봉). " +
-    "지원: 임원퇴직금한도(법인세법 시행령 §44④2), 기업업무추진비한도(법인세법 §25④), " +
+    "지원: 임원퇴직금한도(법인세법 시행령 §44④2 — 법인세 손금 한도이며, 근로기준법·근퇴법상 " +
+    "일반 근로자 퇴직금 계산은 미지원), 기업업무추진비한도(법인세법 §25④), " +
     "감가상각비 상각범위액(법인세법 시행령 §26 + 시행규칙 별표 4 상각률), " +
     "가지급금인정이자(법인세법 시행령 §89③ + 시행규칙 §43②), " +
     "퇴직소득세(소득세법 §48·§55 + 지방소득세).",
@@ -514,6 +515,8 @@ export async function handleFinCalc(
       `근거: 법인세법 시행령 제44조제4항제2호 (근속연수 계산: 법인세법 시행규칙 제22조)`,
       ``,
       `⚠ 주의:`,
+      `  · 이 값은 **법인세법상 임원 퇴직급여의 손금산입 한도**다 — 근로기준법·근퇴법상 일반 근로자`,
+      `    퇴직금(평균임금 30일분 × 근속연수)이 아니다. 일반 퇴직금 계산은 이 도구가 지원하지 않음`,
       `  · 정관(또는 정관 위임 지급규정)에 퇴직급여액·기준이 있으면 그 금액이 한도 (§44④1호 — 이 산식 미적용)`,
       `  · 총급여에서 손금불산입 상여(시행령 §43)와 비과세소득은 제외해야 함 — 입력값 확인`,
       `  · 2012-01-01 이후 적립분 임원 퇴직소득 한도(소득세법 §22③)는 별도 판단`,

@@ -33,7 +33,9 @@ const DOMAIN_LABEL: Record<Domain, string> = {
   nts: "국세청 예규",
   tax_tribunal: "조세심판원 재결례",
   interpretation: "법제처 해석례",
-  precedent: "대법원 판례",
+  // 법제처 판례 DB는 대법원만이 아니라 전 심급(고법·지법 포함)을 준다 — "대법원 판례"로
+  // 라벨하면 하급심이 최상위 전거로 읽힌다 (실사용 시뮬레이션 ④: 5건 중 대법원 1건 실측)
+  precedent: "법원 판례",
 }
 
 // 전거 서열 주석 — 각 자료의 법적 성격을 명시해 오용(예규를 확정 근거로 인용 등)을 막는다
@@ -41,7 +43,7 @@ const DOMAIN_AUTHORITY: Record<Domain, string> = {
   nts: "행정해석 — 과세실무 기준이나 법원 구속력 없음",
   tax_tribunal: "불복 재결 — 인용 재결은 과세관청 기속",
   interpretation: "정부유권해석",
-  precedent: "법원 판단 — 전거 최상위",
+  precedent: "법원 판단 — 심급 확인 필요: 대법원 확정판결이 최상위, 하급심은 상소·확정 여부 확인",
 }
 
 export const FinRulingSearchInputSchema = z.object({
@@ -58,7 +60,7 @@ export const FIN_RULING_SEARCH_TOOL = {
   name: "fin_ruling_search",
   description:
     "[재무·세무·회계 전용 — 예규·심판례·판례 검색은 이 도구를 우선 사용] " +
-    "국세청 예규 + 조세심판원 재결례 + 법제처 해석례 + 대법원 판례를 한 번에 검색해 최신순 통합 목록을 반환한다 " +
+    "국세청 예규 + 조세심판원 재결례 + 법제처 해석례 + 법원 판례(전 심급)를 한 번에 검색해 최신순 통합 목록을 반환한다 " +
     "(문서번호·일자·제목). 예규 본문이 필요하면 fin_nts_ruling.",
   inputSchema: {
     type: "object",

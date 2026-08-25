@@ -23,14 +23,15 @@ export const FinAnnexInputSchema = z.object({
   annex_no: z
     .string()
     .optional()
-    .describe("별표 선택 (예: '6', '별표6', '1의2', '000600') — 지정 시 해당 별표 파일을 내려받아 표 내용을 마크다운으로 반환"),
+    .describe("별표 선택 (예: '6', '별표6', '1의2', '000600') — 지정 시 해당 별표 파일을 내려받아 표 내용을 반환 (병합 셀은 HTML table)"),
 })
 
 export const FIN_ANNEX_TOOL = {
   name: "fin_annex",
   description:
     "[재무·세무·회계 전용 — 세율표·감가상각 내용연수표·서식은 이 도구를 우선 사용] " +
-    "법령의 별표·서식 목록을 반환하고, annex_no를 지정하면 해당 별표의 표 내용을 마크다운으로 추출한다. " +
+    "법령의 별표·서식 목록을 반환하고, annex_no를 지정하면 해당 별표의 표 내용을 추출해 반환한다 " +
+    "(병합 셀 보존을 위해 표는 HTML table로 나온다). " +
     "내용연수표·세율표는 대개 시행규칙에 있다 (예: law='법인세법 시행규칙', keyword='내용연수' → 목록에서 번호 확인 후 annex_no로 재호출).",
   inputSchema: {
     type: "object",
@@ -38,7 +39,7 @@ export const FIN_ANNEX_TOOL = {
       law: { type: "string", description: "법령명 (내용연수표·세율표는 대개 시행규칙)" },
       keyword: { type: "string", description: "별표명 필터 키워드" },
       kind: { type: "string", enum: ["1", "2", "3", "4", "5"], description: "1=별표(기본) 2=서식 3=별지 4=별도 5=부록" },
-      annex_no: { type: "string", description: "별표 선택 (예: '6', '별표6', '1의2') — 지정 시 표 내용을 마크다운으로 추출" },
+      annex_no: { type: "string", description: "별표 선택 (예: '6', '별표6', '1의2') — 지정 시 표 내용을 추출해 반환 (병합 셀은 HTML table)" },
     },
     required: ["law"],
   },

@@ -55,6 +55,36 @@ d("골든셋: fin_article", () => {
   )
 
   it(
+    "기준일 조회(2015-07-01 법인세법 §55) — 현행 데이터가 무고지로 섞이지 않는다",
+    { timeout: 30_000 },
+    async () => {
+      // 실사용 시뮬레이션 차단 지적: 기준일 헤더 아래 별표·위임·개정경고가 현행 데이터로
+      // 무고지 혼입 + 위임 본문 공백 삼킴 ("헤더는 기준일, 내용은 현행"인 조용한 거짓)
+      const res = await handleFinArticle(apiClient, {
+        law: "법인세법",
+        article: "제55조",
+        basis_date: "2015-07-01",
+        include_rulings: false,
+      })
+      expect(res.isError).toBeFalsy()
+      const text = res.content[0].text
+
+      // 조문 본문은 실제 2015년 시행본 (당시 최고세율 22% — 현행과 다름)
+      expect(text).toContain("100분의 22")
+      // 섹션별 기준을 상단에 고지
+      expect(text).toContain("기준일 조회 범위")
+      // 위임(3단비교)은 현행 매핑을 붙이지 않고 정직하게 생략
+      // ("월수의 계산" 문구는 §55② 조문 본문에 정당하게 존재 — 위임 누출 지표는 조문 번호로)
+      expect(text).toContain("기준일 조회 미지원")
+      expect(text).not.toContain("시행령 제92조") // 현행 §55의 위임 매핑이 붙으면 회귀
+      // 별표는 [현행 기준] 라벨
+      expect(text).toContain("별표 [현행 기준")
+      // 개정 예정 경고(현행 전용)가 기준일 응답에 붙지 않는다
+      expect(text).not.toContain("개정 예정 —")
+    }
+  )
+
+  it(
     "소득세법 제12조 — 목(目) 45개 이상 전부 나온다 (잘림 감지)",
     { timeout: 30_000 },
     async () => {
