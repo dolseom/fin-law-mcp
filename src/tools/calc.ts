@@ -141,7 +141,15 @@ export const FinCalcInputSchema = z.discriminatedUnion("calc_type", [
     useful_life: z.number().int("useful_life(내용연수)는 정수여야 합니다").min(2, "useful_life(내용연수)는 2년 이상이어야 합니다 (별표 4 수록 범위)").max(60, "useful_life(내용연수)는 60년 이하여야 합니다 (별표 4 수록 범위)").describe("내용연수 (년) — 별표 4 수록 범위는 2~60년"),
     method: z.enum(["정액법", "정률법"]).describe("상각방법"),
     remaining_value: z.number().min(0, "remaining_value(기초 미상각잔액)는 0 이상이어야 합니다").optional().describe("[정률법 필수] 기초 미상각잔액 (원) = 취득가액 − 감가상각누계액"),
-    business_months: z.number().int("business_months(월수)는 정수여야 합니다").min(1, "business_months(월수)는 1 이상이어야 합니다").max(12, "business_months(월수)는 12 이하여야 합니다").default(12).describe("상각 대상 월수 (사업연도 월수 또는 기중 취득 시 사업사용 월수, 기본 12)"),
+    business_months: z.number().int("business_months(월수)는 정수여야 합니다").min(1, "business_months(월수)는 1 이상이어야 합니다").max(12, "business_months(월수)는 12 이하여야 합니다").default(12).describe("상각 대상 월수 (기본 12). 12 미만이면 short_period_basis로 그 사유를 명시할 것"),
+    short_period_basis: z
+      .enum(["기중취득", "사업연도변경의제", "사업연도1년미만"])
+      .optional()
+      .describe(
+        "[business_months < 12일 때 필수] 1년 미만 월수의 사유 — 산식이 다르다: " +
+          "기중취득·사업연도변경의제(법 §7·§8)는 월할(시행령 §26⑧⑨), " +
+          "사업연도1년미만(법 §6의 사업연도 자체가 1년 미만)은 환산내용연수 상각률(시행령 §28②)"
+      ),
   }),
   z.object({
     calc_type: z.literal("가지급금인정이자"),
@@ -192,6 +200,12 @@ export const FIN_CALC_TOOL = {
       useful_life: { type: "integer", minimum: 2, maximum: 60, description: "[감가상각비·필수] 내용연수 (년, 별표 4 수록 범위 2~60)" },
       method: { type: "string", enum: ["정액법", "정률법"], description: "[감가상각비·필수] 상각방법" },
       remaining_value: { type: "number", minimum: 0, description: "[감가상각비·정률법일 때 필수] 기초 미상각잔액 (원) = 취득가액 − 감가상각누계액" },
+      short_period_basis: {
+        type: "string",
+        enum: ["기중취득", "사업연도변경의제", "사업연도1년미만"],
+        description:
+          "[감가상각비·business_months<12일 때 필수] 1년 미만 사유 — 기중취득·사업연도변경의제는 월할(§26⑧⑨), 사업연도1년미만은 환산내용연수 상각률(§28②)로 산식이 다름",
+      },
       balance_days: { type: "number", minimum: 0, description: "[가지급금인정이자] 가지급금 적수 (원×일) — principal·days 대신 직접 입력" },
       principal: { type: "number", minimum: 0, description: "[가지급금인정이자] 가지급금 잔액 (원) — days와 함께 입력" },
       days: { type: "integer", minimum: 0, description: "[가지급금인정이자] 대여 일수 (일) — principal과 함께 입력" },
@@ -297,12 +311,19 @@ export function calcEntertainmentLimit(revenue: number, relatedPartyRevenue: num
   return { base, generalAmount, relatedAmount, limit }
 }
 
+/** 1년 미만 월수의 성격 — §26⑧⑨(월할)과 §28②(환산내용연수)는 산식이 다르다 */
+export type ShortPeriodBasis = "기중취득" | "사업연도변경의제" | "사업연도1년미만"
+
 /**
- * 감가상각 상각범위액 — 법인세법 시행령 §26 + 시행규칙 별표 4 상각률
+ * 감가상각 상각범위액 — 법인세법 시행령 §26·§28 + 시행규칙 별표 4 상각률
  *
  * 정액법(§26②1): 취득가액 × 상각률
  * 정률법(§26②2): 미상각잔액 × 상각률
- * 월할(§26⑧⑨): 사업연도가 1년 미만이거나 기중 취득이면 × 월수/12
+ * 월할(§26⑧⑨): 사업연도 변경·의제(법 §7·§8)로 그 해만 1년 미만이거나 기중 취득이면 × 월수/12
+ * 환산내용연수(§28②): **사업연도 자체(법 §6)가 1년 미만**이면 월할이 아니라
+ *   환산내용연수(= 내용연수 × 12 ÷ 사업연도 월수)의 별표 상각률을 쓴다. 정률법에서 두 방식은
+ *   결과가 다르다 (6개월 사업연도 2회 = 1-(1-0.259)² = 0.451로 연 상각률과 일치하는 쪽이
+ *   환산내용연수 방식 — 월할이면 0.400으로 어긋난다. Opus 리뷰 차단 지적, 실측 -7.5~-22.8%)
  * 정률법 마무리(§26⑥ 단서): 미상각잔액이 최초로 취득가액의 5% 이하가 되는 사업연도에
  *   취득가액의 5%를 상각범위액에 가산한다. 그 결과 미상각잔액을 넘게 되므로 실질적으로
  *   그 해에 비망가액(§26⑦)만 남기고 전액 상각된다.
@@ -312,12 +333,31 @@ export function calcDepreciationLimit(
   usefulLife: number,
   method: "정액법" | "정률법",
   remainingValue: number,
-  months: number
+  months: number,
+  shortBasis?: ShortPeriodBasis
 ) {
-  const rates = DEPRECIATION_RATES.get(usefulLife)
-  if (!rates) throw new Error(`내용연수 ${usefulLife}년은 별표 4에 없습니다 (수록 범위 2~60년)`)
+  let effectiveLife = usefulLife
+  let converted = false
+  let monthRatio = months / 12
+  if (months < 12 && shortBasis === "사업연도1년미만") {
+    const conv = (usefulLife * 12) / months
+    if (!Number.isInteger(conv)) {
+      throw new Error(
+        `환산내용연수(${usefulLife}년 × 12 ÷ ${months}개월 = ${conv.toFixed(2)}년)가 정수가 아닙니다 — ` +
+          `별표 4는 정수 내용연수만 수록하며 이 경우의 처리는 조문에 명문 규정이 없어 계산을 제공하지 않습니다 (추측 금지)`
+      )
+    }
+    if (conv > 60) {
+      throw new Error(`환산내용연수 ${conv}년이 별표 4 수록 범위(2~60년)를 벗어나 계산할 수 없습니다`)
+    }
+    // §28②는 상각률 자체를 바꾸는 방식이라 월할하지 않는다
+    effectiveLife = conv
+    converted = true
+    monthRatio = 1
+  }
+  const rates = DEPRECIATION_RATES.get(effectiveLife)
+  if (!rates) throw new Error(`내용연수 ${effectiveLife}년은 별표 4에 없습니다 (수록 범위 2~60년)`)
   const rate = method === "정액법" ? rates.straight : rates.declining
-  const monthRatio = months / 12
 
   const base = method === "정액법" ? acquisitionCost : remainingValue
   const regular = base * rate * monthRatio
@@ -329,15 +369,21 @@ export function calcDepreciationLimit(
   const memoValue = Math.min(residual, MEMO_VALUE)
   const cap = Math.max(remainingValue - memoValue, 0)
 
+  // 미상각잔액이 이미 비망가액 이하면 상각할 것이 없다 — "0원까지 상각 가능" 같은
+  // 무의미한 마무리 문구를 만들지 않는다 (Opus 리뷰 개선 8a)
+  const alreadyDone = method === "정률법" && remainingValue <= memoValue
+
   let limit: number
-  if (isFinalYear) {
+  if (alreadyDone) {
+    limit = 0
+  } else if (isFinalYear) {
     // §26⑥ 단서의 5% 가산. 가산 결과가 미상각잔액을 넘으므로 비망가액을 남기고 전액 상각된다
     limit = Math.min(regular + residual, cap)
   } else {
     limit = regular
   }
 
-  return { rate, base, regular, residual, isFinalYear, memoValue, limit }
+  return { rate, base, regular, residual, isFinalYear, memoValue, limit, converted, effectiveLife, alreadyDone }
 }
 
 /**
@@ -562,14 +608,57 @@ export async function handleFinCalc(
 
   if (input.calc_type === "감가상각비") {
     const isDeclining = input.method === "정률법"
-    const { rate, base, regular, residual, isFinalYear, memoValue, limit } = calcDepreciationLimit(
-      input.acquisition_cost,
-      input.useful_life,
-      input.method,
-      input.remaining_value ?? 0,
-      input.business_months
-    )
-    const monthNote = input.business_months === 12 ? `` : ` × ${input.business_months}/12`
+    // 모순 입력 차단 — "취득가액 1억 − 누계액 = 2억" 같은 산술 모순이 확신형으로
+    // 나가면 자릿수 오타가 그대로 검토서에 실린다 (Opus 리뷰 중요 3)
+    if (isDeclining && (input.remaining_value ?? 0) > input.acquisition_cost) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `[INVALID_PARAMETER] fin_calc: remaining_value(미상각잔액 ${won(input.remaining_value ?? 0)})가 acquisition_cost(취득가액 ${won(input.acquisition_cost)})보다 큽니다 — 미상각잔액은 취득가액에서 감가상각누계액을 뺀 값이므로 취득가액을 넘을 수 없습니다. 입력값을 확인하세요.`,
+          },
+        ],
+        isError: true,
+      }
+    }
+    // 1년 미만 월수는 사유에 따라 산식이 다르다(§26⑧⑨ 월할 vs §28② 환산내용연수) —
+    // 사유 없이 계산하면 정률법에서 최대 -22.8% 틀린 값이 확신형으로 나간다 (Opus 리뷰 차단)
+    if (input.business_months < 12 && !input.short_period_basis) {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `[INVALID_PARAMETER] fin_calc: business_months가 12 미만이면 short_period_basis(사유)가 필요합니다 — 사유에 따라 법정 산식이 다릅니다:\n` +
+              `  · "기중취득" — 사업연도 중 취득: 월할 (시행령 §26⑨)\n` +
+              `  · "사업연도변경의제" — 사업연도 변경·의제(법 §7·§8)로 그 해만 1년 미만: 월할 (시행령 §26⑧)\n` +
+              `  · "사업연도1년미만" — 정관상 사업연도(법 §6) 자체가 1년 미만: 환산내용연수 상각률 (시행령 §28②, 월할 아님)`,
+          },
+        ],
+        isError: true,
+      }
+    }
+    let calcResult: ReturnType<typeof calcDepreciationLimit>
+    try {
+      calcResult = calcDepreciationLimit(
+        input.acquisition_cost,
+        input.useful_life,
+        input.method,
+        input.remaining_value ?? 0,
+        input.business_months,
+        input.short_period_basis
+      )
+    } catch (e) {
+      // 환산내용연수 비정수·범위 초과 — 추측 대신 정직한 계산 불가
+      return {
+        content: [{ type: "text", text: `[INVALID_PARAMETER] fin_calc: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      }
+    }
+    const { rate, base, regular, residual, isFinalYear, memoValue, limit, converted, effectiveLife, alreadyDone } =
+      calcResult
+    const isProrated = input.business_months < 12 && !converted
+    const monthNote = isProrated ? ` × ${input.business_months}/12` : ``
     const text = [
       `[산식 기준: ${BASIS_DEPRECIATION}] 감가상각비 상각범위액 (${input.method})`,
       ``,
@@ -577,22 +666,39 @@ export async function handleFinCalc(
       ``,
       `계산 과정:`,
       // 별표는 "0.451"처럼 적는다 — 별표와 눈으로 대조되도록 소수 표기를 먼저 보인다
-      `  ① 상각률 = ${rate.toFixed(3)} (${pct(rate)}) — 내용연수 ${input.useful_life}년 ${input.method} (시행규칙 별표 4)`,
+      converted
+        ? `  ① 상각률 = ${rate.toFixed(3)} (${pct(rate)}) — 환산내용연수 ${effectiveLife}년 ${input.method} (시행령 §28②: 내용연수 ${input.useful_life}년 × 12 ÷ 사업연도 ${input.business_months}개월. 별표 4)`
+        : `  ① 상각률 = ${rate.toFixed(3)} (${pct(rate)}) — 내용연수 ${input.useful_life}년 ${input.method} (시행규칙 별표 4)`,
       isDeclining
         ? `  ② 미상각잔액 = ${won(base)} (취득가액 ${won(input.acquisition_cost)} − 감가상각누계액)`
         : `  ② 취득가액 = ${won(base)}`,
       `  ③ 상각범위액 = ${won(base)} × ${rate.toFixed(3)}${monthNote} = ${won(regular)}`,
-      ...(isFinalYear
+      ...(alreadyDone
+        ? [`  ④ 미상각잔액이 비망가액(${won(memoValue)}, §26⑦) 이하 — 추가 상각할 금액이 없어 상각범위액 0원`]
+        : isFinalYear
+          ? [
+              `  ④ 상각 마무리 연도 — 이번 상각 후 미상각잔액이 취득가액의 5%(${won(residual)}) 이하가 됨`,
+              `     시행령 §26⑥ 단서에 따라 ${won(residual)}을 상각범위액에 가산하되,`,
+              `     비망가액 ${won(memoValue)}(§26⑦)을 남겨 ${won(limit)}까지 상각 가능`,
+            ]
+          : []),
+      ...(!isDeclining && input.remaining_value !== undefined
         ? [
-            `  ④ 상각 마무리 연도 — 이번 상각 후 미상각잔액이 취득가액의 5%(${won(residual)}) 이하가 됨`,
-            `     시행령 §26⑥ 단서에 따라 ${won(residual)}을 상각범위액에 가산하되,`,
-            `     비망가액 ${won(memoValue)}(§26⑦)을 남겨 ${won(limit)}까지 상각 가능`,
+            `  ※ 입력한 미상각잔액 ${won(input.remaining_value)}은 정액법 산식에는 쓰이지 않는다 — 실제 손금 상한은 미상각잔액 − 비망가액${
+              regular > input.remaining_value ? ` (이번 상각범위액이 미상각잔액을 초과하므로 상한 적용 필요)` : ``
+            }`,
           ]
         : []),
       ``,
       `근거: 법인세법 시행령 제26조${isDeclining ? "제2항제2호" : "제2항제1호"}(상각방법)${
-        input.business_months === 12 ? "" : "·제8항·제9항(월할계산)"
-      }${isFinalYear ? "·제6항 단서(잔존가액)·제7항(비망가액)" : ""}`,
+        converted
+          ? "·제28조제2항(환산내용연수)"
+          : isProrated
+            ? input.short_period_basis === "사업연도변경의제"
+              ? "·제8항(사업연도 변경·의제 월할)"
+              : "·제9항(기중 취득 월할)"
+            : ""
+      }${isFinalYear && !alreadyDone ? "·제6항 단서(잔존가액)·제7항(비망가액)" : ""}`,
       `      상각률: 법인세법 시행령 제28조제1항제1호 → 시행규칙 제15조제2항 → 별표 4 「감가상각자산의 상각률표」`,
       ``,
       `⚠ 주의:`,
@@ -603,7 +709,7 @@ export async function handleFinCalc(
       ...(isDeclining
         ? []
         : [`  · 정액법은 취득가액 기준이라 상각 말년에 미상각잔액을 넘을 수 있다 — 실제 손금은 미상각잔액에서 비망가액(취득가액의 5%와 1천원 중 적은 금액, §26⑦)을 뺀 금액이 상한`]),
-      ...(isFinalYear && input.business_months !== 12
+      ...(isFinalYear && !alreadyDone && isProrated
         ? [`  · 마무리 연도의 5% 가산분(§26⑥ 단서)은 월할하지 않고 전액 가산했다 — 조문이 월할 여부를 정하지 않아 해석이 갈릴 수 있는 부분이니 원문 확인 권장`]
         : []),
       `  · 업무용승용차는 정액법·내용연수 5년이 강제되고 연 800만원 한도가 별도로 적용된다 (법인세법 §27의2) — 미반영`,
@@ -639,7 +745,7 @@ export async function handleFinCalc(
       `이자 시가: ${won(marketInterest)}`,
       deemedInterest > 0
         ? `인정이자(익금산입 대상액): ${won(deemedInterest)}`
-        : `인정이자(익금산입 대상액): 없음 — 약정이자 ${won(input.paid_interest)}가 이자 시가 이상이라 익금에 산입할 차액이 없다`,
+        : `인정이자(익금산입 대상액): 없음 — 약정이자(${won(input.paid_interest)})가 이자 시가 이상이라 익금에 산입할 차액이 없다`,
       ``,
       `계산 과정:`,
       input.balance_days !== undefined
@@ -647,7 +753,9 @@ export async function handleFinCalc(
         : `  ① 가지급금 적수 = ${won(input.principal ?? 0)} × ${input.days ?? 0}일 = ${balanceDays.toLocaleString("ko-KR")} (원×일)`,
       `  ② 적용 이자율 = 연 ${pct(annualRate)} (${input.rate_type})`,
       `  ③ 이자 시가 = 적수 × ${pct(annualRate)} ÷ ${daysInYear}일${input.is_leap_year ? " (윤년)" : ""} = ${won(marketInterest)}`,
-      `  ④ 인정이자 = 이자 시가 ${won(marketInterest)} − 약정이자 ${won(input.paid_interest)} = ${won(deemedInterest)}`,
+      `  ④ 인정이자 = 이자 시가 ${won(marketInterest)} − 약정이자 ${won(input.paid_interest)} = ${
+        deemedInterest > 0 ? won(deemedInterest) : `${won(deemedInterest)} → 차액이 없어 익금산입 대상 0원`
+      }`,
       ``,
       ...(deemedInterest > 0
         ? [

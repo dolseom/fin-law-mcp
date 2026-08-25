@@ -240,6 +240,20 @@ describe("사전 최장 일치 어절 경계 (Opus B-3 재검증 회귀 — 꼬�
   })
 })
 
+describe("'구 ○○법' 연혁 인용 (Opus 공개전 리뷰 중요 2 회귀)", () => {
+  it("raw에 '구'가 보존된다 (지워지면 어느 인용이 검증됐는지 알 수 없다)", () => {
+    const cites = extractCitations("구 법인세법 제26조에 따라 손금불산입한다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].raw).toBe("구 법인세법 제26조")
+    expect(cites[0].historical).toBe(true)
+  })
+
+  it("'구'가 없는 인용에는 연혁 표지가 붙지 않는다", () => {
+    const cites = extractCitations("법인세법 제26조에 따른다.")
+    expect(cites[0].historical).toBeUndefined()
+  })
+})
+
 describe("규칙·규정 선행사 분리 (Opus B-0③ 재검증 회귀)", () => {
   it("'같은 규칙'은 「…규정」을 선행사로 삼지 않는다 (규칙·규정 혼재 문장)", () => {
     const cites = extractCitations(

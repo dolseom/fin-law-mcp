@@ -27,7 +27,10 @@ import { pathToFileURL, fileURLToPath } from "node:url"
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 config({ path: join(ROOT, ".env"), quiet: true })
 
-const FAIL_EXIT = Number(process.env.FIN_VERIFY_FAIL_EXIT) || 1
+// ?? 가 아니라 || 를 쓰면 FIN_VERIFY_FAIL_EXIT=0(경고만 하고 통과)을 설정할 수 없다
+const FAIL_EXIT = Number.isFinite(Number(process.env.FIN_VERIFY_FAIL_EXIT))
+  ? Number(process.env.FIN_VERIFY_FAIL_EXIT)
+  : 1
 const MAX_BYTES = 512 * 1024
 /** fin_verify의 인용 상한(15건)에 맞춰 문단 단위로 나눈다 — 넘기면 뒷부분이 조용히 미검증된다 */
 const CHUNK_CITATION_LIMIT = 15
@@ -150,6 +153,17 @@ for (let i = 0; i < chunks.length; i++) {
 }
 
 console.log(`  ✓${ok} / ✗${failLines.length} / ⚠${warnLines.length}`)
+
+// 한 문단이 단독으로 상한을 넘으면 그 청크의 뒷부분은 fin_verify가 자른다 —
+// 절단 고지는 요약 헤더에만 있어 판정 라인 필터에 걸러진다. 판정 합과 인용 수가
+// 어긋나는 것으로만 드러나던 것을 명시한다 (Opus 리뷰 개선 6)
+const judged = ok + failLines.length + warnLines.length
+if (judged < total) {
+  console.log(
+    `\n⚠ 인용 ${total}건 중 ${judged}건만 판정됐습니다 (${total - judged}건 미검증 — 한 문단의 인용이 ` +
+      `상한 ${CHUNK_CITATION_LIMIT}건을 넘어 잘렸습니다). 그 문단을 나눠 다시 검증하세요.`
+  )
+}
 
 if (warnLines.length > 0) {
   console.log(`\n⚠ 판정 불가 ${warnLines.length}건 ("없음"이 아니라 확인 실패 — 원문으로 직접 확인하세요)`)

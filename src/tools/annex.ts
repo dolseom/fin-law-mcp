@@ -61,7 +61,9 @@ function collectAnnexes(node: any, acc: AnnexEntry[], lawName: string): void {
   }
   const name = node.별표명 || node.별표제목
   if (typeof name === "string" && name.trim()) {
-    if (/^삭제|^\[?별표\s*\d+[^\]]*(이동|삭제)/.test(name.trim())) return
+    // "[별표 8의10] [별표 11]로 이동" 형태는 [^\]]*가 ]를 못 넘어 살아남았다 —
+    // 유령 별표가 목록에 뜨고 도구가 그걸 재호출하라고 권했다 (Opus 리뷰 개선 4)
+    if (/^삭제|^\[?별표\s*[\d의]+[\s\S]*?(?:이동|삭제)\s*(?:<[^>]*>)?\s*$|^\[?별표\s*\d+[^\]]*(이동|삭제)/.test(name.trim())) return
     const ownerRaw = node.법령명 || node.관련법령명 || ""
     const owner = typeof ownerRaw === "string" ? ownerRaw : flattenContent(ownerRaw)
     const fileLink = node.별표서식파일링크 || node.별표파일링크 || node.별표법령상세링크 || ""
@@ -111,7 +113,9 @@ export function parseAnnexSelector(sel: string): { codes: Set<string>; mainNo: s
 /** 별표 제목이 본번호를 가리키는가 — "[별표 6]"·"별표 제6호" + 묶음 범위("별표 1~5") */
 export function titleMatchesAnnexNo(title: string, mainNo: string): boolean {
   if (new RegExp(`\\[\\s*별표\\s*${mainNo}\\s*\\]`).test(title)) return true
-  if (new RegExp(`별표\\s*제?\\s*${mainNo}(?![0-9])`).test(title)) return true
+  // (?![0-9])만으로는 "별표 1의2"가 "1" 요청에 매칭된다 — 지번(의N)까지 배제해야
+  // 「별표 1」 요청이 「별표 1의2」를 집지 않는다 (Opus 리뷰 개선 3)
+  if (new RegExp(`별표\\s*제?\\s*${mainNo}(?![0-9])(?!\\s*의\\s*\\d)`).test(title)) return true
   const num = parseInt(mainNo, 10)
   if (!Number.isNaN(num)) {
     const range = /별표\s*(\d+)\s*[~\-]\s*(\d+)/g
@@ -139,9 +143,11 @@ async function extractAnnexContent(
   law: string
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   const { codes, mainNo } = parseAnnexSelector(selector)
-  const matched = entries.find(
-    (a) => (a.no && codes.has(a.no)) || (mainNo !== null && titleMatchesAnnexNo(a.name, mainNo))
-  )
+  // 별표번호 정확 일치를 제목 매칭보다 먼저 전량 스캔한다 — 법제처는 별표명 가나다순으로
+  // 주므로(별표번호순 아님) 순서에 기댄 find는 엉뚱한 별표를 집을 수 있다 (Opus 리뷰 개선 3)
+  const matched =
+    entries.find((a) => a.no && codes.has(a.no)) ??
+    (mainNo !== null ? entries.find((a) => titleMatchesAnnexNo(a.name, mainNo)) : undefined)
   if (!matched) {
     const avail = entries.slice(0, 15).map((a) => formatAnnexNo(a.no) || a.name).join(", ")
     return {

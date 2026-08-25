@@ -357,7 +357,17 @@ export class LawApiClient {
     const response = await this.drfFetch(url, params.signal ? { ...DRF_RETRY, signal: params.signal } : DRF_RETRY)
     await this.throwIfError(response, "getAnnexes")
 
-    return await response.text()
+    const text = await response.text()
+    // 법제처는 별표 API 미신청 계정에 200 + HTML("미신청된 목록/본문에 대한 접근입니다")을 준다.
+    // 가드가 없으면 JSON.parse 실패가 "응답 형식 이상 — 법제처 장애"로 오진되어 신규 사용자가
+    // 원인(OPEN API 별표 종류 미신청)을 못 찾는다 (Opus 리뷰 개선 5)
+    this.checkEmptyResponse(text, "별표 조회")
+    if (/<!doctype\s+html|<html[\s>]/i.test(text)) {
+      throw new Error(
+        "별표 조회 - API가 HTML 페이지를 반환했습니다. 법제처 OPEN API 신청에 '별표·서식'이 포함되지 않았거나 일시 장애일 수 있습니다 (open.law.go.kr에서 신청 범위 확인)."
+      )
+    }
+    return text
   }
 
   /**

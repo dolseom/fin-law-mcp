@@ -105,9 +105,42 @@ describe("감가상각비 상각범위액 (법인세법 시행령 §26 + 시행�
     expect(limit).toBeCloseTo(20_000_000, 6) // 1억 × 0.200
   })
 
-  it("사업연도 월수로 월할계산한다 (§26⑧⑨)", () => {
-    const { limit } = calcDepreciationLimit(100_000_000, 5, "정액법", 0, 6)
+  it("기중 취득·사업연도 변경은 월할계산한다 (§26⑧⑨)", () => {
+    const { limit, converted } = calcDepreciationLimit(100_000_000, 5, "정액법", 0, 6, "기중취득")
     expect(limit).toBeCloseTo(10_000_000, 6) // 2,000만 × 6/12
+    expect(converted).toBe(false)
+  })
+
+  describe("사업연도 자체가 1년 미만 — 환산내용연수 (§28②, Opus 리뷰 차단 회귀)", () => {
+    // 월할(§26⑧⑨)과 환산내용연수(§28②)는 적용 영역이 다르다. 정률법에서 월할을 쓰면
+    // 최대 -22.8% 틀린 값이 확신형으로 나갔다 (실측)
+    it("정률법 6개월 사업연도 — 환산 10년(0.259) 상각률을 쓴다", () => {
+      const { limit, rate, converted, effectiveLife } = calcDepreciationLimit(
+        100_000_000, 5, "정률법", 100_000_000, 6, "사업연도1년미만"
+      )
+      expect(converted).toBe(true)
+      expect(effectiveLife).toBe(10)
+      expect(rate).toBeCloseTo(0.259, 6) // 별표 4의 10년 정률 상각률
+      expect(limit).toBeCloseTo(25_900_000, 6) // 월할이면 22,550,000 (틀림)
+    })
+
+    it("6개월 사업연도 2회 = 1년 상각률과 일치한다 (환산내용연수 방식의 정합성)", () => {
+      const y1 = calcDepreciationLimit(100_000_000, 5, "정률법", 100_000_000, 6, "사업연도1년미만")
+      const y2 = calcDepreciationLimit(100_000_000, 5, "정률법", 100_000_000 - y1.limit, 6, "사업연도1년미만")
+      // 1 - (1-0.259)² = 0.450919 ≈ 0.451 = 별표 4의 5년 정률 상각률
+      // (별표 값이 소수 3자리 반올림이라 완전 일치가 아니라 근사 일치가 정답이다.
+      //  월할 방식이면 1-(1-0.2255)² = 0.400으로 크게 어긋난다)
+      expect((y1.limit + y2.limit) / 100_000_000).toBeCloseTo(0.451, 3)
+    })
+
+    it("환산내용연수가 정수가 아니면 추측하지 않고 던진다", () => {
+      // 5년 × 12 ÷ 7개월 = 8.57년 — 별표 4는 정수만 수록
+      expect(() => calcDepreciationLimit(100_000_000, 5, "정률법", 100_000_000, 7, "사업연도1년미만")).toThrow(/환산내용연수/)
+    })
+
+    it("환산내용연수가 60년을 넘으면 던진다", () => {
+      expect(() => calcDepreciationLimit(100_000_000, 40, "정률법", 100_000_000, 6, "사업연도1년미만")).toThrow(/별표 4|범위/)
+    })
   })
 
   it("정률법 마무리 연도 — 5% 가산 후 비망가액 1천원만 남긴다 (§26⑥ 단서·§26⑦)", () => {
@@ -340,6 +373,51 @@ describe("handleFinCalc 계약", () => {
     expect(res.isError).toBe(true)
     expect(res.content[0].text).toContain("INVALID_PARAMETER")
     expect(res.content[0].text).toContain("미상각잔액")
+  })
+
+  it("감가상각비 — 1년 미만 월수에 사유가 없으면 계산하지 않고 산식 갈래를 안내한다 (Opus 차단 회귀)", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "감가상각비",
+      acquisition_cost: 100_000_000,
+      useful_life: 5,
+      method: "정률법",
+      remaining_value: 100_000_000,
+      business_months: 6,
+    })
+    expect(res.isError).toBe(true)
+    expect(res.content[0].text).toContain("short_period_basis")
+    expect(res.content[0].text).toContain("§28②") // 환산내용연수 갈래를 알린다
+  })
+
+  it("감가상각비 — 사업연도 1년 미만이면 환산내용연수 근거를 밝힌다", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "감가상각비",
+      acquisition_cost: 100_000_000,
+      useful_life: 5,
+      method: "정률법",
+      remaining_value: 100_000_000,
+      business_months: 6,
+      short_period_basis: "사업연도1년미만",
+    })
+    const t = res.content[0].text
+    expect(res.isError).toBeFalsy()
+    expect(t).toContain("25,900,000원") // 월할(22,550,000)이면 회귀
+    expect(t).toContain("환산내용연수 10년")
+    expect(t).toContain("제28조제2항")
+  })
+
+  it("감가상각비 — 미상각잔액 > 취득가액인 모순 입력은 계산하지 않는다 (Opus 중요 3)", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "감가상각비",
+      acquisition_cost: 100_000_000,
+      useful_life: 5,
+      method: "정률법",
+      remaining_value: 200_000_000,
+      business_months: 12,
+    })
+    expect(res.isError).toBe(true)
+    expect(res.content[0].text).toContain("INVALID_PARAMETER")
+    expect(res.content[0].text).toContain("취득가액을 넘을 수 없습니다")
   })
 
   it("가지급금인정이자 — 익금산입 요건 판정과 소득처분을 동봉한다", async () => {

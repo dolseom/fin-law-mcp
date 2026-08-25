@@ -62,6 +62,8 @@ interface Citation {
   kind: "법령조문" | "법령" | "행정규칙"
   /** 어절 컷으로 잘라내기 전의 이름 — 컷이 정식 법령명을 잘랐을 때의 복구·고지용 */
   uncut?: string
+  /** "구 ○○법" 연혁 인용 — 현행 기준으로 판정하면 개정 전 조문에 ✓가 찍힌다 */
+  historical?: boolean
 }
 
 const IP = INTERPUNCT_CHARS // 가운뎃점 5종 — 추출 정규식과 정규화가 같은 집합을 봐야 한다
@@ -230,14 +232,23 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     // lastIndexOf로 컷 지점을 잡는다 — indexOf는 같은 법령명이 앞에도 나오면 엉뚱한
     // 위치를 집어 raw에 문맥이 남는다 ("소득세법에 따라 소득세법 제12조", Opus 개선)
     const kept = m[0].lastIndexOf(base.split(" ")[0])
+    let raw = (kept > 0 ? m[0].slice(kept) : m[0]).trim()
+    // "구 법인세법" — 연혁 인용 표지. 문맥 컷이 "구"를 지우면 어떤 인용이 검증됐는지
+    // 사용자가 알 수 없고, 개정 전 조문을 가리킨 인용에 현행 ✓가 찍힌다 (Opus 리뷰 중요 2)
+    let historical = false
+    if (kept > 0 && /(?:^|[\s.,;·(])구\s+$/.test(m[0].slice(0, kept))) {
+      raw = `구 ${raw}`
+      historical = true
+    }
     hits.push({
       idx: m.index!,
       c: {
-        raw: (kept > 0 ? m[0].slice(kept) : m[0]).trim(),
+        raw,
         lawName: suffixNorm ? `${base} ${suffixNorm}` : base,
         article: normArticle(article),
         kind: "법령조문",
         ...(compact(uncutBase) !== compact(base) ? { uncut: suffixNorm ? `${uncutBase} ${suffixNorm}` : uncutBase } : {}),
+        ...(historical ? { historical: true } : {}),
       },
       antecedent: base,
     })
@@ -438,7 +449,16 @@ async function verifyLawCitation(
       }
       try {
         const adminHit = await tryVerifyAdminRuleCitation(apiClient, [c.lawName], c.raw)
-        if (adminHit) return { mark: "✓", line: adminHit }
+        if (adminHit) {
+          // 조문이 붙어 있으면 명칭만 확인된 상태 — ✓ 집계 금지 (Opus 리뷰 중요 1)
+          if (c.article) {
+            return {
+              mark: "⚠",
+              line: `⚠${adminHit.slice(1)} · ${c.article}의 존재는 미확인(행정규칙 조문 단위 API 없음) — 원문 확인 필요`,
+            }
+          }
+          return { mark: "✓", line: adminHit }
+        }
         adminChecked = true
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
@@ -490,6 +510,15 @@ async function verifyLawCitation(
   }
   const trimNote =
     usedName !== c.lawName ? ` · 표기 주의: 「${c.lawName}」에서 선행 문맥을 제외한 「${usedName}」로 해석` : ""
+
+  // "구 ○○법"은 개정 전 조문을 가리킨다 — 현행 DB에 조문이 있다는 사실이 그 인용의
+  // 정확성을 증명하지 않는다. 기준일 없이 ✓를 주면 안 된다 (Opus 리뷰 중요 2)
+  if (c.historical && !efYd) {
+    return {
+      mark: "⚠",
+      line: `⚠ ${c.raw} — "구 ○○법"은 개정 전 법령을 가리키는 연혁 인용이라 현행 기준으로는 판정할 수 없습니다 (없음 아님). 해당 시점을 basis_date로 지정해 재검증하세요${trimNote}`,
+    }
+  }
 
   if (!c.article) {
     const histNote = best.status === "연혁" ? " ⚠주의: 연혁(폐지·과거본)" : ""
@@ -580,7 +609,13 @@ export async function handleFinVerify(
       }
       if (c.kind === "행정규칙") {
         try {
-          const line = await verifyAdminRuleCitation(apiClient, [c.lawName], c.raw, c.lawName)
+          let line = await verifyAdminRuleCitation(apiClient, [c.lawName], c.raw, c.lawName)
+          // 조문이 붙은 행정규칙 인용은 명칭만 확인된 것이다 — ✓로 집계하면 검증 안 된
+          // 조문이 "검증 통과"로 읽히고, verify-file 훅의 마지막 관문이 통째로 열린다
+          // (Opus 리뷰 중요 1). 명칭 실존은 밝히되 판정은 ⚠(조문 미검증)로 내린다
+          if (c.article && line.startsWith("✓")) {
+            line = `⚠${line.slice(1)} · ${c.article}의 존재는 미확인(행정규칙 조문 단위 API 없음) — 원문 확인 필요`
+          }
           const mark: CheckResult["mark"] = line.startsWith("✓") ? "✓" : line.startsWith("✗") ? "✗" : "⚠"
           results.push({ mark, line })
         } catch (e) {

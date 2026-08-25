@@ -19,6 +19,15 @@
     "node": ">=20.19.0"
   },
   "license": "MIT",
+  "author": "dolseom",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dolseom/fin-law-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dolseom/fin-law-mcp/issues"
+  },
+  "homepage": "https://github.com/dolseom/fin-law-mcp#readme",
   "files": [
     "build",
     "README.md",
