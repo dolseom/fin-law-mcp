@@ -505,3 +505,24 @@ describe("연혁 조회 실패는 부존재가 아니다 (Codex 2차 중요)", (
     expect(call).toBeGreaterThan(1)
   })
 })
+
+describe("cleanLawName — 문장 접속 부사 제거 (자체 점검)", () => {
+  it('"그리고"가 법령명에 흡수되지 않는다', () => {
+    const cites = extractCitations("당사 취업규칙을 본다. 그리고 탄소배출권거래규정 제77조에 따른다.")
+    const last = cites[cites.length - 1]
+    expect(last.lawName).toBe("탄소배출권거래규정")
+  })
+
+  it("다른 접속 부사도 제거한다", () => {
+    for (const conj of ["또한", "따라서", "한편", "다만"]) {
+      const cites = extractCitations(`앞 문장이다. ${conj} 탄소배출권거래규정 제77조에 따른다.`)
+      expect(cites[cites.length - 1].lawName).toBe("탄소배출권거래규정")
+    }
+  })
+
+  it("법령명 자체는 자르지 않는다 (과잉 제거 방지)", () => {
+    const cites = extractCitations("고용보험 및 산업재해보상보험의 보험료징수 등에 관한 법률 제13조에 따른다.")
+    expect(cites[0].lawName).toContain("고용보험")
+    expect(cites[0].lawName).toContain("보험료징수")
+  })
+})
