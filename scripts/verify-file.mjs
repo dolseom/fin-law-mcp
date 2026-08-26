@@ -158,9 +158,10 @@ console.log(`  ✓${ok} / ✗${failLines.length} / ⚠${warnLines.length}`)
 // 절단 고지는 요약 헤더에만 있어 판정 라인 필터에 걸러진다. 판정 합과 인용 수가
 // 어긋나는 것으로만 드러나던 것을 명시한다 (Opus 리뷰 개선 6)
 const judged = ok + failLines.length + warnLines.length
-if (judged < total) {
+const unjudged = Math.max(0, total - judged)
+if (unjudged > 0) {
   console.log(
-    `\n⚠ 인용 ${total}건 중 ${judged}건만 판정됐습니다 (${total - judged}건 미검증 — 한 문단의 인용이 ` +
+    `\n⚠ 인용 ${total}건 중 ${judged}건만 판정됐습니다 (${unjudged}건 미검증 — 한 문단의 인용이 ` +
       `상한 ${CHUNK_CITATION_LIMIT}건을 넘어 잘렸습니다). 그 문단을 나눠 다시 검증하세요.`
   )
 }
@@ -168,6 +169,21 @@ if (judged < total) {
 if (warnLines.length > 0) {
   console.log(`\n⚠ 판정 불가 ${warnLines.length}건 ("없음"이 아니라 확인 실패 — 원문으로 직접 확인하세요)`)
   for (const l of warnLines) console.log(`  ${l}`)
+}
+
+// "사용 보류"를 요구하는 ⚠는 단순 확인 실패와 다르다 — 미등재 약칭·환각 의심처럼
+// 확인 전까지 쓰면 안 되는 인용이다. 이것을 다른 ⚠와 뭉뚱그리면 마지막 줄의
+// "인용 검증 통과"가 보류 항목까지 통과시킨 것으로 읽힌다 (실측: 환각 규정 인용이
+// soft 강등으로 ⚠가 된 뒤 "통과"로 보고됐다).
+// ✗ 처리보다 **앞에** 둔다 — 뒤에 두면 ✗가 있을 때 exit에 가려 보고되지 않는다
+// (Codex 3차 중요)
+const holdLines = warnLines.filter((l) => /사용\s*보류|사용을 보류/.test(l))
+if (holdLines.length > 0) {
+  console.error(
+    `\n⚠ 사용 보류 ${holdLines.length}건 — 실존이 확인되지 않은 인용입니다. "통과"가 아닙니다:\n` +
+      holdLines.map((l) => `  ${l}`).join("\n") +
+      `\n\n정식 명칭으로 재검증하거나, 법령이 아닌 문서(사내 규정 등)라면 그렇게 표기하세요.`
+  )
 }
 
 if (failLines.length > 0) {
@@ -180,19 +196,18 @@ if (failLines.length > 0) {
   process.exit(FAIL_EXIT)
 }
 
-// "사용 보류"를 요구하는 ⚠는 단순 확인 실패와 다르다 — 미등재 약칭·환각 의심처럼
-// 확인 전까지 쓰면 안 되는 인용이다. 이것을 다른 ⚠와 뭉뚱그리면 마지막 줄의
-// "인용 검증 통과"가 보류 항목까지 통과시킨 것으로 읽힌다 (실측: 환각 규정 인용이
-// soft 강등으로 ⚠가 된 뒤 "통과"로 보고됐다)
-const holdLines = warnLines.filter((l) => /사용\s*보류|사용을 보류/.test(l))
-if (holdLines.length > 0) {
+// 미검증분이 남았으면 "통과"라고 말할 수 없다 — 잘려나간 인용에 환각이 있어도
+// ✗ 집계에 들어오지 않는다. 한 문단에 인용을 16건 넘게 쓰면 16번째부터가 그렇다
+// (Codex 3차 차단: 경고만 찍고 마지막 줄에서 통과로 보고했다)
+if (unjudged > 0) {
   console.error(
-    `\n⚠ 사용 보류 ${holdLines.length}건 — 실존이 확인되지 않은 인용입니다. "통과"가 아닙니다:\n` +
-      holdLines.map((l) => `  ${l}`).join("\n") +
-      `\n\n정식 명칭으로 재검증하거나, 법령이 아닌 문서(사내 규정 등)라면 그렇게 표기하세요.`
+    `\n⚠ 미검증 ${unjudged}건이 남아 "통과"로 판정하지 않습니다 — 검증되지 않은 인용에 ` +
+      `환각이 있어도 여기서는 드러나지 않습니다. 문단을 나눠 다시 검증하세요.`
   )
   process.exit(0)
 }
+
+if (holdLines.length > 0) process.exit(0)
 
 console.log("\n인용 검증 통과 — 실존하지 않는 인용 없음")
 process.exit(0)

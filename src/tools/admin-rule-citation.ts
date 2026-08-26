@@ -36,6 +36,38 @@ export function isAdminRuleLikeName(name: string): boolean {
   return /(규칙|규정)$/.test(compact) || isAdminRuleName(name)
 }
 
+/**
+ * 행정규칙 명칭 끝의 **메타데이터 괄호**만 떼어낸다 — 발령일·연도·발령번호.
+ * 「식품등의 표시기준(2024. 1. 15.)」의 괄호는 같은 규칙의 판(版) 표시라 비교에서
+ * 빼야 하지만, 「A규정(제1권)」·「A규정(제2권)」처럼 **다른 규칙을 가르는 괄호**까지
+ * 지우면 서로 다른 규칙이 같은 이름이 된다 (Codex 3차 중요). 날짜·발령번호 형태만 제거한다.
+ *
+ * 인용 추출(verify)과 검색 일치 판정이 같은 규칙을 써야 한다 — 한쪽만 고치면
+ * 괄호가 붙은 인용이 추출조차 되지 않는다 (Codex 3차 차단).
+ */
+export function stripRuleNameMeta(name: string): string {
+  const META_PAREN =
+    /\s*[([［【]\s*(?:\d{4}[.\s]*\d{0,2}[.\s]*\d{0,2}[.\s]*|[^)\]］】]*(?:고시|훈령|예규|지침|규정)\s*제?\s*\d[\d\-–—.]*\s*호[^)\]］】]*|제?\s*\d[\d\-–—.]*\s*호)\s*[)\]］】]\s*$/
+  return compactName(name.replace(META_PAREN, "").trim())
+}
+
+/**
+ * 명칭 끝의 괄호를 **종류를 가리지 않고** 떼어낸다.
+ *
+ * 두 용도에만 쓴다:
+ *   ① 접미사 검사 — 괄호가 붙으면 이름이 ')'로 끝나 고시·규정 화이트리스트를
+ *      통과하지 못해 인용이 추출조차 되지 않는다 (Codex 3차 차단)
+ *   ② 검색어 — 법제처는 LIKE 검색이라 괄호를 떼면 후보가 넓어질 뿐 좁아지지 않는다.
+ *      괄호를 붙인 채로 조회하면 실존 고시가 0건 → ✗ 환각 낙인이 된다 (실측)
+ *
+ * **정확 일치 판정에는 쓰지 않는다.** 「A규정(제1권)」과 「A규정(제2권)」은 다른 규칙이라
+ * 여기서 괄호를 지우면 서로를 정확 일치로 오판한다 (Codex 3차 중요) — 그쪽은
+ * stripRuleNameMeta(날짜·발령번호만 제거)를 쓴다.
+ */
+export function stripTrailingParen(name: string): string {
+  return name.replace(/\s*[([［【][^)\]］】]{0,60}[)\]］】]\s*$/, "").trim() || name.trim()
+}
+
 export interface AdminRuleMatch {
   name: string
   promDate?: string
@@ -54,7 +86,14 @@ export async function findAdminRule(
 ): Promise<AdminRuleMatch | null> {
   // display=100 (Opus 검토 권고 7): 법제처는 LIKE 부분검색+가나다순이라 정확한 규칙명이
   // 기본 20건 밖으로 밀릴 수 있다 — 법령 경로의 findLaws display=100과 같은 이유
-  const xml = await apiClient.searchAdminRule({ query: name, display: "100", apiKey, signal })
+  // 검색어에서는 괄호를 뗀다 — 「식품등의 표시기준(2024. 1. 15.)」을 그대로 조회하면
+  // 실존 고시가 0건이 되어 ✗ 환각 낙인이 찍힌다 (실측). LIKE 검색이라 후보만 넓어진다
+  const xml = await apiClient.searchAdminRule({
+    query: stripTrailingParen(name),
+    display: "100",
+    apiKey,
+    signal,
+  })
   // 장애 응답 판별 (Codex 검토 차단 3): searchAdminRule은 searchLaw와 달리 HTML/빈 응답
   // 검사가 없어 200 상태의 장애 페이지가 "admrul 0건"으로 파싱된다 — 그대로 두면
   // '검증 불가'가 ✗ NOT_FOUND(환각 의심)로 오보되므로 throw로 ⚠ 경로에 태운다
@@ -81,23 +120,20 @@ export async function findAdminRule(
   // 「국세청 사무처리규정 시행세칙」만 있어도 "실존"이 되어 버린다. 행정규칙에는
   // 법령 쪽의 별칭 사전·tier 검사가 없어 오검증 위험이 더 크므로, 정확 일치를
   // 먼저 찾고 접두 일치는 exact=false로 구분해 돌린다 (Codex 리뷰 중요 3)
-  // 행정규칙 명칭에는 발령 연도·개정 표시가 괄호로 붙는 경우가 있다
-  // (「식품등의 표시기준(2024. 1. 15.)」). 이런 메타데이터까지 다르다고 보면
-  // 정상 인용이 "정확 일치 없음"으로 강등된다 (Codex 2차 중요) — 비교 전에 떼어낸다
-  const normalizeRuleName = (s: string) =>
-    compactName(s.replace(/[([［【][^)\]］】]*[)\]］】]\s*$/, "").trim())
-  const target = normalizeRuleName(name)
+  const target = stripRuleNameMeta(name)
   let loose: AdminRuleMatch | null = null
   for (let i = 0; i < limit; i++) {
     const rule = rules[i]
     const ruleName = rule.getElementsByTagName("행정규칙명")[0]?.textContent?.trim() || ""
-    if (!ruleName || !looseMatchLawName(name, ruleName)) continue
+    // 후보 걸러내기도 괄호를 뗀 이름으로 — 붙인 채 비교하면 실존 규칙을 못 만난다.
+    // (정확 일치 판정은 아래에서 stripRuleNameMeta로 따로 하므로 판(版) 구분은 유지된다)
+    if (!ruleName || !looseMatchLawName(stripTrailingParen(name), ruleName)) continue
     const match: AdminRuleMatch = {
       name: ruleName,
       promDate: rule.getElementsByTagName("발령일자")[0]?.textContent?.trim() || undefined,
       orgName: rule.getElementsByTagName("소관부처명")[0]?.textContent?.trim() || undefined,
       ruleType: rule.getElementsByTagName("행정규칙종류")[0]?.textContent?.trim() || undefined,
-      exact: normalizeRuleName(ruleName) === target,
+      exact: stripRuleNameMeta(ruleName) === target,
     }
     if (match.exact) return match
     if (!loose) loose = match
@@ -157,7 +193,7 @@ export async function verifyAdminRuleCitation(
 
     // 현행에 없으면 폐지·제명변경 연혁 확인 (환각과 폐지 규칙을 구분)
     for (const cand of candidates) {
-      const note = await detectAbolishedAdminRule(apiClient, cand, apiKey)
+      const note = await detectAbolishedAdminRule(apiClient, cand, apiKey, signal)
       if (note) {
         const firstLine = note.split("\n").find(line => line.trim()) || note
         return `⌛ ${label} — 폐지·개정 연혁의 행정규칙으로 추정. ${firstLine.trim()}`

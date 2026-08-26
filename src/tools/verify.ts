@@ -14,7 +14,7 @@ import { findLaws, findRepealedLaw, resolvedLawMatches, INTERPUNCT_CHARS, type L
 import { resolveLawAlias, LAW_ALIAS_CANONICALS } from "../lib/search-normalizer.js"
 import { buildJO } from "../lib/law-parser.js"
 import { toArray } from "../lib/xml-parser.js"
-import { isAdminRuleName, isAdminRuleLikeName, verifyAdminRuleCitation, tryVerifyAdminRuleCitation } from "./admin-rule-citation.js"
+import { isAdminRuleName, isAdminRuleLikeName, stripTrailingParen, verifyAdminRuleCitation, tryVerifyAdminRuleCitation } from "./admin-rule-citation.js"
 import { SOURCE_FOOTER, truncateWithHint, FIN_LAW_NAMES } from "../lib/fin-common.js"
 import { resolveVersionAt } from "../lib/historical-utils.js"
 
@@ -217,6 +217,18 @@ function normArticle(a: string): string {
   return a.replace(/\s+/g, "")
 }
 
+/**
+ * 명칭 끝의 발령일·발령번호 괄호를 떼어 접미사 검사에 태운다.
+ * 「식품등의 표시기준(2024. 1. 15.)」 제1조는 접미사가 ')'로 끝나 행정규칙·법령
+ * 어느 화이트리스트도 통과하지 못해 **추출조차 되지 않았다** — 실존이든 환각이든
+ * 검증을 통째로 우회한다 (Codex 3차 차단). 판단은 괄호를 뗀 이름으로 하되,
+ * 표시·검색에 쓰는 이름은 원문 그대로 둔다 (판(版) 정보를 임의로 지우지 않는다).
+ */
+function nameForSuffixCheck(name: string): string {
+  const stripped = stripTrailingParen(name)
+  return stripped || name
+}
+
 interface Hit {
   idx: number
   c: Citation
@@ -308,10 +320,11 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
   for (const m of text.matchAll(QUOTED_ARTICLE_RE)) {
     const name = cleanLawName(m[1])
     quotedStarts.add(m.index!)
-    if (isAdminRuleName(name)) {
+    const suffixName = nameForSuffixCheck(name)
+    if (isAdminRuleName(suffixName)) {
       // 고시·훈령류는 본법 선행사가 되지 않지만, "같은 규칙"의 대상도 아니다
       hits.push({ idx: m.index!, c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "행정규칙" } })
-    } else if (LAW_LIKE_SUFFIX_RE.test(name)) {
+    } else if (LAW_LIKE_SUFFIX_RE.test(suffixName)) {
       hits.push({
         idx: m.index!,
         c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "법령조문" },
@@ -332,9 +345,10 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
   for (const m of text.matchAll(QUOTED_RE)) {
     if (quotedStarts.has(m.index!)) continue
     const name = cleanLawName(m[1])
-    if (isAdminRuleName(name)) {
+    const suffixName = nameForSuffixCheck(name)
+    if (isAdminRuleName(suffixName)) {
       hits.push({ idx: m.index!, c: { raw: m[0], lawName: name, kind: "행정규칙" } })
-    } else if (LAW_LIKE_SUFFIX_RE.test(name)) {
+    } else if (LAW_LIKE_SUFFIX_RE.test(suffixName)) {
       hits.push({
         idx: m.index!,
         c: { raw: m[0], lawName: name, kind: "법령" },
@@ -356,7 +370,10 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
   // 되지 않아 **환각 인용("탄소배출권거래규정 제77조")까지 0건으로 조용히 통과**하고
   // 있었다 (Codex 리뷰 중요 6, 실측). 「」 인용 경로(3번)는 이미 규정·규칙을 받는다
   const ADMIN_ARTICLE_RE = new RegExp(
-    `([가-힣0-9${IP}\\s]{2,30}?(?:고시|훈령|예규|통칙|기준|지침|규정|규칙))\\s*(${ARTICLE_PART})`,
+    // 접미사 뒤의 발령일·발령번호 괄호를 함께 받는다 — "식품등의 표시기준(2024. 1. 15.)
+    // 제1조"가 통째로 매칭되지 않아 추출 자체가 안 되던 자리 (Codex 3차 차단).
+    // 괄호는 선택이므로 기존 매칭에는 영향이 없다
+    `([가-힣0-9${IP}\\s]{2,30}?(?:고시|훈령|예규|통칙|기준|지침|규정|규칙)(?:\\s*[(（][^)）]{0,40}[)）])?)\\s*(${ARTICLE_PART})`,
     "g"
   )
   for (const m of text.matchAll(ADMIN_ARTICLE_RE)) {
@@ -366,7 +383,8 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     // ("법인세법 시행규칙 제15조"는 1번이 처리한다 — 여기서 또 잡으면 행정규칙으로
     //  판정되어 부령 조문이 "명칭만 확인"으로 강등된다)
     if (articleEnds.has(end)) continue
-    if (isAdminRuleName(name)) {
+    const suffixName = nameForSuffixCheck(name)
+    if (isAdminRuleName(suffixName)) {
       // 고시·훈령류: 행정규칙 전용 경로 (명칭 실존만 검증)
       hits.push({ idx: m.index!, c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "행정규칙" } })
       articleEnds.add(end)
@@ -375,7 +393,7 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     // 「…규정」·「…규칙」은 부령(법령 DB)일 수도, 고시·훈령일 수도 있다 —
     // 법령조문 경로로 보내면 법령 DB → 행정규칙 폴백 → 폐지 확인 순서가 이미 배선돼 있다.
     // 시행규칙은 isAdminRuleLikeName이 걸러 1번 경로에 맡긴다
-    if (!isAdminRuleLikeName(name)) continue
+    if (!isAdminRuleLikeName(suffixName)) continue
     hits.push({
       idx: m.index!,
       // 따옴표 없는 규정·규칙은 사내 문서일 수 있다 — "당사 취업규칙 제12조",
@@ -509,11 +527,16 @@ async function verifyLawCitation(
   if (!c.lawName) {
     return { mark: "⚠", line: `⚠ ${c.raw} — 조응("같은 법") 선행 법령명을 찾지 못해 판정 불가. 법령명을 명시하세요` }
   }
+  // 조회·분류에는 괄호를 뗀 이름을 쓴다 — 「외국환거래규정(기재부 고시)」을 그대로
+  // 조회하면 0건이 되고, 이름이 ')'로 끝나 규정·규칙 판정(isRuleLikeName)도 빗나가
+  // 행정규칙 폴백을 못 타고 ✗ 환각 낙인이 찍힌다 (Codex 3차 차단의 검증 단계 대응).
+  // 표시는 c.raw 원문 그대로다
+  const lookupName = stripTrailingParen(c.lawName)
   let laws: LawInfo[]
   let best: LawInfo | undefined
   let usedName: string
   try {
-    ;({ laws, best, usedName } = await findVerifyTarget(apiClient, c.lawName, signal, c.uncut))
+    ;({ laws, best, usedName } = await findVerifyTarget(apiClient, lookupName, signal, c.uncut))
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return { mark: "⚠", line: `⚠ ${c.raw} — 조회 실패로 판정 불가 (없음 아님): ${msg}` }
@@ -524,12 +547,12 @@ async function verifyLawCitation(
     // (국세청 훈령) 같은 실존 문서에 '환각 의심' 낙인이 찍힌다 — 행정규칙 DB를
     // 확인한 뒤 판정한다 (Opus B-0① 재검증)
     let adminChecked = false
-    if (isRuleLikeName(c.lawName)) {
+    if (isRuleLikeName(lookupName)) {
       if (signal?.aborted) {
         return { mark: "⚠", line: `⚠ ${c.raw} — 법령 DB 0건, 시간 상한 도달로 행정규칙 DB 미확인 — 판정 불가 (없음 아님)` }
       }
       try {
-        const adminHit = await tryVerifyAdminRuleCitation(apiClient, [c.lawName], c.raw, undefined, signal)
+        const adminHit = await tryVerifyAdminRuleCitation(apiClient, [lookupName], c.raw, undefined, signal)
         if (adminHit) {
           // 접두 일치는 tryVerify가 "⚠"로 시작하는 문구를 준다 — ✓로 승격하지 않는다
           const exactHit = adminHit.startsWith("✓")
@@ -554,7 +577,7 @@ async function verifyLawCitation(
     // findRepealedLaw는 이 용도로 만들어졌으나 배선이 안 돼 있었다 (Opus 재검증 개선)
     let histChecked = false
     if (!signal?.aborted) {
-      const { law: repealed, lookupFailed, reason } = await findRepealedLaw(apiClient, c.lawName, undefined, signal)
+      const { law: repealed, lookupFailed, reason } = await findRepealedLaw(apiClient, lookupName, undefined, signal)
       if (repealed) {
         const ef = repealed.effectiveDate
           ? `(마지막 시행 ${repealed.effectiveDate.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3")})`
@@ -578,7 +601,7 @@ async function verifyLawCitation(
     // 공백일 뿐이다. ✗(환각 의심)로 단정하면 실무자가 맞는 인용을 지운다 (Opus B-2).
     // 단, ⚠로만 두면 순수 환각("탄소세법")이 '사용 금지' 경고 없이 빠져나간다 —
     // hold로 표시해 요약 헤더에서 사용 보류를 요구한다 (Opus 재검증 개선)
-    if (looksLikeAbbreviation(c.lawName)) {
+    if (looksLikeAbbreviation(lookupName)) {
       return {
         mark: "⚠",
         hold: true,
@@ -661,7 +684,15 @@ async function verifyLawCitation(
     const title = article.조문제목 ? ` (${article.조문제목})` : ""
     const histNote = best.status === "연혁" ? " ⚠주의: 연혁(폐지·과거본) 인용" : ""
     const url = encodeURI(`https://www.law.go.kr/법령/${best.lawName}/${c.article}`)
-    return { mark: "✓", line: `✓ ${c.raw} — 실존${title}${histNote} · 검증범위: 조문 실존 확인${trimNote}${basisNote} · ${url}` }
+    // 조응("같은 법"·"같은 규정")은 원문만 봐서는 무엇으로 해소됐는지 알 수 없다.
+    // 선행사가 문단을 건너뛰어 잡히면 ✓가 엉뚱한 법령의 조문을 가리킬 수 있으므로
+    // 해소 결과를 드러내 사용자가 즉시 확인하게 한다 (Codex 3차 중요 — 조응 자체를
+    // 막으면 정상적인 장거리 인용까지 ⚠가 되므로, 막는 대신 밝힌다)
+    const resolvedNote = compact(c.raw).includes(compact(best.lawName)) ? "" : ` [해소: 「${best.lawName}」]`
+    return {
+      mark: "✓",
+      line: `✓ ${c.raw}${resolvedNote} — 실존${title}${histNote} · 검증범위: 조문 실존 확인${trimNote}${basisNote} · ${url}`,
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return { mark: "⚠", line: `⚠ ${c.raw} — 조문 조회 실패로 판정 불가 (없음 아님): ${msg}` }

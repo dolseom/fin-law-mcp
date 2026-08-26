@@ -526,3 +526,36 @@ describe("cleanLawName — 문장 접속 부사 제거 (자체 점검)", () => {
     expect(cites[0].lawName).toContain("보험료징수")
   })
 })
+
+/**
+ * Codex 3차 차단 회귀 — 괄호가 붙은 행정규칙 인용이 **추출조차 되지 않던** 문제.
+ * 「식품등의 표시기준(2024. 1. 15.)」은 이름이 ')'로 끝나 고시·규정 화이트리스트를
+ * 통과하지 못해 "인용 0건"으로 넘어갔다 — 실존이든 환각이든 검증을 통째로 우회한다.
+ */
+describe("extractCitations — 괄호가 붙은 행정규칙 인용 (Codex 3차 차단)", () => {
+  it("「」 안의 발령일 괄호가 붙어도 추출한다", () => {
+    const cites = extractCitations("「식품등의 표시기준(2024. 1. 15.)」 제1조에 따른다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].article).toBe("제1조")
+    // 표시는 원문 그대로 (판(版) 정보를 임의로 지우지 않는다)
+    expect(cites[0].lawName).toContain("2024")
+  })
+
+  it("따옴표 없는 형태도 추출한다", () => {
+    const cites = extractCitations("식품등의 표시기준(2024. 1. 15.) 제1조에 따른다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].article).toBe("제1조")
+  })
+
+  it("발령번호 괄호도 추출한다", () => {
+    const cites = extractCitations("「외국환거래규정(기재부 고시 제2026-1호)」 제23조에 따른다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].article).toBe("제23조")
+  })
+
+  it("괄호가 없던 기존 인용은 그대로다 (회귀 없음)", () => {
+    const cites = extractCitations("「법인세법」 제26조에 따른다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).toBe("법인세법")
+  })
+})

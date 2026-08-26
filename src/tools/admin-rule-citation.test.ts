@@ -1,7 +1,7 @@
 // 자체 패치 #4 테스트 — verify_citations 행정규칙 인용 검증
 import { describe, expect, it } from "vitest"
 import type { LawApiClient } from "../lib/api-client.js"
-import { isAdminRuleName, isAdminRuleLikeName, findAdminRule, tryVerifyAdminRuleCitation, verifyAdminRuleCitation } from "./admin-rule-citation.js"
+import { isAdminRuleName, isAdminRuleLikeName, findAdminRule, stripRuleNameMeta, stripTrailingParen, tryVerifyAdminRuleCitation, verifyAdminRuleCitation } from "./admin-rule-citation.js"
 // fin-law-mcp: upstream verify-citations 대신 자체 verify.ts의 추출기로 연결
 // (상한 15은 추출기 내부 고정)
 import { extractCitations as parseCitations } from "./verify.js"
@@ -244,5 +244,40 @@ describe("findAdminRule — 괄호 메타데이터 정규화 (Codex 2차 중요)
   it("괄호를 떼도 다른 이름이면 여전히 exact=false", async () => {
     const m = await findAdminRule(xmlStub(PREFIX_ONLY_XML), "국세청 사무처리규정")
     expect(m!.exact).toBe(false)
+  })
+})
+
+/**
+ * Codex 3차 중요 회귀 — 괄호 정규화가 서로 다른 규칙을 같은 규칙으로 만들던 문제.
+ * 날짜·발령번호는 같은 규칙의 판(版) 표시라 비교에서 빼야 하지만,
+ * 「A규정(제1권)」·「A규정(제2권)」은 다른 규칙이므로 구분이 유지되어야 한다.
+ */
+describe("stripRuleNameMeta — 날짜·발령번호만 제거 (Codex 3차 중요)", () => {
+  it("발령일 괄호는 제거한다", () => {
+    expect(stripRuleNameMeta("식품등의 표시기준(2024. 1. 15.)")).toBe(stripRuleNameMeta("식품등의 표시기준"))
+  })
+
+  it("발령번호 괄호도 제거한다", () => {
+    expect(stripRuleNameMeta("외국환거래규정(제2026-1호)")).toBe(stripRuleNameMeta("외국환거래규정"))
+  })
+
+  it("판·편을 가르는 괄호는 남긴다 (서로 다른 규칙)", () => {
+    expect(stripRuleNameMeta("A규정(제1권)")).not.toBe(stripRuleNameMeta("A규정(제2권)"))
+    expect(stripRuleNameMeta("A규정(제1권)")).not.toBe(stripRuleNameMeta("A규정"))
+  })
+})
+
+describe("stripTrailingParen — 검색어·접미사 검사용 (종류 무관 제거)", () => {
+  it("괄호 종류를 가리지 않고 뗀다", () => {
+    expect(stripTrailingParen("외국환거래규정(기재부 고시)")).toBe("외국환거래규정")
+    expect(stripTrailingParen("A규정(제1권)")).toBe("A규정")
+  })
+
+  it("괄호가 전부인 이름은 원본을 유지한다 (빈 문자열 방지)", () => {
+    expect(stripTrailingParen("(고시)")).toBe("(고시)")
+  })
+
+  it("괄호가 없으면 그대로", () => {
+    expect(stripTrailingParen("법인세법")).toBe("법인세법")
   })
 })

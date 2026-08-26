@@ -159,14 +159,20 @@ export function extractSuccessorNames(reason: string, excludeNames: string[]): s
 export async function detectAbolishedAdminRule(
   apiClient: LawApiClient,
   query: string,
-  apiKey?: string
+  apiKey?: string,
+  // verify의 20초 상한 전파 — 없으면 상한 이후에도 연혁 조회가 계속되고,
+  // 그 결과로 strict 접미사 규칙이 뒤늦게 ✗ 판정을 받는다 (Codex 3차 중요)
+  signal?: AbortSignal
 ): Promise<string | null> {
   const cacheKey = `abolished-admrul:${query.toLowerCase().trim()}`
   const cached = lawCache.get<string>(cacheKey)
   if (cached !== null) return cached || null // "" = 해당없음 네거티브 캐시
+  if (signal?.aborted) {
+    throw new Error("요청 취소됨(도구 deadline) — 행정규칙 연혁 확인 전에 시간 상한 도달")
+  }
   let result: string | null = null
   try {
-    const xml = await apiClient.searchAdminRule({ query, nw: "2", apiKey })
+    const xml = await apiClient.searchAdminRule({ query, nw: "2", apiKey, signal })
     const hits = parseAdmrulHistoryXml(xml)
 
     // 행정규칙ID로 그룹핑 (개명을 넘어 동일 규칙 추적), 발령일자 오름차순
