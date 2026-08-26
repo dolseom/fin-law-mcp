@@ -198,8 +198,11 @@ export async function detectAbolishedAdminRule(
         break
       }
     }
-  } catch {
-    return null
+  } catch (e) {
+    // 연혁 조회 **실패**를 null로 돌리면 호출측이 "폐지 이력도 없음"으로 읽고
+    // ✗ NOT_FOUND를 찍는다 — 폐지된 실존 규칙이 환각으로 판정된다 (Codex 2차 중요).
+    // 실패는 캐시하지 않는다 (일시 장애를 한 시간 동안 굳히지 않기 위해)
+    throw new Error(`행정규칙 연혁 조회 실패: ${e instanceof Error ? e.message : String(e)}`)
   }
   lawCache.set(cacheKey, result || "", 60 * 60 * 1000)
   return result

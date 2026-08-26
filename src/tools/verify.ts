@@ -146,7 +146,7 @@ function isRuleAntecedentName(name: string): boolean {
  * "같은 규정"의 선행사가 될 수 있는 이름 — 규정류만 (규칙과 별도 추적).
  */
 function isRegAntecedentName(name: string): boolean {
-  return /규정$/.test(name.replace(/s+/g, ""))
+  return /규정$/.test(name.replace(/\s+/g, ""))
 }
 
 // 알려진 정식 법령명 — 어절 컷보다 **먼저** 최장 일치를 시도한다.
@@ -220,6 +220,7 @@ interface Hit {
   antecedent?: string // 이 인용이 조응에 남기는 본법명 (행정규칙은 갱신하지 않음)
   ruleAntecedent?: string // "같은 규칙"이 가리킬 규칙류 선행사 (「…에 관한 규칙」 등)
   regAntecedent?: string // "같은 규정"이 가리킬 규정류 선행사 (「외국환거래규정」 등)
+  softAntecedent?: boolean // 선행사가 soft(사내 문서 가능)였는가 — 조응도 같은 취급을 받아야 한다
   anaphorSuffix?: string // 조응 인용 — 단일 패스에서 선행사 + 이 접미사로 해소
   anaphorKind?: "법" | "영" | "규칙" | "규정" // 조응이 요구하는 대상 종류
 }
@@ -401,6 +402,11 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
   let lastLawName = "" // 조응 선행사 — 직전에 명시된 본법명으로 제한 (선행사 오염 사고 방지)
   let lastRuleName = "" // "같은 규칙"의 선행사 — 「…에 관한 규칙」류 (본법과 별도로 추적)
   let lastRegName = "" // "같은 규정"의 선행사 — 「…규정」류 (규칙과도 별도로 추적)
+  // 선행사가 soft(사내 문서일 수 있는 따옴표 없는 규정·규칙)였는지 함께 기억한다.
+  // 이게 없으면 "내부 관리규정 제5조와 같은 규정 제6조"에서 앞은 ⚠인데 뒤만 ✗가 된다 —
+  // 같은 문서를 가리키는 연쇄 인용의 절반만 환각으로 낙인찍히는 셈 (Codex 2차 중요)
+  let lastRuleSoft = false
+  let lastRegSoft = false
   const out: Citation[] = []
   const seen = new Set<string>()
   for (const h of hits) {
@@ -408,17 +414,29 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
       if (h.anaphorKind === "규칙") {
         // "같은 규칙"은 직전에 인용된 규칙 자체를 가리킨다. 규칙 선행사가 없으면
         // 본법으로 넘겨짚지 않고 ⚠로 보낸다 — 넘겨짚으면 틀린 법령에 ✓가 된다
-        if (lastRuleName) h.c.lawName = lastRuleName
+        if (lastRuleName) {
+          h.c.lawName = lastRuleName
+          if (lastRuleSoft) h.c.soft = true
+        }
       } else if (h.anaphorKind === "규정") {
         // "같은 규정"도 마찬가지 — 규정 선행사가 없으면 비워 ⚠ 경로로 보낸다
-        if (lastRegName) h.c.lawName = lastRegName
+        if (lastRegName) {
+          h.c.lawName = lastRegName
+          if (lastRegSoft) h.c.soft = true
+        }
       } else if (lastLawName) {
         h.c.lawName = h.anaphorSuffix ? `${lastLawName} ${h.anaphorSuffix}` : lastLawName
       } // 선행사 없으면 lawName "" 유지 → ⚠ 판정 경로
     } else {
       if (h.antecedent) lastLawName = h.antecedent
-      if (h.ruleAntecedent) lastRuleName = h.ruleAntecedent
-      if (h.regAntecedent) lastRegName = h.regAntecedent
+      if (h.ruleAntecedent) {
+        lastRuleName = h.ruleAntecedent
+        lastRuleSoft = !!h.c.soft
+      }
+      if (h.regAntecedent) {
+        lastRegName = h.regAntecedent
+        lastRegSoft = !!h.c.soft
+      }
     }
     // dedup 키에 위치를 포함한다 — 서로 다른 법의 인용이 같은 lawName으로 절단됐을 때
     // 한 건이 조용히 증발하던 문제 방지 (Opus B-3②)
@@ -533,7 +551,7 @@ async function verifyLawCitation(
     // findRepealedLaw는 이 용도로 만들어졌으나 배선이 안 돼 있었다 (Opus 재검증 개선)
     let histChecked = false
     if (!signal?.aborted) {
-      const repealed = await findRepealedLaw(apiClient, c.lawName, undefined, signal)
+      const { law: repealed, lookupFailed, reason } = await findRepealedLaw(apiClient, c.lawName, undefined, signal)
       if (repealed) {
         const ef = repealed.effectiveDate
           ? `(마지막 시행 ${repealed.effectiveDate.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3")})`
@@ -541,6 +559,14 @@ async function verifyLawCitation(
         return {
           mark: "⚠",
           line: `⚠ ${c.raw} — 현행 법령에는 없고 폐지·연혁 법령 「${repealed.lawName}」${ef}으로 추정 (환각 아님). 연혁 인용이면 basis_date를 지정해 재검증하세요`,
+        }
+      }
+      // 연혁 조회가 **실패**했으면 "연혁에도 없다"고 말할 수 없다 — 여기서 ✗를 찍으면
+      // 폐지된 실존 법령을 환각으로 판정하게 된다 (Codex 2차 중요: 조용한 실패)
+      if (lookupFailed) {
+        return {
+          mark: "⚠",
+          line: `⚠ ${c.raw} — 현행 법령 0건이고, 폐지·연혁 DB 조회는 실패했습니다 — 판정 불가 (없음 아님): ${reason ?? "사유 미상"}`,
         }
       }
       if (!signal?.aborted) histChecked = true
@@ -683,7 +709,7 @@ export async function handleFinVerify(
       }
       if (c.kind === "행정규칙") {
         try {
-          let line = await verifyAdminRuleCitation(apiClient, [c.lawName], c.raw, c.lawName)
+          let line = await verifyAdminRuleCitation(apiClient, [c.lawName], c.raw, c.lawName, undefined, aborter.signal)
           // 조문이 붙은 행정규칙 인용은 명칭만 확인된 것이다 — ✓로 집계하면 검증 안 된
           // 조문이 "검증 통과"로 읽히고, verify-file 훅의 마지막 관문이 통째로 열린다
           // (Opus 리뷰 중요 1). 명칭 실존은 밝히되 판정은 ⚠(조문 미검증)로 내린다

@@ -245,10 +245,13 @@ export const FIN_CALC_TOOL = {
       {
         title: "가지급금인정이자",
         properties: { calc_type: { const: "가지급금인정이자" } },
+        // rate_type은 런타임에서 필수인데 스키마에 없으면 LLM이 생략 가능하다고 읽고
+        // 오류를 받는다 — 스키마와 실행 계약을 맞춘다 (Codex 2차 개선)
+        required: ["calc_type", "rate_type"],
         // 적수를 직접 주거나(balance_days) 금액×일수로 주거나 — 둘 중 하나
         anyOf: [
-          { required: ["calc_type", "balance_days"] },
-          { required: ["calc_type", "principal", "days"] },
+          { required: ["balance_days"] },
+          { required: ["principal", "days"] },
         ],
       },
       {

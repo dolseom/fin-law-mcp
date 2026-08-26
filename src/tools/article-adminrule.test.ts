@@ -134,3 +134,38 @@ describe("fin_article — 행정규칙 조회 실패 (Codex 리뷰 차단 3)", (
     expect(text).not.toContain("✗없음")
   })
 })
+
+/**
+ * Codex 2차 차단 2 회귀 — exact 플래그를 만들어 놓고 소비자에 전파하지 않던 문제.
+ * 「국세청 사무처리규정」 요청에 「…시행세칙」만 있어도 "실존"으로 답하면
+ * 요청과 다른 문서를 근거로 만들게 된다.
+ */
+const PREFIX_ADMRUL_XML =
+  '<?xml version="1.0"?><AdmRulSearch><totalCnt>1</totalCnt><admrul>' +
+  "<행정규칙명>국세청 사무처리규정 시행세칙</행정규칙명><행정규칙종류>훈령</행정규칙종류>" +
+  "<소관부처명>국세청</소관부처명><발령일자>20260101</발령일자></admrul></AdmRulSearch>"
+
+describe("fin_article — 행정규칙 접두 일치 (Codex 2차 차단 2)", () => {
+  it("이름이 겹치는 다른 규칙을 실존으로 단정하지 않는다", async () => {
+    const r = await handleFinArticle(stub(EMPTY_LAW_XML, PREFIX_ADMRUL_XML), {
+      law: "국세청 사무처리규정",
+      article: "제1조",
+    })
+    const text = r.content[0].text
+    expect(text).toContain("[ADMIN_RULE_AMBIGUOUS]")
+    expect(text).toContain("정확히 일치하는")
+    expect(text).toContain("국세청 사무처리규정 시행세칙")
+    expect(text).not.toContain("[ADMIN_RULE] ")
+    // 다른 문서의 내용을 요청 규정의 내용으로 쓰지 말라고 명시
+    expect(text).toContain("쓰지 마세요")
+  })
+
+  it("정확 일치는 종전대로 실존으로 답한다", async () => {
+    const r = await handleFinArticle(stub(EMPTY_LAW_XML, ADMRUL_HIT_XML), {
+      law: "외국환거래규정",
+      article: "제9-5조",
+    })
+    expect(r.content[0].text).toContain("[ADMIN_RULE]")
+    expect(r.content[0].text).not.toContain("AMBIGUOUS")
+  })
+})

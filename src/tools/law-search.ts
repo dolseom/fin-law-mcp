@@ -199,23 +199,45 @@ export async function handleFinLawSearch(
         adminNote = anyFailed ? " · 행정규칙 DB는 확인 실패(없음 단정 아님)" : " · 행정규칙 DB에도 0건"
       }
     }
-    const adminRuleBlock = adminRule
-      ? `[행정규칙] "${query.trim()}" — 법령(법률·시행령·부령) DB에는 없지만 **행정규칙 「${adminRule.name}」**` +
-        (() => {
-          const meta = [adminRule!.ruleType, adminRule!.orgName, adminRule!.promDate ? `발령 ${adminRule!.promDate}` : ""]
-            .filter(Boolean)
-            .join(" · ")
-          return meta ? ` (${meta})` : ""
-        })() +
-        `로 실존합니다.\n` +
-        `※ 행정규칙은 조문 단위 조회 미지원 — 인용 검증은 fin_verify, 원문은 국가법령정보센터(law.go.kr)에서 행정규칙으로 검색하세요.` +
-        (basis_date ? `\n※ 기준일 검색은 법령만 지원 — 위 행정규칙 실존은 현행 기준입니다` : "")
+    // exact=false는 "이름이 그것으로 시작하는 **다른** 규칙이 있다"는 뜻이지
+    // 요청한 규칙이 실존한다는 증거가 아니다 — 「국세청 사무처리규정」 질의에
+    // 「…시행세칙」만 있어도 실존으로 단정하던 것을 막는다 (Codex 2차 차단 1).
+    // exact 플래그를 만들어 놓고 소비자에 전파하지 않으면 수정한 것이 아니다
+    const adminMeta = adminRule
+      ? [adminRule.ruleType, adminRule.orgName, adminRule.promDate ? `발령 ${adminRule.promDate}` : ""]
+          .filter(Boolean)
+          .join(" · ")
       : ""
+    const adminRuleBlock = !adminRule
+      ? ""
+      : adminRule.exact
+        ? `[행정규칙] "${query.trim()}" — 법령(법률·시행령·부령) DB에는 없지만 **행정규칙 「${adminRule.name}」**` +
+          (adminMeta ? ` (${adminMeta})` : "") +
+          `로 실존합니다.\n` +
+          `※ 행정규칙은 조문 단위 조회 미지원 — 인용 검증은 fin_verify, 원문은 국가법령정보센터(law.go.kr)에서 행정규칙으로 검색하세요.` +
+          (basis_date ? `\n※ 기준일 검색은 법령만 지원 — 위 행정규칙 실존은 현행 기준입니다` : "")
+        : `[행정규칙·유사] "${query.trim()}"과 **정확히 일치하는** 행정규칙은 찾지 못했습니다 — ` +
+          `이름이 겹치는 「${adminRule.name}」${adminMeta ? ` (${adminMeta})` : ""}만 검색되었습니다.\n` +
+          `※ 표기를 확인하세요 — 실존 단정 불가 (없음도 아님).`
 
     if (items.length === 0) {
-      if (adminRule) {
+      // 정확 일치 행정규칙일 때만 그것으로 답한다. 유사 일치면 법령 0건 사실도
+      // 함께 알려야 한다 — 유사 규칙 하나로 "찾았다"고 끝내면 안 된다
+      if (adminRule?.exact) {
         return {
           content: [{ type: "text", text: `${adminRuleBlock}\n\n${SOURCE_FOOTER}` }],
+        }
+      }
+      if (adminRule) {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `[LAW_NOT_FOUND] "${stripped}" 법령 검색 결과 0건 (정상 조회)${strippedNote}\n\n` +
+                `${adminRuleBlock}\n\n${SOURCE_FOOTER}`,
+            },
+          ],
         }
       }
       // 0건이어도 주제어 힌트는 준다 (주제어→법령 매핑 부재가 기존 병목)

@@ -270,19 +270,23 @@ export function pickRepealed(rows: LawInfo[], query: string): LawInfo | undefine
 
 /**
  * 폐지(연혁) 법령 조회 — target=eflaw로 과거·폐지본을 검색해 최신 연혁본을 반환.
- * 현행 검색이 0건일 때만 보조로 호출(환각 vs 폐지 구분용). 실패 시 undefined.
+ * 현행 검색이 0건일 때만 보조로 호출(환각 vs 폐지 구분용).
+ *
+ * ⚠ 조회 **실패**와 **0건**을 구분해 돌린다: 실패를 undefined로 뭉개면 호출측이
+ * "현행·연혁 모두 0건 (정상 조회)"이라고 적고 ✗(환각 의심)를 찍는다 — 실제로는
+ * 확인하지 못한 것이라, 존재하는 구법이 환각으로 판정된다 (Codex 2차 중요)
  */
 export async function findRepealedLaw(
   apiClient: LawApiClient,
   query: string,
   apiKey?: string,
   signal?: AbortSignal
-): Promise<LawInfo | undefined> {
+): Promise<{ law?: LawInfo; lookupFailed?: boolean; reason?: string }> {
   let xmlText: string
   try {
     xmlText = await apiClient.searchLaw(query, apiKey, 30, "eflaw", signal)
-  } catch {
-    return undefined  // eflaw 조회 실패는 조용히 폴백(기존 NOT_FOUND 경로 유지)
+  } catch (e) {
+    return { lookupFailed: true, reason: e instanceof Error ? e.message : String(e) }
   }
-  return pickRepealed(parseLawXml(xmlText, 100), query)
+  return { law: pickRepealed(parseLawXml(xmlText, 100), query) }
 }

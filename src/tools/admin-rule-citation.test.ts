@@ -224,3 +224,25 @@ describe("findAdminRule — 정확 일치와 접두 일치 구분 (Codex 리뷰 
     expect(line!.startsWith("✓")).toBe(true)
   })
 })
+
+/**
+ * Codex 2차 회귀 — exact 판정이 괄호 메타데이터 때문에 정상 명칭을 강등하던 문제.
+ * 행정규칙 명칭에는 발령일·연도가 괄호로 붙는 경우가 있다.
+ */
+const PAREN_XML =
+  '<?xml version="1.0"?><AdmRulSearch><totalCnt>1</totalCnt><admrul>' +
+  "<행정규칙명>식품등의 표시기준(2024. 1. 15.)</행정규칙명><행정규칙종류>고시</행정규칙종류>" +
+  "<소관부처명>식품의약품안전처</소관부처명><발령일자>20240115</발령일자></admrul></AdmRulSearch>"
+
+describe("findAdminRule — 괄호 메타데이터 정규화 (Codex 2차 중요)", () => {
+  it("명칭 끝 괄호(발령일·연도)는 일치 판정에서 제외한다", async () => {
+    const m = await findAdminRule(xmlStub(PAREN_XML), "식품등의 표시기준")
+    expect(m).not.toBeNull()
+    expect(m!.exact).toBe(true)
+  })
+
+  it("괄호를 떼도 다른 이름이면 여전히 exact=false", async () => {
+    const m = await findAdminRule(xmlStub(PREFIX_ONLY_XML), "국세청 사무처리규정")
+    expect(m!.exact).toBe(false)
+  })
+})

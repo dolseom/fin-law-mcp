@@ -64,7 +64,11 @@ function collectAnnexes(node: any, acc: AnnexEntry[], lawName: string): void {
     // "[별표 8의10] [별표 11]로 이동" 형태는 [^\]]*가 ]를 못 넘어 살아남았다 —
     // 유령 별표가 목록에 뜨고 도구가 그걸 재호출하라고 권했다 (Opus 리뷰 개선 4)
     if (/^삭제|^\[?별표\s*[\d의]+[\s\S]*?(?:이동|삭제)\s*(?:<[^>]*>)?\s*$|^\[?별표\s*\d+[^\]]*(이동|삭제)/.test(name.trim())) return
-    const ownerRaw = node.법령명 || node.관련법령명 || ""
+    // 소속 법령 필드는 응답마다 이름이 다를 수 있다 — 하나만 읽으면 필드명이 바뀌었을 때
+    // owner가 빈 문자열이 되고, 아래 `!a.owner ||` 필터가 **무관 법령의 별표를 통과시킨다**
+    // (Codex 2차 차단 3). 알려진 이름을 모두 시도한다
+    const ownerRaw =
+      node.법령명 || node.관련법령명 || node.법령명한글 || node.소속법령명 || node.상위법령명 || ""
     const owner = typeof ownerRaw === "string" ? ownerRaw : flattenContent(ownerRaw)
     const fileLink = node.별표서식파일링크 || node.별표파일링크 || node.별표법령상세링크 || ""
     acc.push({

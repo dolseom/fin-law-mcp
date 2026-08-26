@@ -168,7 +168,10 @@ function findAnnexItems(node: any, acc: AnnexItem[], lawName: string): void {
     if (/^삭제|^\[?별표\s*\d+[^\]]*(이동|삭제)/.test(name.trim())) return
     // 별표 검색(search=2)이 유사 법령명까지 돌려주는 경우 방어: 법령명 필드가 있으면 대조.
     // 하위법령(시행령·시행규칙) 별표는 통과 — 기준내용연수표는 시행규칙 별표다 (골든셋 #1)
-    const ownerRaw = node.법령명 || node.관련법령명 || ""
+    // 소속 필드명이 바뀌면 owner가 비고, 아래 `!owner ||`가 무관 법령 별표를 통과시킨다
+    // (fin_annex와 같은 결함 — Codex 2차 차단 3)
+    const ownerRaw =
+      node.법령명 || node.관련법령명 || node.법령명한글 || node.소속법령명 || node.상위법령명 || ""
     const owner = typeof ownerRaw === "string" ? ownerRaw : flattenContent(ownerRaw)
     if (!owner || sameLawFamily(lawName, owner)) {
       acc.push({ no: String(node.별표번호 ?? "").trim(), name: name.trim() })
@@ -198,6 +201,16 @@ async function adminRuleNotice(
     const rule = await findAdminRule(apiClient, name, undefined, signal)
     if (!rule) return null
     const meta = [rule.ruleType, rule.orgName, rule.promDate ? `발령 ${rule.promDate}` : ""].filter(Boolean).join(" · ")
+    // exact=false는 이름이 겹치는 **다른** 규칙이 있다는 뜻이다 — 「국세청 사무처리규정」
+    // 요청에 「…시행세칙」을 실존으로 답하면 요청과 다른 문서를 근거로 만든다 (Codex 2차 차단 2)
+    if (!rule.exact) {
+      return (
+        `[ADMIN_RULE_AMBIGUOUS] "${name}" — 법령 DB에 없고, 행정규칙 DB에도 **정확히 일치하는** 이름이 없습니다.\n` +
+        `이름이 겹치는 「${rule.name}」${meta ? ` (${meta})` : ""}만 검색되었습니다 — 같은 문서가 아닐 수 있습니다.\n` +
+        `💡 정확한 명칭을 확인해 다시 요청하세요 (실존 단정 불가, 없음도 아님).\n` +
+        `⚠️ LLM은 위 규칙의 내용을 요청한 규정의 내용으로 쓰지 마세요.`
+      )
+    }
     return (
       `[ADMIN_RULE] "${name}" — 법령(법률·시행령·부령) DB에는 없지만 **행정규칙 「${rule.name}」**${meta ? ` (${meta})` : ""}로 실존합니다.\n` +
       `⚠ 행정규칙은 법제처 API가 조문 단위 조회를 지원하지 않아 ${articleLabel} 본문을 제공할 수 없습니다 — **"없는 조문"이 아니라 조회 미지원**입니다.\n` +
@@ -237,12 +250,18 @@ export async function handleFinArticle(
   const articleLabel = normalizeArticleLabel(input.article)
   const efYd = input.basis_date ? input.basis_date.replace(/-/g, "") : undefined
 
+  // ① 단계의 행정규칙 폴백에도 도구 deadline을 건다 — 이게 없으면 6초 예산을
+  // 넘겨도 행정규칙 조회가 재시도까지 다 소진한다 (Codex 2차 중요: 폴백이 abort
+  // controller 생성보다 앞서 실행된다)
+  const lookupAborter = new AbortController()
+  const lookupTimer = setTimeout(() => lookupAborter.abort(), Math.max(0, deadlineAt - Date.now()))
+
   // ── ① 법령 확정 ──
   let law: LawInfo
   try {
     const laws = await findLaws(apiClient, input.law, undefined, 5)
     if (laws.length === 0) {
-      const notice = await adminRuleNotice(apiClient, input.law, articleLabel)
+      const notice = await adminRuleNotice(apiClient, input.law, articleLabel, lookupAborter.signal)
       if (notice) return { content: [{ type: "text", text: notice }] }
       return {
         content: [
@@ -259,7 +278,7 @@ export async function handleFinArticle(
     if (!exact) {
       // LIKE 검색이 이름만 비슷한 법령을 물어와도 실제 대상이 행정규칙일 수 있다
       // (0건일 때만 확인하면 노이즈 1건에 폴백이 꺼진다 — 잔여②와 같은 함정)
-      const notice = await adminRuleNotice(apiClient, input.law, articleLabel)
+      const notice = await adminRuleNotice(apiClient, input.law, articleLabel, lookupAborter.signal)
       if (notice) return { content: [{ type: "text", text: notice }] }
       // 정확 일치가 없으면 조문 본문을 주지 않는다 — 경고를 붙여도 LLM이 본문을
       // 그대로 인용하면 무관한 법령의 조문이 검토서에 실린다
@@ -285,6 +304,9 @@ export async function handleFinArticle(
       content: [{ type: "text", text: formatFetchFailure("법령 검색", e) }],
       isError: true,
     }
+  } finally {
+    // 타이머 잔존 방지 — 이후 단계는 자체 aborter를 쓴다
+    clearTimeout(lookupTimer)
   }
 
   // ── ①-b 기준일 버전 해소 ──

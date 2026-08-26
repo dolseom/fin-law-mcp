@@ -48,7 +48,13 @@ const DOMAIN_AUTHORITY: Record<Domain, string> = {
 
 export const FinRulingSearchInputSchema = z.object({
   query: z.string().min(1).describe("쟁점 검색어 (예: 퇴직금 중간정산 손금)"),
-  domains: z.array(z.enum(DOMAINS)).default([...DOMAINS]).describe("검색 도메인 (기본: 4곳 전부)"),
+  // 빈 배열을 허용하면 한 번도 조회하지 않고 "전체 성공 · 검색 범위 (0곳)"을 돌려준다 —
+  // 호출측은 이것을 "검색했지만 결과 없음"으로 읽는다 (조용한 no-op, Codex 2차 중요)
+  domains: z
+    .array(z.enum(DOMAINS))
+    .min(1, "domains는 최소 1곳 이상이어야 합니다 (생략하면 4곳 전부 검색)")
+    .default([...DOMAINS])
+    .describe("검색 도메인 (기본: 4곳 전부)"),
   basis_date: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/, "기준일은 YYYY-MM-DD 형식이어야 합니다")

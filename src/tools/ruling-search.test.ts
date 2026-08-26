@@ -101,3 +101,37 @@ describe("fin_ruling_search — 커버 범위·절단 고지 (조용한 실패 �
     expect(text).toContain(`0건이 "해석 없음"을 뜻하지 않습니다`)
   })
 })
+
+/**
+ * Codex 2차 회귀 — 빈 domains 배열의 조용한 no-op.
+ * 한 번도 조회하지 않고 "전체 성공 · 검색 범위 (0곳)"을 돌려주면
+ * 호출측은 이것을 "검색했지만 결과 없음"으로 읽는다.
+ */
+describe("domains 빈 배열 — 조용한 no-op 금지", () => {
+  it("빈 배열은 성공이 아니라 INVALID_PARAMETER", async () => {
+    let called = false
+    const client = {
+      fetchApi: async () => {
+        called = true
+        return "<PrecSearch><totalCnt>0</totalCnt></PrecSearch>"
+      },
+    } as unknown as LawApiClient
+    const r = await handleFinRulingSearch(client, { query: "퇴직금", domains: [] })
+    expect(r.isError).toBe(true)
+    expect(r.content[0].text).toContain("INVALID_PARAMETER")
+    expect(r.content[0].text).toContain("최소 1곳")
+    expect(called).toBe(false)
+  })
+
+  it("domains를 생략하면 종전대로 4곳 전부 검색한다", async () => {
+    const domains = new Set<string>()
+    const client = {
+      fetchApi: async (p: { target?: string }) => {
+        if (p.target) domains.add(p.target)
+        return "<PrecSearch><totalCnt>0</totalCnt></PrecSearch>"
+      },
+    } as unknown as LawApiClient
+    await handleFinRulingSearch(client, { query: "퇴직금" })
+    expect(domains.size).toBe(4)
+  })
+})

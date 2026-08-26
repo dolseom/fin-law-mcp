@@ -523,10 +523,10 @@ describe("입력 스키마 — 조건부 필수 (Codex 리뷰: oneOf)", () => {
     expect(dep.find((b: any) => b.properties.method.const === "정액법").required).not.toContain("remaining_value")
     // 인정이자는 적수를 직접 주거나 금액×일수로 주거나 둘 중 하나
     const interest = branchOf("가지급금인정이자").anyOf
-    expect(interest.map((b: any) => b.required)).toEqual([
-      ["calc_type", "balance_days"],
-      ["calc_type", "principal", "days"],
-    ])
+    expect(interest.map((b: any) => b.required)).toEqual([["balance_days"], ["principal", "days"]])
+    // rate_type은 런타임에서 필수다 — 스키마에도 있어야 LLM이 "생략 가능"으로 읽지 않는다
+    // (스키마·실행 계약 불일치 회귀: Codex 2차 개선)
+    expect(branchOf("가지급금인정이자").required).toContain("rate_type")
   })
 
   it("모든 계산 유형이 enum과 oneOf 양쪽에 있다 (한쪽만 늘리면 호출이 막힌다)", () => {

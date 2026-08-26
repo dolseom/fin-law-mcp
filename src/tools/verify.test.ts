@@ -451,3 +451,57 @@ describe("extractCitations — 규정·규칙 확장의 부작용 방어", () =>
     expect(cites[0].soft).toBeFalsy()
   })
 })
+
+/**
+ * Codex 2차 회귀 — soft(사내 문서 가능) 속성이 조응에 상속되지 않던 문제.
+ * "내부 관리규정 제5조와 같은 규정 제6조"에서 앞은 ⚠인데 뒤만 ✗가 되면
+ * 같은 문서를 가리키는 연쇄 인용의 절반만 환각으로 낙인찍힌다.
+ */
+describe("extractCitations — soft 속성의 조응 상속 (Codex 2차 중요)", () => {
+  it('"같은 규정"이 soft 선행사를 이어받는다', () => {
+    const cites = extractCitations("내부 관리규정 제5조와 같은 규정 제6조를 따른다.")
+    expect(cites).toHaveLength(2)
+    expect(cites[0].soft).toBe(true)
+    expect(cites[1].soft).toBe(true)
+  })
+
+  it('"같은 규칙"도 soft 선행사를 이어받는다', () => {
+    const cites = extractCitations("당사 취업규칙 제12조와 같은 규칙 제13조에 따른다.")
+    expect(cites[0].soft).toBe(true)
+    expect(cites[1].soft).toBe(true)
+  })
+
+  it("「」 선행사(법령 의도)는 soft를 물려주지 않는다", () => {
+    const cites = extractCitations("「외국환거래규정」 제23조와 같은 규정 제24조를 본다.")
+    expect(cites[0].soft).toBeFalsy()
+    expect(cites[1].soft).toBeFalsy()
+  })
+})
+
+/**
+ * Codex 2차 회귀 — 연혁 조회 **실패**를 "연혁에도 없음"으로 바꾸던 조용한 실패.
+ * 현행 0건 + 연혁 조회 timeout이면 폐지된 실존 법령이 ✗(환각 의심)로 판정된다.
+ */
+describe("연혁 조회 실패는 부존재가 아니다 (Codex 2차 중요)", () => {
+  const EMPTY_LAW = '<?xml version="1.0"?><LawSearch><totalCnt>0</totalCnt></LawSearch>'
+
+  it("폐지·연혁 DB 조회가 실패하면 ✗ 대신 ⚠", async () => {
+    let call = 0
+    const client = {
+      // 1회차: 현행 검색 0건 / 2회차 이후(eflaw 연혁): 실패
+      searchLaw: async (_q: string, _k: unknown, _d: unknown, target?: string) => {
+        call++
+        if (target === "eflaw") throw new Error("요청 시간 초과 (3000ms)")
+        return EMPTY_LAW
+      },
+      fetchApi: async () => EMPTY_LAW,
+      searchAdminRule: async () => '<?xml version="1.0"?><AdmRulSearch><totalCnt>0</totalCnt></AdmRulSearch>',
+    } as unknown as LawApiClient
+    const r = await handleFinVerify(client, { text: "택지소유상한에 관한 법률 제10조에 따른다." })
+    const text = r.content[0].text
+    expect(text).toContain("⚠")
+    expect(text).not.toContain("✗ ")
+    expect(text).toContain("실패")
+    expect(call).toBeGreaterThan(1)
+  })
+})

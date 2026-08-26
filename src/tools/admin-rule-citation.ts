@@ -81,7 +81,12 @@ export async function findAdminRule(
   // 「국세청 사무처리규정 시행세칙」만 있어도 "실존"이 되어 버린다. 행정규칙에는
   // 법령 쪽의 별칭 사전·tier 검사가 없어 오검증 위험이 더 크므로, 정확 일치를
   // 먼저 찾고 접두 일치는 exact=false로 구분해 돌린다 (Codex 리뷰 중요 3)
-  const target = compactName(name)
+  // 행정규칙 명칭에는 발령 연도·개정 표시가 괄호로 붙는 경우가 있다
+  // (「식품등의 표시기준(2024. 1. 15.)」). 이런 메타데이터까지 다르다고 보면
+  // 정상 인용이 "정확 일치 없음"으로 강등된다 (Codex 2차 중요) — 비교 전에 떼어낸다
+  const normalizeRuleName = (s: string) =>
+    compactName(s.replace(/[([［【][^)\]］】]*[)\]］】]\s*$/, "").trim())
+  const target = normalizeRuleName(name)
   let loose: AdminRuleMatch | null = null
   for (let i = 0; i < limit; i++) {
     const rule = rules[i]
@@ -92,7 +97,7 @@ export async function findAdminRule(
       promDate: rule.getElementsByTagName("발령일자")[0]?.textContent?.trim() || undefined,
       orgName: rule.getElementsByTagName("소관부처명")[0]?.textContent?.trim() || undefined,
       ruleType: rule.getElementsByTagName("행정규칙종류")[0]?.textContent?.trim() || undefined,
-      exact: compactName(ruleName) === target,
+      exact: normalizeRuleName(ruleName) === target,
     }
     if (match.exact) return match
     if (!loose) loose = match
@@ -141,10 +146,13 @@ export async function verifyAdminRuleCitation(
   candidates: string[],
   label: string,
   rawName: string,
-  apiKey?: string
+  apiKey?: string,
+  // verify의 20초 상한을 이 경로에도 전파한다 — 없으면 상한 이후에도 조회가 살아
+  // 쿼터를 소모한다 (Codex 2차 중요: 이 함수만 signal을 받지 않았다)
+  signal?: AbortSignal
 ): Promise<string> {
   try {
-    const hit = await tryVerifyAdminRuleCitation(apiClient, candidates, label, apiKey)
+    const hit = await tryVerifyAdminRuleCitation(apiClient, candidates, label, apiKey, signal)
     if (hit) return hit
 
     // 현행에 없으면 폐지·제명변경 연혁 확인 (환각과 폐지 규칙을 구분)
