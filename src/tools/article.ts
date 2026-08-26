@@ -20,6 +20,7 @@ import { buildJO } from "../lib/law-parser.js"
 import { cleanHtml, flattenContent, groupMokByReset } from "../lib/article-parser.js"
 import { parseThreeTierDelegation } from "../lib/three-tier-parser.js"
 import { isAdminRuleLikeName, findAdminRule } from "./admin-rule-citation.js"
+import { formatAnnexNo } from "./annex.js"
 import { extractTag, toArray } from "../lib/xml-parser.js"
 import {
   type SectionResult,
@@ -463,7 +464,10 @@ export async function handleFinArticle(
     const shown = acc.slice(0, 10)
     let out = `${acc.length}건`
     if (acc.length > shown.length) out += ` (상위 ${shown.length}건 표시 / 전체 ${acc.length}건 — 전체는 fin_annex)`
-    out += "\n" + shown.map((a) => `  · ${a.no ? `[별표 ${a.no}] ` : ""}${a.name}`).join("\n")
+    // 법제처 별표번호는 6자리 코드(000400)다 — 그대로 찍으면 "[별표 000400]"이라는
+    // 원문에 없는 표기가 되고, 실무자가 그대로 인용하면 틀린 인용이 된다.
+    // fin_annex와 같은 포맷터를 쓴다 (000000은 번호 없는 별표라 "[별표]")
+    out += "\n" + shown.map((a) => `  · ${a.no ? `[${formatAnnexNo(a.no)}] ` : ""}${a.name}`).join("\n")
     return { status: "성공" as const, text: out }
   })().catch((e) => failed(e instanceof Error ? e.message : String(e)))
 
@@ -515,6 +519,13 @@ export async function handleFinArticle(
           const ladderNote = qi > 0 ? ` — 검색어 축약: "${rulingQuery}" → "${q}"` : ""
           let out = `${total || items.length}건 중 상위 ${items.length}건 (검색어: "${q}"${ladderNote})\n`
           out += items.map((r) => `  · ${r.docNo} (${r.date}) ${r.title}`).join("\n")
+          // 축약이 일어났으면 검색어가 조문 제목이 아니라 그 일부(일반 명사)다 —
+          // "과다경비 등의 손금불산입" → "손금불산입"이면 지급이자·접대비 손금불산입
+          // 예규가 걸리고, 이것을 "이 조문의 관련 예규"로 읽으면 무관한 해석이 근거가 된다
+          // (실측: 법인세법 §26 요청에 §28·§25 예규 3건). 축약 사실만으로는 약하다
+          if (qi > 0) {
+            out += `\n  ⚠ 검색어가 일반 명사로 축약되어 **이 조문과 무관한 예규가 섞일 수 있습니다** — 제목을 확인하고, 조문과 맞는 것만 근거로 쓰세요`
+          }
           out += `\n  ※ 본문이 필요하면 fin_nts_ruling 사용`
           return { status: "성공" as const, text: out }
         }

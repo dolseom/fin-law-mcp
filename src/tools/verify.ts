@@ -64,6 +64,11 @@ interface Citation {
   uncut?: string
   /** "구 ○○법" 연혁 인용 — 현행 기준으로 판정하면 개정 전 조문에 ✓가 찍힌다 */
   historical?: boolean
+  /**
+   * 따옴표 없는 「…규정」·「…규칙」 — 사내 규정·사규일 수 있어 미발견 시 ✗가 아닌 ⚠.
+   * ("당사 취업규칙 제12조"는 정당한 인용이지 환각이 아니다)
+   */
+  soft?: boolean
 }
 
 const IP = INTERPUNCT_CHARS // 가운뎃점 5종 — 추출 정규식과 정규화가 같은 집합을 봐야 한다
@@ -75,8 +80,11 @@ const SUFFIX_PART = `((?:\\s*시행령|\\s*시행규칙)?)`
 // 직전 법령의 조문으로 검증되고, 틀린 인용이 ✓를 받는다 (Opus B2).
 // 시행규칙 형태("동 시행규칙", "같은 규칙")도 포함 — 시행령만 있으면 시행규칙 인용이
 // 통째로 누락돼 검증 없이 넘어간다 (Codex 리뷰 중요 5)
+// "같은 규정"·"동 규정"이 빠져 있으면 규정·규칙 추출 확장과 만나 최악의 조합이 된다:
+// "외국환거래규정 제23조와 같은 규정 제24조"에서 "와 같은 규정"이 **법령명으로** 캡처되어
+// lawName이 "규정"이 되고, 법제처 LIKE 검색에 무관한 법령이 걸려 ✓가 나갈 수 있다 (실측)
 const ANAPHOR_ARTICLE_RE = new RegExp(
-  `(?<![가-힣])(같은\\s*법|동법|동\\s*시행령|같은\\s*영|동\\s*시행규칙|같은\\s*규칙)${SUFFIX_PART}\\s*(${ARTICLE_PART})`,
+  `(?<![가-힣])(같은\\s*법|동법|동\\s*시행령|같은\\s*영|동\\s*시행규칙|같은\\s*규칙|같은\\s*규정|동\\s*규정)${SUFFIX_PART}\\s*(${ARTICLE_PART})`,
   "g"
 )
 // 명시 법령명 + 제N조(의M)
@@ -104,7 +112,7 @@ const CUT_WORDS = new Set(["따라", "따른", "의한", "의해", "의하여", 
 // 조문 참조 어절("제26조", "제1항")도 문맥 — "「법인세법」 제26조 및 지방세법 제1조"에서
 // 앞 인용의 조문이 다음 법령명("제26조 및 지방세법")에 흡수되는 것 방지
 const CUT_REF_RE = /^제?\d+(?:조|항|호|목)(?:의\d+)?[.,]?$/
-const ANAPHOR_WORDS = new Set(["같은법", "동법", "동시행령", "같은영", "동시행규칙", "같은규칙"])
+const ANAPHOR_WORDS = new Set(["같은법", "동법", "동시행령", "같은영", "동시행규칙", "같은규칙", "같은규정", "동규정"])
 
 /**
  * 미등재 약칭으로 보이는가 — 짧고 법/령/규칙으로 끝나는 형태("조특법", "근퇴법").
@@ -132,6 +140,13 @@ function isRuleLikeName(name: string): boolean {
 function isRuleAntecedentName(name: string): boolean {
   const n = name.replace(/\s+/g, "")
   return /규칙$/.test(n) && !/시행규칙$/.test(n)
+}
+
+/**
+ * "같은 규정"의 선행사가 될 수 있는 이름 — 규정류만 (규칙과 별도 추적).
+ */
+function isRegAntecedentName(name: string): boolean {
+  return /규정$/.test(name.replace(/s+/g, ""))
 }
 
 // 알려진 정식 법령명 — 어절 컷보다 **먼저** 최장 일치를 시도한다.
@@ -204,8 +219,9 @@ interface Hit {
   c: Citation
   antecedent?: string // 이 인용이 조응에 남기는 본법명 (행정규칙은 갱신하지 않음)
   ruleAntecedent?: string // "같은 규칙"이 가리킬 규칙류 선행사 (「…에 관한 규칙」 등)
+  regAntecedent?: string // "같은 규정"이 가리킬 규정류 선행사 (「외국환거래규정」 등)
   anaphorSuffix?: string // 조응 인용 — 단일 패스에서 선행사 + 이 접미사로 해소
-  anaphorKind?: "법" | "영" | "규칙" // 조응이 요구하는 대상 종류
+  anaphorKind?: "법" | "영" | "규칙" | "규정" // 조응이 요구하는 대상 종류
 }
 
 export function extractCitations(text: string): Citation[] {
@@ -266,6 +282,9 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     // 「산업안전보건기준에 관한 규칙」 뒤의 "같은 규칙"이 본법의 시행규칙으로
     // 해소되어 전혀 다른 법령에 ✓가 나간다 (Opus B-0)
     const isRuleAnaphor = /같은\s*규칙/.test(anaphorPart)
+    // "같은 규정"은 직전에 인용된 **규정 그 자체**를 가리킨다. 규칙과 한 종류로 묶으면
+    // 「…규칙」과 「…규정」이 섞인 문장에서 서로의 선행사를 가져간다 (Opus B-0③과 같은 함정)
+    const isRegAnaphor = /같은\s*규정|동\s*규정/.test(anaphorPart)
     const impliedTier = /동\s*시행규칙/.test(anaphorPart)
       ? "시행규칙"
       : /동\s*시행령|같은\s*영/.test(anaphorPart)
@@ -276,7 +295,7 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
       idx: m.index!,
       c: { raw: m[0].trim(), lawName: "", article: normArticle(article), kind: "법령조문" },
       anaphorSuffix: suffixNorm,
-      anaphorKind: isRuleAnaphor ? "규칙" : suffixNorm === "시행령" ? "영" : "법",
+      anaphorKind: isRegAnaphor ? "규정" : isRuleAnaphor ? "규칙" : suffixNorm === "시행령" ? "영" : "법",
     })
     articleEnds.add(end)
   }
@@ -297,7 +316,9 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
         ...(isRuleLikeName(name)
           ? isRuleAntecedentName(name)
             ? { ruleAntecedent: name }
-            : {}
+            : isRegAntecedentName(name)
+              ? { regAntecedent: name }
+              : {}
           : { antecedent: name.replace(/\s*시행(?:령|규칙)$/, "") }),
       })
     }
@@ -316,7 +337,9 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
         ...(isRuleLikeName(name)
           ? isRuleAntecedentName(name)
             ? { ruleAntecedent: name }
-            : {}
+            : isRegAntecedentName(name)
+              ? { regAntecedent: name }
+              : {}
           : { antecedent: name.replace(/\s*시행(?:령|규칙)$/, "") }),
       })
     }
@@ -351,8 +374,18 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     if (!isAdminRuleLikeName(name)) continue
     hits.push({
       idx: m.index!,
-      c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "법령조문" },
-      ...(isRuleAntecedentName(name) ? { ruleAntecedent: name } : {}),
+      // 따옴표 없는 규정·규칙은 사내 문서일 수 있다 — "당사 취업규칙 제12조",
+      // "내부 회계처리 규칙 제3조"는 정당한 인용인데 법령 DB에는 당연히 없다.
+      // 이런 이름에 ✗("환각 의심")를 찍으면 실무자의 정상 문서를 거짓말로 낙인찍는다.
+      // 미발견 시 ⚠로 강등한다 — 조용히 통과시키지도, 없다고 단정하지도 않는다
+      // (SOFT_ADMIN_SUFFIX의 '기준·지침'과 같은 취급). 「」로 감싼 인용은 법령을
+      // 의도한 것이 명확하므로 종전대로 ✗ 판정을 유지한다
+      c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "법령조문", soft: true },
+      ...(isRuleAntecedentName(name)
+        ? { ruleAntecedent: name }
+        : isRegAntecedentName(name)
+          ? { regAntecedent: name }
+          : {}),
     })
     articleEnds.add(end)
   }
@@ -367,6 +400,7 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
   hits.sort((a, b) => a.idx - b.idx)
   let lastLawName = "" // 조응 선행사 — 직전에 명시된 본법명으로 제한 (선행사 오염 사고 방지)
   let lastRuleName = "" // "같은 규칙"의 선행사 — 「…에 관한 규칙」류 (본법과 별도로 추적)
+  let lastRegName = "" // "같은 규정"의 선행사 — 「…규정」류 (규칙과도 별도로 추적)
   const out: Citation[] = []
   const seen = new Set<string>()
   for (const h of hits) {
@@ -375,12 +409,16 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
         // "같은 규칙"은 직전에 인용된 규칙 자체를 가리킨다. 규칙 선행사가 없으면
         // 본법으로 넘겨짚지 않고 ⚠로 보낸다 — 넘겨짚으면 틀린 법령에 ✓가 된다
         if (lastRuleName) h.c.lawName = lastRuleName
+      } else if (h.anaphorKind === "규정") {
+        // "같은 규정"도 마찬가지 — 규정 선행사가 없으면 비워 ⚠ 경로로 보낸다
+        if (lastRegName) h.c.lawName = lastRegName
       } else if (lastLawName) {
         h.c.lawName = h.anaphorSuffix ? `${lastLawName} ${h.anaphorSuffix}` : lastLawName
       } // 선행사 없으면 lawName "" 유지 → ⚠ 판정 경로
     } else {
       if (h.antecedent) lastLawName = h.antecedent
       if (h.ruleAntecedent) lastRuleName = h.ruleAntecedent
+      if (h.regAntecedent) lastRegName = h.regAntecedent
     }
     // dedup 키에 위치를 포함한다 — 서로 다른 법의 인용이 같은 lawName으로 절단됐을 때
     // 한 건이 조용히 증발하던 문제 방지 (Opus B-3②)
@@ -524,6 +562,16 @@ async function verifyLawCitation(
         : histChecked
           ? `법령 「${c.lawName}」 실존하지 않음 — 현행·연혁 모두 0건 (정상 조회)`
           : `법령 「${c.lawName}」 실존하지 않음 (정상 조회 후 0건)`
+    // 따옴표 없는 규정·규칙은 사내 문서일 수 있다 — "당사 취업규칙 제12조"는 정당한
+    // 인용인데 법령 DB에는 없다. ✗로 단정하면 실무자의 정상 문서를 환각으로 낙인찍는다.
+    // hold로 사용 보류는 요구하되 "없음" 단정은 하지 않는다
+    if (c.soft) {
+      return {
+        mark: "⚠",
+        hold: true,
+        line: `⚠ ${c.raw} — ${dbNote}. 사내 규정·사규 등 법령이 아닌 문서일 수 있어 "없음"으로 단정하지 않습니다 — 법령 인용이라면 정식 명칭을 확인하세요 (그 전까지 사용 보류)`,
+      }
+    }
     return { mark: "✗", line: `✗ ${c.raw} — ${dbNote}. 법령명 오기 또는 환각 의심` }
   }
   if (!best) {

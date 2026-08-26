@@ -78,12 +78,24 @@ function collectAnnexes(node: any, acc: AnnexEntry[], lawName: string): void {
   for (const v of Object.values(node)) collectAnnexes(v, acc, lawName)
 }
 
-/** 별표번호 6자리(003600) → "별표 36" 표시 */
-function formatAnnexNo(no: string): string {
+/**
+ * 별표번호 6자리(003600) → "별표 36" 표시.
+ * 000000은 **번호가 없는 별표**다 — 법령에 별표가 하나뿐이면 법제처가 이렇게 준다
+ * (상증세법 시행령 「[별표] 가업상속공제를 적용받는…」 실측: 원문 표기도 번호 없이
+ * "[별표]"다). "별표 0"으로 적으면 원문에 없는 번호를 만들어내는 것이라, 그대로
+ * 인용하면 틀린 표기가 된다
+ */
+export function formatAnnexNo(no: string): string {
   if (!/^\d{4,6}$/.test(no)) return no
   const main = parseInt(no.slice(0, 4), 10)
   const branch = parseInt(no.slice(4, 6) || "0", 10)
+  if (main === 0 && branch === 0) return "별표"
   return branch > 0 ? `별표 ${main}의${branch}` : `별표 ${main}`
+}
+
+/** 번호가 없는 별표인가 (법제처가 000000으로 주는 단일 별표) */
+export function isUnnumberedAnnex(no: string): boolean {
+  return /^0{1,6}$/.test(no.trim())
 }
 
 // ── 별표 선택·추출 (korean-law-mcp get_annexes 검증 경로 이식) ─────────────
@@ -244,6 +256,12 @@ export async function handleFinAnnex(
     if (annex_no && entries.length > 0) {
       return await extractAnnexContent(entries, annex_no, law)
     }
+    // 번호 없는 별표는 annex_no로 지정할 수 없다. keyword로 한 건까지 좁혀졌다면
+    // 지정된 것이나 마찬가지이므로 내용을 준다 — 이게 없으면 "keyword로 지정하세요"라는
+    // 안내를 따라도 목록만 다시 나와서 내용에 도달할 방법이 없다
+    if (!annex_no && keyword && entries.length === 1 && isUnnumberedAnnex(entries[0].no)) {
+      return await extractAnnexContent(entries, entries[0].no, law)
+    }
 
     const kindLabel = { "1": "별표", "2": "서식", "3": "별지", "4": "별도", "5": "부록" }[kind]
     if (entries.length === 0) {
@@ -260,7 +278,10 @@ export async function handleFinAnnex(
     text += "\n"
     text += shown
       .map((a) => {
-        let line = `  · [${formatAnnexNo(a.no)}] ${a.name}`
+        // 소속 법령을 함께 보인다 — 같은 패밀리라도 시행령 별표와 시행규칙 별표는
+        // 다른 문서다. 번호 없는 별표가 여러 건일 때는 이것이 유일한 구분 수단이다
+        const ownerNote = a.owner && compactName(a.owner) !== compactName(law) ? ` — ${a.owner}` : ""
+        let line = `  · [${formatAnnexNo(a.no)}]${ownerNote} ${a.name}`
         if (a.fileLink) {
           const url = a.fileLink.startsWith("http") ? a.fileLink : `https://www.law.go.kr${a.fileLink}`
           line += `\n      다운로드: ${url.replace(/&amp;/g, "&")}`
@@ -268,7 +289,22 @@ export async function handleFinAnnex(
         return line
       })
       .join("\n")
-    text += `\n\n※ 표 내용이 필요하면 annex_no로 재호출하세요 (예: annex_no="${formatAnnexNo(shown[0]?.no || "").replace("별표 ", "") || "6"}") — 표 구조를 마크다운으로 반환\n${SOURCE_FOOTER}`
+    // 번호 없는 별표는 annex_no로 지정할 수 없다 — "0"으로 안내하면 원문에 없는
+    // 번호를 쓰게 되고, 그런 별표가 2건 이상이면 첫 건만 반환되어 나머지는 조용히 가려진다
+    const unnumbered = entries.filter((a) => isUnnumberedAnnex(a.no))
+    if (unnumbered.length > 0 && unnumbered.length === entries.length) {
+      text +=
+        `\n\n※ 이 법령의 ${kindLabel}에는 번호가 없습니다 (원문 표기도 "[${kindLabel}]") — annex_no 대신 ` +
+        `keyword로 지정하세요 (예: keyword="${(shown[0]?.name || "").slice(0, 8)}")\n${SOURCE_FOOTER}`
+    } else {
+      const numbered = shown.find((a) => !isUnnumberedAnnex(a.no))
+      const example = numbered ? formatAnnexNo(numbered.no).replace("별표 ", "") : "6"
+      text += `\n\n※ 표 내용이 필요하면 annex_no로 재호출하세요 (예: annex_no="${example}") — 표 구조를 마크다운으로 반환`
+      if (unnumbered.length > 0) {
+        text += `\n※ 번호 없는 ${kindLabel} ${unnumbered.length}건은 annex_no로 지정할 수 없습니다 — keyword로 지정하세요`
+      }
+      text += `\n${SOURCE_FOOTER}`
+    }
 
     return { content: [{ type: "text", text: truncateWithHint(text, 8000, "키워드로 좁혀 재조회") }] }
   } catch (e) {

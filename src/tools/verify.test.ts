@@ -406,3 +406,48 @@ describe("extractCitations — 따옴표 없는 규정·규칙 조문 (Codex 리
     expect(cites).toHaveLength(1)
   })
 })
+
+/**
+ * 규정·규칙 추출 확장의 **부작용** 회귀 (자체 점검에서 발견).
+ *
+ * 접미사를 넓히면 두 가지가 딸려온다:
+ *  ① "같은 규정"이 조응으로 인식되지 않아 "와 같은 규정"이 법령명으로 캡처되고
+ *     lawName이 "규정"이 되어 LIKE 검색에 무관한 법령이 걸린다 (오검증 위험)
+ *  ② 사내 문서("당사 취업규칙 제12조")가 법령 인용으로 잡혀 ✗ 환각 낙인이 찍힌다
+ */
+describe("extractCitations — 규정·규칙 확장의 부작용 방어", () => {
+  it('"같은 규정"을 조응으로 해소한다 (법령명이 "규정"이 되지 않는다)', () => {
+    const cites = extractCitations("외국환거래규정 제23조와 같은 규정 제24조를 함께 본다.")
+    expect(cites).toHaveLength(2)
+    expect(cites[0].lawName).toBe("외국환거래규정")
+    expect(cites[1].lawName).toBe("외국환거래규정")
+    expect(cites[1].article).toBe("제24조")
+    // 조응이 안 잡히면 lawName이 "규정"이 되어 무관 법령에 ✓가 나갈 수 있다
+    expect(cites.some((c) => c.lawName === "규정")).toBe(false)
+  })
+
+  it('"같은 규정"에 규정 선행사가 없으면 넘겨짚지 않는다', () => {
+    const cites = extractCitations("법인세법 제26조와 같은 규정 제24조를 본다.")
+    const anaphor = cites.find((c) => c.raw.includes("같은 규정"))
+    // 본법을 선행사로 삼으면 엉뚱한 법령에 ✓가 된다 — 비워서 ⚠ 경로로 보낸다
+    expect(anaphor?.lawName).toBe("")
+  })
+
+  it('"같은 규칙"과 "같은 규정"은 서로의 선행사를 가져가지 않는다', () => {
+    const cites = extractCitations(
+      "「산업안전보건기준에 관한 규칙」 제32조와 외국환거래규정 제23조를 보고, 같은 규칙 제33조를 적용한다."
+    )
+    const anaphor = cites.find((c) => c.raw.includes("같은 규칙"))
+    expect(anaphor?.lawName).toBe("산업안전보건기준에 관한 규칙")
+  })
+
+  it("따옴표 없는 규정·규칙은 soft로 표시한다 (사내 문서일 수 있다)", () => {
+    const cites = extractCitations("당사 취업규칙 제12조에 정한 바에 따른다.")
+    expect(cites[0].soft).toBe(true)
+  })
+
+  it("「」로 감싼 인용은 soft가 아니다 (법령을 의도한 표기)", () => {
+    const cites = extractCitations("「외국환거래규정」 제23조에 따른다.")
+    expect(cites[0].soft).toBeFalsy()
+  })
+})
