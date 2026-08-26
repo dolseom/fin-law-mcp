@@ -180,5 +180,19 @@ if (failLines.length > 0) {
   process.exit(FAIL_EXIT)
 }
 
+// "사용 보류"를 요구하는 ⚠는 단순 확인 실패와 다르다 — 미등재 약칭·환각 의심처럼
+// 확인 전까지 쓰면 안 되는 인용이다. 이것을 다른 ⚠와 뭉뚱그리면 마지막 줄의
+// "인용 검증 통과"가 보류 항목까지 통과시킨 것으로 읽힌다 (실측: 환각 규정 인용이
+// soft 강등으로 ⚠가 된 뒤 "통과"로 보고됐다)
+const holdLines = warnLines.filter((l) => /사용\s*보류|사용을 보류/.test(l))
+if (holdLines.length > 0) {
+  console.error(
+    `\n⚠ 사용 보류 ${holdLines.length}건 — 실존이 확인되지 않은 인용입니다. "통과"가 아닙니다:\n` +
+      holdLines.map((l) => `  ${l}`).join("\n") +
+      `\n\n정식 명칭으로 재검증하거나, 법령이 아닌 문서(사내 규정 등)라면 그렇게 표기하세요.`
+  )
+  process.exit(0)
+}
+
 console.log("\n인용 검증 통과 — 실존하지 않는 인용 없음")
 process.exit(0)

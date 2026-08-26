@@ -37,9 +37,9 @@ export const FIN_ANNEX_TOOL = {
     type: "object",
     properties: {
       law: { type: "string", description: "법령명 (내용연수표·세율표는 대개 시행규칙)" },
-      keyword: { type: "string", description: "별표명 필터 키워드" },
+      keyword: { type: "string", description: "별표명 필터 키워드 (예: 내용연수). 번호 없는 별표는 이것으로 지정하며, 한 건으로 좁혀지면 표 내용을 반환" },
       kind: { type: "string", enum: ["1", "2", "3", "4", "5"], description: "1=별표(기본) 2=서식 3=별지 4=별도 5=부록" },
-      annex_no: { type: "string", description: "별표 선택 (예: '6', '별표6', '1의2') — 지정 시 표 내용을 추출해 반환 (병합 셀은 HTML table)" },
+      annex_no: { type: "string", description: "별표 선택 (예: '6', '별표6', '1의2') — 지정 시 표 내용을 추출해 반환 (병합 셀은 HTML table). 번호가 없는 별표(목록에 '[별표]'로 표시)는 annex_no 대신 keyword로 지정" },
     },
     required: ["law"],
   },
