@@ -19,6 +19,7 @@ import { resolveVersionAt } from "../lib/historical-utils.js"
 import { buildJO } from "../lib/law-parser.js"
 import { cleanHtml, flattenContent, groupMokByReset } from "../lib/article-parser.js"
 import { parseThreeTierDelegation } from "../lib/three-tier-parser.js"
+import { isAdminRuleLikeName, findAdminRule } from "./admin-rule-citation.js"
 import { extractTag, toArray } from "../lib/xml-parser.js"
 import {
   type SectionResult,
@@ -176,6 +177,33 @@ function findAnnexItems(node: any, acc: AnnexItem[], lawName: string): void {
   for (const v of Object.values(node)) findAnnexItems(v, acc, lawName)
 }
 
+/**
+ * 「외국환거래규정」(기재부 고시)처럼 법령 DB에 없는 행정규칙을 조문까지 붙여 물어오면
+ * "✗없음"은 틀린 단정이 된다 — 옆 도구(fin_law_search·fin_verify)는 실존을 확인해 주는데
+ * 조문 요청만 없음으로 답하던 모순(잔여①). 실존이면 조회 미지원임을 밝히고 경로를 준다.
+ * 확인 실패·미발견은 null을 돌려 기존 판정 경로를 그대로 태운다.
+ */
+async function adminRuleNotice(
+  apiClient: LawApiClient,
+  name: string,
+  articleLabel: string
+): Promise<string | null> {
+  if (!isAdminRuleLikeName(name)) return null
+  try {
+    const rule = await findAdminRule(apiClient, name)
+    if (!rule) return null
+    const meta = [rule.ruleType, rule.orgName, rule.promDate ? `발령 ${rule.promDate}` : ""].filter(Boolean).join(" · ")
+    return (
+      `[ADMIN_RULE] "${name}" — 법령(법률·시행령·부령) DB에는 없지만 **행정규칙 「${rule.name}」**${meta ? ` (${meta})` : ""}로 실존합니다.\n` +
+      `⚠ 행정규칙은 법제처 API가 조문 단위 조회를 지원하지 않아 ${articleLabel} 본문을 제공할 수 없습니다 — **"없는 조문"이 아니라 조회 미지원**입니다.\n` +
+      `💡 명칭 실존 검증은 fin_verify, 원문은 국가법령정보센터(law.go.kr) → 행정규칙에서 확인하세요.\n` +
+      `⚠️ LLM은 조문 내용을 추측하지 마세요.`
+    )
+  } catch {
+    return null
+  }
+}
+
 // ── 메인 핸들러 ─────────────────────────────────────────────────────────
 export async function handleFinArticle(
   apiClient: LawApiClient,
@@ -203,6 +231,8 @@ export async function handleFinArticle(
   try {
     const laws = await findLaws(apiClient, input.law, undefined, 5)
     if (laws.length === 0) {
+      const notice = await adminRuleNotice(apiClient, input.law, articleLabel)
+      if (notice) return { content: [{ type: "text", text: notice }] }
       return {
         content: [
           {
@@ -216,6 +246,10 @@ export async function handleFinArticle(
     // 정확 매칭 우선(부분매칭 함정 방어: "지방세법"→지방교부세법)
     const exact = laws.find((l) => resolvedLawMatches(input.law, l.lawName))
     if (!exact) {
+      // LIKE 검색이 이름만 비슷한 법령을 물어와도 실제 대상이 행정규칙일 수 있다
+      // (0건일 때만 확인하면 노이즈 1건에 폴백이 꺼진다 — 잔여②와 같은 함정)
+      const notice = await adminRuleNotice(apiClient, input.law, articleLabel)
+      if (notice) return { content: [{ type: "text", text: notice }] }
       // 정확 일치가 없으면 조문 본문을 주지 않는다 — 경고를 붙여도 LLM이 본문을
       // 그대로 인용하면 무관한 법령의 조문이 검토서에 실린다
       // ("국조법" → 「국정감사 및 조사에 관한 법률」 실측, Opus I-d)
@@ -322,9 +356,11 @@ export async function handleFinArticle(
     // 시행규칙 제외는 조용한 누락이었다 — 내용연수·상각률·이자율이 다 시행규칙에 있다
     // (실사용 시뮬레이션 ③: 법인세법 §26의 시행규칙 §22가 제목만 나오던 실측)
     const bodyMap = new Map<string, string>()
-    const needBody = dels
-      .filter((d) => (d.type === "시행령" || d.type === "시행규칙") && !(d.content || "").trim() && d.joNum)
-      .slice(0, 3)
+    const BODY_LIMIT = 3
+    const bodyEligible = dels.filter(
+      (d) => (d.type === "시행령" || d.type === "시행규칙") && !(d.content || "").trim() && d.joNum
+    )
+    const needBody = bodyEligible.slice(0, BODY_LIMIT)
     if (needBody.length > 0) {
       // 본문 동봉은 3초 예산 안에서만 — 예산이 끝나면 자식 호출까지 실제로 끊는다.
       // race만 걸고 두면 진행 중 fetch가 바깥 6초 deadline까지 살아 쿼터를 소모한다
@@ -393,6 +429,17 @@ export async function handleFinArticle(
       const body = (d.content || "").trim() || (d.joNum ? bodyMap.get(`${d.type}|${d.joNum}`) : "")
       if (body) out += `${cleanHtml(body).trim()}\n`
       out += `\n`
+    }
+    // 어떤 위임은 본문이 붙고 어떤 건 제목만 나오는 이유를 밝힌다 — 고지가 없으면
+    // "본문이 없는 조문"으로 읽힌다 (잔여③)
+    const missingBody = bodyEligible.filter((d) => !bodyMap.has(`${d.type}|${d.joNum}`)).length
+    if (missingBody > 0) {
+      const overflow = bodyEligible.length - needBody.length
+      const cause =
+        overflow > 0
+          ? `상위 ${BODY_LIMIT}건까지만 동봉(응답 시간 예산)`
+          : `조회 실패·시간 초과`
+      out += `\n※ 위임 조문 본문 ${missingBody}건은 제목만 표시했습니다 — ${cause}. 본문이 필요하면 fin_article로 해당 조문을 직접 조회하세요`
     }
     return { status: "성공" as const, text: out.trim() }
   })().catch((e) => failed(e instanceof Error ? e.message : String(e)))

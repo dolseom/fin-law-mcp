@@ -1,7 +1,7 @@
 // 자체 패치 #4 테스트 — verify_citations 행정규칙 인용 검증
 import { describe, expect, it } from "vitest"
 import type { LawApiClient } from "../lib/api-client.js"
-import { isAdminRuleName, tryVerifyAdminRuleCitation, verifyAdminRuleCitation } from "./admin-rule-citation.js"
+import { isAdminRuleName, isAdminRuleLikeName, tryVerifyAdminRuleCitation, verifyAdminRuleCitation } from "./admin-rule-citation.js"
 // fin-law-mcp: upstream verify-citations 대신 자체 verify.ts의 추출기로 연결
 // (상한 15은 추출기 내부 고정)
 import { extractCitations as parseCitations } from "./verify.js"
@@ -144,5 +144,33 @@ describe("장애 응답 판별 (Codex 차단 3 회귀 방지)", () => {
     expect(result.startsWith("⚠")).toBe(true)
     expect(result).toContain("예상 밖 응답")
     expect(result).toContain("error")
+  })
+})
+
+describe("isAdminRuleLikeName — 행정규칙 병행 조회 대상 판정", () => {
+  it("「…규정」·「…규칙」은 대상 (법령 DB에 없어도 고시·훈령으로 실존할 수 있다)", () => {
+    expect(isAdminRuleLikeName("외국환거래규정")).toBe(true)
+    expect(isAdminRuleLikeName("조사사무처리규정")).toBe(true)
+    expect(isAdminRuleLikeName("산업안전보건기준에 관한 규칙")).toBe(true)
+  })
+
+  it("「…시행규칙」은 부령 = 법령 DB 대상이므로 제외한다", () => {
+    expect(isAdminRuleLikeName("법인세법 시행규칙")).toBe(false)
+    expect(isAdminRuleLikeName("소득세법시행규칙")).toBe(false)
+  })
+
+  it("고시·훈령·예규·통칙 접미사도 포함한다 (isAdminRuleName 상위집합)", () => {
+    expect(isAdminRuleLikeName("소득세법 기본통칙")).toBe(true)
+    expect(isAdminRuleLikeName("전자신고 고시")).toBe(true)
+  })
+
+  it("일반 법령명은 대상이 아니다 (불필요한 행정규칙 조회 방지)", () => {
+    expect(isAdminRuleLikeName("법인세법")).toBe(false)
+    expect(isAdminRuleLikeName("상속세 및 증여세법")).toBe(false)
+    expect(isAdminRuleLikeName("법인세법 시행령")).toBe(false)
+  })
+
+  it("가운뎃점·공백이 섞여도 접미사를 인식한다", () => {
+    expect(isAdminRuleLikeName("외국환 거래 규정")).toBe(true)
   })
 })

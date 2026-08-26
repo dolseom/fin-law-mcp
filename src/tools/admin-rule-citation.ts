@@ -12,6 +12,7 @@ import { DOMParser } from "@xmldom/xmldom"
 import type { LawApiClient } from "../lib/api-client.js"
 import { looseMatchLawName } from "../lib/law-search.js"
 import { detectAbolishedAdminRule } from "../lib/abolished-laws.js"
+import { compactName } from "../lib/fin-common.js"
 
 // 확실한 행정규칙 접미사 — 미발견 시 ✗(환각 의심)로 보고
 const STRICT_ADMIN_SUFFIX = /(고시|훈령|예규|통칙)$/
@@ -21,6 +22,18 @@ const SOFT_ADMIN_SUFFIX = /(기준|지침)$/
 export function isAdminRuleName(name: string): boolean {
   const trimmed = name.trim()
   return STRICT_ADMIN_SUFFIX.test(trimmed) || SOFT_ADMIN_SUFFIX.test(trimmed)
+}
+
+/**
+ * 법령 DB(법률·시행령·부령)에 없어도 행정규칙으로 실존할 수 있는 이름인지.
+ * isAdminRuleName(고시·훈령·예규·통칙·기준·지침)보다 넓게 「…규정」·「…규칙」을 포함한다
+ * — 「외국환거래규정」(기재부 고시)·「조사사무처리규정」(국세청 훈령)이 이 형태다.
+ * 「…시행규칙」은 부령이라 법령 DB 대상이므로 제외한다.
+ */
+export function isAdminRuleLikeName(name: string): boolean {
+  const compact = compactName(name)
+  if (/시행규칙$/.test(compact)) return false
+  return /(규칙|규정)$/.test(compact) || isAdminRuleName(name)
 }
 
 export interface AdminRuleMatch {

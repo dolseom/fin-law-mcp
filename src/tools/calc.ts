@@ -509,8 +509,11 @@ export async function handleFinCalc(
         if (key === "calc_type") {
           return `calc_type은 ${CALC_TYPES.map((t) => `"${t}"`).join(" · ")} 중 하나여야 합니다`
         }
+        // 라벨은 대부분 "…(원)"처럼 괄호로 끝나 "가"가 맞지만, 인자를 특정하지 못해
+        // 폴백한 "입력"은 받침이 있어 "이"를 써야 한다 ("입력가 필요합니다" 방지)
+        const josa = label === "입력" ? "이" : "가"
         return i.code === "invalid_type" && /undefined/.test(i.message)
-          ? `${label}가 필요합니다`
+          ? `${label}${josa} 필요합니다`
           : `${label}: ${i.message}`
       })
       .join("; ")

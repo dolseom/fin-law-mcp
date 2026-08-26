@@ -10,10 +10,10 @@
 
 import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
-import { stripNonLawKeywords } from "../lib/law-search.js"
+import { stripNonLawKeywords, resolvedLawMatches } from "../lib/law-search.js"
 import { formatFetchFailure } from "../lib/errors.js"
 import { extractTag } from "../lib/xml-parser.js"
-import { isAdminRuleName, findAdminRule } from "./admin-rule-citation.js"
+import { isAdminRuleName, isAdminRuleLikeName, findAdminRule, type AdminRuleMatch } from "./admin-rule-citation.js"
 import {
   FIN_MINISTRY_CODES,
   FIN_LAW_NAMES,
@@ -166,33 +166,54 @@ export async function handleFinLawSearch(
       }
     }
 
-    if (items.length === 0) {
-      // 「외국환거래규정」(기재부 고시)처럼 법령 DB에 없어도 행정규칙으로 실존하는
-      // 이름을 "✗없음"으로 단정하면 틀린 단정이 된다 — 같은 서버의 fin_verify는 ✓를
-      // 주는데 law_search가 ✗를 주던 모순 (실사용 시뮬레이션 A8). 행정규칙 DB를 확인한다
-      const ruleLike = /(규칙|규정)$/.test(compactName(stripped)) && !/시행규칙$/.test(compactName(stripped))
-      let adminNote = ""
-      if (ruleLike || isAdminRuleName(stripped)) {
+    // 「외국환거래규정」(기재부 고시)처럼 법령 DB에 없어도 행정규칙으로 실존하는
+    // 이름을 "✗없음"으로 단정하면 틀린 단정이 된다 — 같은 서버의 fin_verify는 ✓를
+    // 주는데 law_search가 ✗를 주던 모순 (실사용 시뮬레이션 A8).
+    // 0건일 때만 확인하면 안 된다: 법제처는 LIKE 검색이라 무관한 1건만 걸려도
+    // 폴백이 통째로 꺼진다 — 「조사사무처리규정」(국세청 훈령)이 「…가족관계등록
+    // 사무처리규칙」 1건에 가려 사라지던 실측(잔여②). 정확히 일치하는 법령이
+    // 없으면 건수와 무관하게 행정규칙 DB를 병행 조회한다.
+    // 조회 후보에 원본 질의도 넣는다: stripNonLawKeywords는 법령명 검색용 정제라
+    // "조사사무처리규정"을 "조사사무 규정"으로 쪼개고, 그 형태로는 행정규칙 DB가
+    // 원본 명칭을 못 찾는다 (실측). 행정규칙 명칭은 정제 전 이름이 정답에 가깝다
+    const adminCandidates = [...new Set([query.trim(), stripped].filter(Boolean))]
+    // 일치 판정에 stripped만 쓰면 안 된다: 정제가 「산업안전보건기준에 관한 규칙」의
+    // '기준'을 지워 정식 부령이 "불일치"가 되고, 행정규칙 DB에 비슷한 이름이 있으면
+    // 정상 법령에 [행정규칙] 배너가 붙는다 (테스트로 적발). 원본 질의도 함께 대조한다
+    const exactLawFound = items.some((i) => adminCandidates.some((cand) => resolvedLawMatches(cand, i.법령명)))
+    let adminRule: AdminRuleMatch | null = null
+    let adminNote = ""
+    if (!exactLawFound && adminCandidates.some((c) => isAdminRuleLikeName(c) || isAdminRuleName(c))) {
+      for (const cand of adminCandidates) {
         try {
-          const rule = await findAdminRule(apiClient, stripped)
-          if (rule) {
-            const meta = [rule.ruleType, rule.orgName, rule.promDate ? `발령 ${rule.promDate}` : ""].filter(Boolean).join(" · ")
-            return {
-              content: [
-                {
-                  type: "text",
-                  text:
-                    `[행정규칙] "${stripped}" — 법령(법률·시행령·부령) DB에는 없지만 **행정규칙 「${rule.name}」**${meta ? ` (${meta})` : ""}로 실존합니다.\n` +
-                    `※ 행정규칙은 조문 단위 조회 미지원 — 인용 검증은 fin_verify, 원문은 국가법령정보센터(law.go.kr)에서 행정규칙으로 검색하세요.` +
-                    (basis_date ? `\n※ 기준일 검색은 법령만 지원 — 위 행정규칙 실존은 현행 기준입니다` : "") +
-                    `\n\n${SOURCE_FOOTER}`,
-                },
-              ],
-            }
+          adminRule = await findAdminRule(apiClient, cand)
+          if (adminRule) {
+            adminNote = ""
+            break
           }
           adminNote = " · 행정규칙 DB에도 0건"
         } catch {
           adminNote = " · 행정규칙 DB는 확인 실패(없음 단정 아님)"
+        }
+      }
+    }
+    const adminRuleBlock = adminRule
+      ? `[행정규칙] "${query.trim()}" — 법령(법률·시행령·부령) DB에는 없지만 **행정규칙 「${adminRule.name}」**` +
+        (() => {
+          const meta = [adminRule!.ruleType, adminRule!.orgName, adminRule!.promDate ? `발령 ${adminRule!.promDate}` : ""]
+            .filter(Boolean)
+            .join(" · ")
+          return meta ? ` (${meta})` : ""
+        })() +
+        `로 실존합니다.\n` +
+        `※ 행정규칙은 조문 단위 조회 미지원 — 인용 검증은 fin_verify, 원문은 국가법령정보센터(law.go.kr)에서 행정규칙으로 검색하세요.` +
+        (basis_date ? `\n※ 기준일 검색은 법령만 지원 — 위 행정규칙 실존은 현행 기준입니다` : "")
+      : ""
+
+    if (items.length === 0) {
+      if (adminRule) {
+        return {
+          content: [{ type: "text", text: `${adminRuleBlock}\n\n${SOURCE_FOOTER}` }],
         }
       }
       // 0건이어도 주제어 힌트는 준다 (주제어→법령 매핑 부재가 기존 병목)
@@ -212,13 +233,23 @@ export async function handleFinLawSearch(
     const top = items.slice(0, 10)
     const demoted = items.length - top.length
 
-    let text = basis_date
+    // 행정규칙으로 실존하는데 법령 DB가 이름만 비슷한 다른 법령을 물어온 경우 —
+    // 사용자가 찾던 것은 행정규칙 쪽이므로 먼저 알리고, 법령 결과는 아래에 남긴다
+    let text = adminRuleBlock
+      ? `${adminRuleBlock}\n※ 아래 법령 검색 결과는 이름이 비슷한 **다른 법령**입니다 — 찾던 것이 위 행정규칙이면 아래 목록을 근거로 쓰지 마세요.\n\n`
+      : ""
+    text += basis_date
       ? `[기준일: ${basis_date} 시행 기준] 법령 검색 — 해당 시점 시행본 ${items.length}건 중 재무 관련도순 상위 ${top.length}건`
       : `[기준: 현행] 법령 검색 — 전체 ${totalCnt}건 중 재무 관련도순 상위 ${top.length}건`
     if (usedQuery !== stripped) text += ` — 검색어 축약: "${stripped}" → "${usedQuery}"`
     text += strippedNote + "\n"
     text += top.map((t) => formatLawLine(t, !!basisYmd)).join("\n")
     if (demoted > 0) text += `\n  (관련도 하위 ${demoted}건 생략 — 필요 시 더 구체적인 법령명으로 재검색)`
+    // 행정규칙 조회를 시도했다가 실패한 사실은 감추지 않는다 — 아래 목록만 보면
+    // "행정규칙은 없다"로 읽히지만 실제로는 확인이 안 된 것이다
+    if (!adminRuleBlock && adminNote.includes("확인 실패")) {
+      text += `\n※ "${query.trim()}"은 행정규칙(고시·훈령)일 수 있으나 행정규칙 DB 확인에 실패했습니다 — 위 목록에 없다고 "없음"으로 단정하지 마세요`
+    }
 
     // 주제어 힌트 (상위 결과에 힌트 법령이 이미 있으면 생략)
     const hints = TOPIC_LAW_HINTS.filter((h) => h.pattern.test(query))

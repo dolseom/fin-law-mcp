@@ -1,0 +1,97 @@
+/**
+ * fin_article 회귀 — 행정규칙 이름에 조문을 붙여 물었을 때 (잔여①)
+ *
+ * 「외국환거래규정」(기재부 고시) 제9-5조처럼 법령 DB에 없는 행정규칙을 조문까지
+ * 붙여 물으면 "정상 조회 후 0건 — ✗없음"으로 답하고 있었다. 같은 서버의
+ * fin_law_search·fin_verify는 실존을 확인해 주는데 조문 요청만 없음으로 단정하던
+ * 모순이다 — 실존하는 고시를 환각으로 낙인찍는 방향의 오답이라 위험도가 높다.
+ */
+import { describe, it, expect } from "vitest"
+import { handleFinArticle } from "./article.js"
+import type { LawApiClient } from "../lib/api-client.js"
+
+const EMPTY_LAW_XML = '<?xml version="1.0"?><LawSearch><totalCnt>0</totalCnt></LawSearch>'
+
+const NOISE_LAW_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<LawSearch><totalCnt>1</totalCnt>
+  <law id="1"><법령명한글>외국환거래법 시행령</법령명한글><법령일련번호>999999</법령일련번호><법령ID>3</법령ID>
+    <법령구분명>대통령령</법령구분명><소관부처명>기획재정부</소관부처명><소관부처코드>1051000</소관부처코드>
+    <시행일자>20260101</시행일자><제개정구분명>일부개정</제개정구분명><현행연혁코드>현행</현행연혁코드></law>
+</LawSearch>`
+
+const ADMRUL_HIT_XML =
+  '<?xml version="1.0"?><AdmRulSearch><totalCnt>1</totalCnt><admrul>' +
+  "<행정규칙명>외국환거래규정</행정규칙명><행정규칙종류>고시</행정규칙종류>" +
+  "<소관부처명>기획재정부</소관부처명><발령일자>20260702</발령일자></admrul></AdmRulSearch>"
+
+const ADMRUL_EMPTY_XML = '<?xml version="1.0"?><AdmRulSearch><totalCnt>0</totalCnt></AdmRulSearch>'
+
+function stub(lawXml: string, admrulXml: string): LawApiClient {
+  return {
+    searchLaw: async () => lawXml,
+    fetchApi: async () => lawXml,
+    searchAdminRule: async () => admrulXml,
+    getThreeTier: async () => "{}",
+    getAnnexes: async () => "{}",
+  } as unknown as LawApiClient
+}
+
+describe("fin_article — 행정규칙 조문 요청 (잔여①)", () => {
+  it("법령 DB 0건이어도 행정규칙으로 실존하면 ✗없음으로 단정하지 않는다", async () => {
+    const r = await handleFinArticle(stub(EMPTY_LAW_XML, ADMRUL_HIT_XML), {
+      law: "외국환거래규정",
+      article: "제9-5조",
+    })
+    const text = r.content[0].text
+    expect(text).toContain("[ADMIN_RULE]")
+    expect(text).toContain("외국환거래규정")
+    expect(text).toContain("고시")
+    expect(text).not.toContain("[LAW_NOT_FOUND]")
+    // "없는 조문"과 "조회 미지원"을 명확히 구분해야 한다
+    expect(text).toContain("조회 미지원")
+  })
+
+  it("조문 본문은 주지 않고 추측 금지를 명시한다 (행정규칙은 조문 단위 API가 없다)", async () => {
+    const r = await handleFinArticle(stub(EMPTY_LAW_XML, ADMRUL_HIT_XML), {
+      law: "외국환거래규정",
+      article: "제9-5조",
+    })
+    expect(r.content[0].text).toContain("추측하지 마세요")
+    expect(r.content[0].text).toContain("제9-5조")
+  })
+
+  it("이름만 비슷한 법령이 1건 걸려도 행정규칙 실존을 확인한다 (0건 전용 폴백 금지)", async () => {
+    const r = await handleFinArticle(stub(NOISE_LAW_XML, ADMRUL_HIT_XML), {
+      law: "외국환거래규정",
+      article: "제9-5조",
+    })
+    const text = r.content[0].text
+    expect(text).toContain("[ADMIN_RULE]")
+    // 무관한 법령의 조문을 본문으로 내주지 않는다
+    expect(text).not.toContain("외국환거래법 시행령 제9-5조")
+  })
+
+  it("행정규칙에도 없으면 기존 ✗없음 판정을 유지한다 (환각 낙인은 그대로)", async () => {
+    const r = await handleFinArticle(stub(EMPTY_LAW_XML, ADMRUL_EMPTY_XML), {
+      law: "탄소세규정",
+      article: "제5조",
+    })
+    expect(r.isError).toBe(true)
+    expect(r.content[0].text).toContain("[LAW_NOT_FOUND]")
+  })
+
+  it("행정규칙 형태가 아닌 이름은 행정규칙 DB를 조회하지 않는다", async () => {
+    let called = false
+    const client = {
+      searchLaw: async () => EMPTY_LAW_XML,
+      fetchApi: async () => EMPTY_LAW_XML,
+      searchAdminRule: async () => {
+        called = true
+        return ADMRUL_HIT_XML
+      },
+    } as unknown as LawApiClient
+    const r = await handleFinArticle(client, { law: "탄소세법", article: "제5조" })
+    expect(called).toBe(false)
+    expect(r.content[0].text).toContain("[LAW_NOT_FOUND]")
+  })
+})
