@@ -18,6 +18,11 @@ describe("classifyErrorCode", () => {
     expect(classifyErrorCode("The operation was aborted")).toBe(ErrorCodes.TIMEOUT)
   })
 
+  it("도구 deadline 취소를 TIMEOUT으로 분류한다 (한글 메시지 — 장애로 오분류 방지)", () => {
+    expect(classifyErrorCode("요청 취소됨(도구 deadline) — 대기 중 취소되어 호출하지 않음")).toBe(ErrorCodes.TIMEOUT)
+    expect(classifyErrorCode("요청 취소됨(도구 deadline) - https://www.law.go.kr/DRF/lawSearch.do")).toBe(ErrorCodes.TIMEOUT)
+  })
+
   it("파싱 실패를 PARSE_ERROR로 분류한다", () => {
     expect(classifyErrorCode("Unexpected token < in JSON at position 0")).toBe(ErrorCodes.PARSE_ERROR)
     expect(classifyErrorCode("XML 루트가 LawSearch가 아님")).toBe(ErrorCodes.PARSE_ERROR)

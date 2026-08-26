@@ -1,0 +1,39 @@
+name: CI
+
+# npm test는 fixture 기반이라 법제처 API 키가 없어도 돈다.
+# 라이브 골든셋(test:live)은 실 API를 호출하므로 CI에서 돌리지 않는다 —
+# 외부 장애가 곧 빌드 실패가 되면 신호가 아니라 잡음이 된다.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["20.19", "22.x", "24.x"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      # OCR 스택(transformers·onnxruntime·sharp)은 kordoc의 optionalDependencies이고
+      # fin_annex는 OCR을 쓰지 않는다 — CI에서는 받지 않아 설치 시간과 취약점 표면을 줄인다
+      - run: npm ci --omit=optional
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      - run: npm run build
+
+      # 클린 체크아웃에서 실제로 배포 가능한 패키지가 나오는지 확인한다
+      # (build/가 gitignore라 prepack 훅이 없으면 빈 패키지가 나온 이력이 있다)
+      - run: npm pack --dry-run

@@ -106,7 +106,10 @@ export function notFoundResponse(message: string, suggestions?: string[]): ToolR
  */
 export function classifyErrorCode(msg: string): ErrorCode {
   if (/RATE_LIMITED|429|한도 초과/i.test(msg)) return ErrorCodes.RATE_LIMITED
-  if (/timeout|timed?\s*out|시간 초과|abort/i.test(msg)) return ErrorCodes.TIMEOUT
+  // "요청 취소됨(도구 deadline)"은 시간 예산 초과의 결과다 — 영어 abort만 잡으면
+  // 이 한글 메시지가 EXTERNAL_API_ERROR(장애)로 분류되어, 호출측이 "재시도하면
+  // 되는 지연"을 "법제처 장애"로 읽는다
+  if (/timeout|timed?\s*out|시간 초과|취소됨|abort/i.test(msg)) return ErrorCodes.TIMEOUT
   if (/JSON|XML|파싱|parse/i.test(msg)) return ErrorCodes.PARSE_ERROR
   return ErrorCodes.API_ERROR
 }
