@@ -184,17 +184,19 @@ export async function handleFinLawSearch(
     let adminRule: AdminRuleMatch | null = null
     let adminNote = ""
     if (!exactLawFound && adminCandidates.some((c) => isAdminRuleLikeName(c) || isAdminRuleName(c))) {
+      // 앞 후보의 **실패**가 뒤 후보의 정상 0건에 덮이면 안 된다 — 확인하지 못한 것이
+      // "없음"으로 읽힌다 (Codex 리뷰 중요 2). 실패가 한 번이라도 있으면 그쪽을 남긴다
+      let anyFailed = false
       for (const cand of adminCandidates) {
         try {
           adminRule = await findAdminRule(apiClient, cand)
-          if (adminRule) {
-            adminNote = ""
-            break
-          }
-          adminNote = " · 행정규칙 DB에도 0건"
+          if (adminRule) break
         } catch {
-          adminNote = " · 행정규칙 DB는 확인 실패(없음 단정 아님)"
+          anyFailed = true
         }
+      }
+      if (!adminRule) {
+        adminNote = anyFailed ? " · 행정규칙 DB는 확인 실패(없음 단정 아님)" : " · 행정규칙 DB에도 0건"
       }
     }
     const adminRuleBlock = adminRule

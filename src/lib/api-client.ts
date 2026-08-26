@@ -280,6 +280,10 @@ export class LawApiClient {
     apiKey?: string
     nw?: string // 1=현행(기본), 2=연혁 — 폐지·개정 전 이력 포함
     display?: string // 결과 수 (기본 20) — 자체 패치 #4: 인용 검증은 100 필요 (가나다순 밀림 대비)
+    // 도구 deadline 전파 — 이것이 없으면 verify의 20초 상한 이후에도 행정규칙 호출이
+    // 살아남아 쿼터를 소모한다. 다른 조회 경로에는 모두 있는데 여기만 빠져 있었다
+    // (Codex 리뷰 중요 5)
+    signal?: AbortSignal
   }): Promise<string> {
     const apiParams = new URLSearchParams({
       OC: this.getApiKey(params.apiKey),
@@ -293,7 +297,7 @@ export class LawApiClient {
     if (params.display) apiParams.append("display", params.display)
 
     const url = `${LAW_API_BASE}/lawSearch.do?${apiParams.toString()}`
-    const response = await this.drfFetch(url)
+    const response = await this.drfFetch(url, params.signal ? { ...DRF_RETRY, signal: params.signal } : DRF_RETRY)
     await this.throwIfError(response, "searchAdminRule")
 
     return await response.text()

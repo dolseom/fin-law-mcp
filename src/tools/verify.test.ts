@@ -360,3 +360,49 @@ describe("현행 0건 → 폐지·연혁 확인 (Opus 재검증 개선 — findR
     expect(text).toContain("현행·연혁 모두 0건")
   })
 })
+
+/**
+ * Codex 공개 전 리뷰 중요 6 회귀 — 따옴표 없는 「…규정」·「…규칙」 + 조문 인용.
+ *
+ * 행정규칙 조문 추출 정규식이 고시·훈령·예규·통칙·기준·지침만 받아,
+ * "외국환거래규정 제23조"는 추출조차 되지 않았다. 판정이 ✗도 ⚠도 아니라
+ * **"추출된 인용 0건"** 이었다 — 환각 인용("탄소배출권거래규정 제77조")이
+ * 검증 없이 통과하는 조용한 누락이다 (verify-file 훅의 마지막 관문이 열려 있었다).
+ */
+describe("extractCitations — 따옴표 없는 규정·규칙 조문 (Codex 리뷰 중요 6)", () => {
+  it("「」 없는 「…규정」 + 조문을 인용으로 잡는다", () => {
+    const cites = extractCitations("외국환거래규정 제23조에 따라 신고한다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).toBe("외국환거래규정")
+    expect(cites[0].article).toBe("제23조")
+  })
+
+  it("환각 규정 인용도 0건으로 통과시키지 않는다", () => {
+    const cites = extractCitations("탄소배출권거래규정 제77조에 따라 신고한다.")
+    expect(cites.length).toBeGreaterThan(0)
+    expect(cites[0].article).toBe("제77조")
+  })
+
+  it("「…규정」·「…규칙」은 법령조문 경로로 보낸다 (법령 DB → 행정규칙 폴백이 배선돼 있다)", () => {
+    const cites = extractCitations("조사사무처리규정 제23조에 따라 처리한다.")
+    expect(cites[0].kind).toBe("법령조문")
+  })
+
+  it("시행규칙 조문은 기존 법령 경로가 처리한다 (행정규칙으로 강등 금지)", () => {
+    const cites = extractCitations("법인세법 시행규칙 제15조에서 정한 바에 따른다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].kind).toBe("법령조문")
+    expect(cites[0].lawName).toContain("법인세법")
+    expect(cites[0].article).toBe("제15조")
+  })
+
+  it("고시·훈령류는 종전대로 행정규칙 경로다", () => {
+    const cites = extractCitations("식품등의 표시기준 제3조에 따른다.")
+    expect(cites[0].kind).toBe("행정규칙")
+  })
+
+  it("같은 조문을 두 경로가 중복 추출하지 않는다", () => {
+    const cites = extractCitations("「외국환거래규정」 제23조에 따라 신고한다.")
+    expect(cites).toHaveLength(1)
+  })
+})

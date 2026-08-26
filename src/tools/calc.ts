@@ -156,7 +156,11 @@ export const FinCalcInputSchema = z.discriminatedUnion("calc_type", [
     balance_days: z.number().min(0, "balance_days(적수)는 0 이상이어야 합니다").optional().describe("가지급금 적수 (원×일) — principal·days 대신 직접 입력"),
     principal: z.number().min(0, "principal(가지급금 잔액)은 0 이상이어야 합니다").optional().describe("가지급금 잔액 (원) — days와 함께 쓰면 적수를 계산한다"),
     days: z.number().int("days(대여 일수)는 정수여야 합니다").min(0, "days(대여 일수)는 0 이상이어야 합니다").optional().describe("대여 일수 (일) — 발생 초일 산입, 회수일 제외"),
-    rate_type: z.enum(["당좌대출이자율", "가중평균차입이자율"]).default("당좌대출이자율").describe("적용 이자율 종류"),
+    // 기본값을 두면 안 된다: 법인세법 시행령 §89③ 본문은 **가중평균차입이자율이 시가**이고
+    // 당좌대출이자율은 단서 3호(적용 불가 사유·5년 초과 대여·신고 선택)의 예외다.
+    // 예외를 기본값으로 두면 사용자가 생략했을 때 법정 원칙과 반대인 4.6%로 확정 금액이
+    // 나가고, weighted_average_rate를 줘도 무시된다 (Codex 리뷰 차단 1)
+    rate_type: z.enum(["당좌대출이자율", "가중평균차입이자율"]).optional().describe("적용 이자율 종류 (필수) — 원칙은 가중평균차입이자율(시행령 §89③ 본문)"),
     weighted_average_rate: z.number().min(0, "weighted_average_rate(이자율)는 0 이상이어야 합니다").max(100, "weighted_average_rate(이자율)는 100 이하로, %단위로 입력하세요 (예: 9 = 연 9%)").optional().describe("[가중평균차입이자율 선택 시 필수] 연 이자율을 %로 (예: 9 = 연 9%)"),
     paid_interest: z.number().min(0, "paid_interest(수령 약정이자)는 0 이상이어야 합니다").default(0).describe("실제 수령한 약정이자 (원, 기본 0)"),
     is_leap_year: z.boolean().default(false).describe("윤년 여부 — true면 366일로 나눈다 (기본 false=365일)"),
@@ -209,7 +213,7 @@ export const FIN_CALC_TOOL = {
       balance_days: { type: "number", minimum: 0, description: "[가지급금인정이자] 가지급금 적수 (원×일) — principal·days 대신 직접 입력" },
       principal: { type: "number", minimum: 0, description: "[가지급금인정이자] 가지급금 잔액 (원) — days와 함께 입력" },
       days: { type: "integer", minimum: 0, description: "[가지급금인정이자] 대여 일수 (일) — principal과 함께 입력" },
-      rate_type: { type: "string", enum: ["당좌대출이자율", "가중평균차입이자율"], description: "[가지급금인정이자] 적용 이자율 종류 (기본 당좌대출이자율)" },
+      rate_type: { type: "string", enum: ["당좌대출이자율", "가중평균차입이자율"], description: "[가지급금인정이자·필수] 적용 이자율 종류. 원칙은 가중평균차입이자율(시행령 §89③ 본문), 당좌대출이자율은 단서의 예외 — 기본값 없음" },
       weighted_average_rate: { type: "number", minimum: 0, maximum: 100, description: "[가지급금인정이자·가중평균차입이자율 선택 시 필수] 연 이자율을 %로 (예: 9 = 연 9%)" },
       paid_interest: { type: "number", minimum: 0, description: "[가지급금인정이자] 실제 수령한 약정이자 (원, 기본 0)" },
       is_leap_year: { type: "boolean", description: "[가지급금인정이자] 윤년이면 true (366일로 나눔, 기본 false)" },
@@ -273,7 +277,7 @@ const EXAMPLES: Record<string, string> = {
   임원퇴직금한도: `{ "calc_type": "임원퇴직금한도", "annual_salary": 120000000, "years": 5, "months": 3 }`,
   기업업무추진비한도: `{ "calc_type": "기업업무추진비한도", "revenue": 15000000000, "is_sme": false }`,
   감가상각비: `{ "calc_type": "감가상각비", "acquisition_cost": 100000000, "useful_life": 5, "method": "정률법", "remaining_value": 54900000 }`,
-  가지급금인정이자: `{ "calc_type": "가지급금인정이자", "principal": 100000000, "days": 365, "rate_type": "당좌대출이자율" }`,
+  가지급금인정이자: `{ "calc_type": "가지급금인정이자", "principal": 100000000, "days": 365, "rate_type": "가중평균차입이자율", "weighted_average_rate": 5.2 }`,
   퇴직소득세: `{ "calc_type": "퇴직소득세", "severance_pay": 100000000, "service_years": 20 }`,
 }
 
@@ -383,7 +387,29 @@ export function calcDepreciationLimit(
     limit = regular
   }
 
-  return { rate, base, regular, residual, isFinalYear, memoValue, limit, converted, effectiveLife, alreadyDone }
+  // 월할 사업연도와 정률법 마무리 연도가 겹치면 조문 해석이 갈린다 (Codex 리뷰 차단 2).
+  //   ⑧⑨는 "제1항의 규정을 적용함에 있어서" 상각범위액을 월할하라 하고,
+  //   ⑥은 5% 잔존가액을 "그 사업연도의 상각범위액에 가산한다"고만 한다.
+  //   ⓐ 가산분은 월할하지 않는다(아래 limit) / ⓑ 가산분까지 포함해 월할한다
+  // 조문이 명시하지 않으므로 확정 금액 하나만 내놓지 않는다 — ⓐ만 주면 6개월인데
+  // 12개월과 같은 금액이 나오고(월할이 무의미해짐), ⓑ로 단정할 근거도 없다.
+  const proratedFinal = !alreadyDone && isFinalYear && monthRatio < 1
+  const limitIfAddendProrated = proratedFinal ? Math.min(regular + residual * monthRatio, cap) : undefined
+
+  return {
+    rate,
+    base,
+    regular,
+    residual,
+    isFinalYear,
+    memoValue,
+    limit,
+    converted,
+    effectiveLife,
+    alreadyDone,
+    proratedFinal,
+    limitIfAddendProrated,
+  }
 }
 
 /**
@@ -542,6 +568,26 @@ export async function handleFinCalc(
         EXAMPLES["가지급금인정이자"]
       )
     }
+    // 두 형태를 다 주면 한쪽이 조용히 무시된다 — 서로 다른 값이면 어느 쪽으로 계산됐는지
+    // 알 수 없는 채 확정 금액이 나간다 (Codex 리뷰 중요 1)
+    if (hasBalanceDays && (input.principal !== undefined || input.days !== undefined)) {
+      const derived = (input.principal ?? 0) * (input.days ?? 0)
+      return invalidParam(
+        `적수 입력이 중복됩니다 — balance_days(${input.balance_days!.toLocaleString("ko-KR")})와 ` +
+          `principal×days(${derived.toLocaleString("ko-KR")}) 중 하나만 주세요. ` +
+          `둘을 함께 주면 어느 쪽으로 계산했는지 알 수 없습니다`,
+        EXAMPLES["가지급금인정이자"]
+      )
+    }
+    if (input.rate_type === undefined) {
+      return invalidParam(
+        "rate_type(적용 이자율 종류)이 필요합니다 — 법정 원칙과 예외가 달라 기본값을 두지 않습니다:\n" +
+          '  · "가중평균차입이자율" — **원칙** (법인세법 시행령 §89③ 본문). weighted_average_rate(연 %)를 함께 주세요\n' +
+          '  · "당좌대출이자율" — 예외 (§89③ 단서). ①가중평균차입이자율 적용이 불가능한 사유가 있는 경우 ' +
+          "②대여기간 5년 초과 등 ③신고와 함께 당좌대출이자율을 시가로 **선택**한 경우(선택한 사업연도+이후 2개 사업연도)에 한합니다",
+        EXAMPLES["가지급금인정이자"]
+      )
+    }
     if (input.rate_type === "가중평균차입이자율" && input.weighted_average_rate === undefined) {
       return invalidParam(
         "가중평균차입이자율을 선택하면 그 이자율을 직접 주어야 합니다 — weighted_average_rate(연 %, 예: 9)가 필요합니다",
@@ -658,14 +704,36 @@ export async function handleFinCalc(
         isError: true,
       }
     }
-    const { rate, base, regular, residual, isFinalYear, memoValue, limit, converted, effectiveLife, alreadyDone } =
-      calcResult
+    const {
+      rate,
+      base,
+      regular,
+      residual,
+      isFinalYear,
+      memoValue,
+      limit,
+      converted,
+      effectiveLife,
+      alreadyDone,
+      proratedFinal,
+      limitIfAddendProrated,
+    } = calcResult
     const isProrated = input.business_months < 12 && !converted
     const monthNote = isProrated ? ` × ${input.business_months}/12` : ``
     const text = [
       `[산식 기준: ${BASIS_DEPRECIATION}] 감가상각비 상각범위액 (${input.method})`,
       ``,
-      `상각범위액: ${won(limit)}`,
+      // 월할 사업연도 + 마무리 연도가 겹치면 단일 확정 금액을 주지 않는다 (Codex 리뷰 차단 2)
+      ...(proratedFinal
+        ? [
+            `상각범위액: **두 해석이 갈립니다 — 하나로 확정하지 않습니다**`,
+            `  ⓐ 5% 가산분을 월할하지 않는 경우: ${won(limit)}`,
+            `  ⓑ 5% 가산분도 월할하는 경우: ${won(limitIfAddendProrated ?? 0)}`,
+            `  → 시행령 §26⑧⑨는 "제1항을 적용함에 있어서" 상각범위액을 월할하라 하고, §26⑥ 단서는`,
+            `     5% 잔존가액을 "그 사업연도의 상각범위액에 가산한다"고만 해 가산분의 월할 여부를 정하지 않았습니다.`,
+            `     ⓐ를 쓰면 ${input.business_months}개월인데 12개월과 같은 금액이 나올 수 있습니다 — 세무대리인 판단 또는 국세청 질의로 확정하세요.`,
+          ]
+        : [`상각범위액: ${won(limit)}`]),
       ``,
       `계산 과정:`,
       // 별표는 "0.451"처럼 적는다 — 별표와 눈으로 대조되도록 소수 표기를 먼저 보인다
@@ -683,6 +751,12 @@ export async function handleFinCalc(
               `  ④ 상각 마무리 연도 — 이번 상각 후 미상각잔액이 취득가액의 5%(${won(residual)}) 이하가 됨`,
               `     시행령 §26⑥ 단서에 따라 ${won(residual)}을 상각범위액에 가산하되,`,
               `     비망가액 ${won(memoValue)}(§26⑦)을 남겨 ${won(limit)}까지 상각 가능`,
+              ...(proratedFinal
+                ? [
+                    `     ⚠ 이 사업연도는 월할 대상(${input.business_months}/12)이라 가산분 ${won(residual)}의 월할 여부에 따라 결과가 갈린다 —`,
+                    `        가산분도 월할하면 ${won(limitIfAddendProrated ?? 0)} (위 ⓑ)`,
+                  ]
+                : []),
             ]
           : []),
       ...(!isDeclining && input.remaining_value !== undefined
@@ -755,6 +829,12 @@ export async function handleFinCalc(
         ? `  ① 가지급금 적수 = ${balanceDays.toLocaleString("ko-KR")} (입력값, 원×일)`
         : `  ① 가지급금 적수 = ${won(input.principal ?? 0)} × ${input.days ?? 0}일 = ${balanceDays.toLocaleString("ko-KR")} (원×일)`,
       `  ② 적용 이자율 = 연 ${pct(annualRate)} (${input.rate_type})`,
+      ...(isOverdraft
+        ? [
+            `     ⚠ 당좌대출이자율은 §89③ **단서의 예외**입니다 (원칙은 가중평균차입이자율) —`,
+            `        ①가중평균 적용 불가 사유 ②대여기간 5년 초과 등 ③신고와 함께 선택 중 하나에 해당하는지 확인하세요`,
+          ]
+        : []),
       `  ③ 이자 시가 = 적수 × ${pct(annualRate)} ÷ ${daysInYear}일${input.is_leap_year ? " (윤년)" : ""} = ${won(marketInterest)}`,
       `  ④ 인정이자 = 이자 시가 ${won(marketInterest)} − 약정이자 ${won(input.paid_interest)} = ${
         deemedInterest > 0 ? won(deemedInterest) : `${won(deemedInterest)} → 차액이 없어 익금산입 대상 0원`
@@ -800,11 +880,14 @@ export async function handleFinCalc(
   const r = calcRetirementIncomeTax(input.severance_pay, input.service_years)
   const roundedUp = r.serviceYears !== input.service_years
   const text = [
-    `[산식 기준: ${BASIS_RETIREMENT_TAX}] 퇴직소득세`,
+    `[산식 기준: ${BASIS_RETIREMENT_TAX}] 퇴직소득세 — **추정치** (원 단위 절사·반올림 미구현)`,
     ``,
-    `산출세액(소득세): ${won(r.incomeTax)}`,
-    `개인지방소득세: ${won(r.localTax)}`,
-    `합계: ${won(r.total)}`,
+    // 단계별 절사·반올림 규칙을 구현하지 않았으므로 "산출세액"이라 단정하지 않는다.
+    // 원천징수 신고액으로 그대로 옮겨 적으면 실제 징수액과 어긋날 수 있다 (Codex 리뷰 개선 2)
+    `산출세액(소득세) 추정: ${won(r.incomeTax)}`,
+    `개인지방소득세 추정: ${won(r.localTax)}`,
+    `합계 추정: ${won(r.total)}`,
+    `※ 각 단계를 실수로 계산한 값입니다 — 원천징수 신고액은 국세청 「퇴직소득 원천징수영수증」 서식의 단계별 절사 규칙을 따라 확정하세요`,
     ``,
     `계산 과정:`,
     `  ① 퇴직소득금액 = ${won(input.severance_pay)}`,

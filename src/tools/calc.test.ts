@@ -228,6 +228,7 @@ describe("가지급금 인정이자 (법인세법 시행령 §89③ + 시행규�
       calc_type: "가지급금인정이자",
       principal: 100_000_000,
       days: 365,
+      rate_type: "당좌대출이자율",
       paid_interest: 5_000_000,
     })
     const t = res.content[0].text
@@ -425,6 +426,7 @@ describe("handleFinCalc 계약", () => {
       calc_type: "가지급금인정이자",
       principal: 100_000_000,
       days: 365,
+      rate_type: "당좌대출이자율",
     })
     const t = res.content[0].text
     expect(res.isError).toBeFalsy()
@@ -487,7 +489,7 @@ describe("handleFinCalc 계약", () => {
       { calc_type: "임원퇴직금한도", annual_salary: 120_000_000, years: 5 },
       { calc_type: "기업업무추진비한도", revenue: 5_000_000_000 },
       { calc_type: "감가상각비", acquisition_cost: 100_000_000, useful_life: 5, method: "정액법" },
-      { calc_type: "가지급금인정이자", balance_days: 36_500_000_000 },
+      { calc_type: "가지급금인정이자", balance_days: 36_500_000_000, rate_type: "당좌대출이자율" },
       { calc_type: "퇴직소득세", severance_pay: 100_000_000, service_years: 20 },
     ]
     for (const input of inputs) {
@@ -560,7 +562,7 @@ describe("입력 스키마 — 조건부 필수 (Codex 리뷰: oneOf)", () => {
       method: "정액법",
     })
     expect(ok3.isError).toBeFalsy()
-    const ok4 = await handleFinCalc(null, { calc_type: "가지급금인정이자", balance_days: 36_500_000_000 })
+    const ok4 = await handleFinCalc(null, { calc_type: "가지급금인정이자", balance_days: 36_500_000_000, rate_type: "당좌대출이자율" })
     expect(ok4.isError).toBeFalsy()
     const ok5 = await handleFinCalc(null, {
       calc_type: "퇴직소득세",
@@ -589,5 +591,122 @@ describe("입력 스키마 — 조건부 필수 (Codex 리뷰: oneOf)", () => {
     for (const type of (FIN_CALC_TOOL.inputSchema as any).properties.calc_type.enum) {
       expect(t, `${type}가 안내에 없음`).toContain(type)
     }
+  })
+})
+
+/**
+ * Codex 공개 전 리뷰 차단 1·중요 1 회귀.
+ * 법인세법 시행령 제89조제3항 본문은 **가중평균차입이자율이 시가**이고,
+ * 당좌대출이자율은 단서 각 호(적용 불가 사유·5년 초과 대여·신고 시 선택)의 예외다.
+ * 예외를 기본값으로 두면 사용자가 생략했을 때 법정 원칙과 반대인 4.6%로
+ * 확정 금액이 나가고, 함께 준 weighted_average_rate까지 무시된다.
+ */
+describe("가지급금 인정이자 — 이자율 원칙·예외 (Codex 리뷰 차단 1)", () => {
+  it("rate_type을 생략하면 계산하지 않고 원칙·예외를 안내한다", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "가지급금인정이자",
+      principal: 100_000_000,
+      days: 365,
+      weighted_average_rate: 9,
+    })
+    expect(res.isError).toBe(true)
+    const t = res.content[0].text
+    expect(t).toContain("[INVALID_PARAMETER]")
+    expect(t).toContain("rate_type")
+    // 원칙이 무엇인지 밝힌다 — 4.6%로 조용히 계산하지 않는다
+    expect(t).toContain("가중평균차입이자율")
+    expect(t).toContain("원칙")
+    expect(t).not.toContain("4,600,000원")
+  })
+
+  it("가중평균차입이자율을 주면 그 이자율로 계산한다 (4.6% 대체 금지)", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "가지급금인정이자",
+      principal: 100_000_000,
+      days: 365,
+      rate_type: "가중평균차입이자율",
+      weighted_average_rate: 9,
+    })
+    expect(res.isError).toBeFalsy()
+    const t = res.content[0].text
+    expect(t).toContain("9,000,000원")
+    expect(t).not.toContain("4,600,000원")
+  })
+
+  it("당좌대출이자율을 고르면 예외 사유 확인을 요구한다", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "가지급금인정이자",
+      principal: 100_000_000,
+      days: 365,
+      rate_type: "당좌대출이자율",
+    })
+    expect(res.isError).toBeFalsy()
+    const t = res.content[0].text
+    expect(t).toContain("4,600,000원")
+    expect(t).toContain("단서")
+    expect(t).toContain("예외")
+  })
+
+  it("적수를 두 형태로 함께 주면 조용히 한쪽을 쓰지 않고 거부한다 (Codex 중요 1)", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "가지급금인정이자",
+      balance_days: 36_500_000_000,
+      principal: 1_000_000,
+      days: 1,
+      rate_type: "당좌대출이자율",
+    })
+    expect(res.isError).toBe(true)
+    const t = res.content[0].text
+    expect(t).toContain("중복")
+    // 두 값을 모두 보여줘 무엇이 충돌하는지 알린다
+    expect(t).toContain("36,500,000,000")
+    expect(t).toContain("1,000,000")
+  })
+})
+
+/**
+ * Codex 공개 전 리뷰 차단 2 회귀 — 월할 사업연도 + 정률법 마무리 연도.
+ * §26⑧⑨는 "제1항을 적용함에 있어서" 상각범위액을 월할하라 하고, §26⑥ 단서는
+ * 5% 잔존가액을 "그 사업연도의 상각범위액에 가산한다"고만 한다. 가산분까지
+ * 월할하는지는 조문이 정하지 않았다 — 가산분을 전액 더하면 6개월인데 12개월과
+ * 같은 금액이 나오므로, 어느 한쪽으로 확정 금액을 내면 안 된다.
+ */
+describe("감가상각 — 월할 사업연도의 마무리 연도 (Codex 리뷰 차단 2)", () => {
+  const shortFinal = {
+    calc_type: "감가상각비" as const,
+    acquisition_cost: 100_000_000,
+    useful_life: 5,
+    method: "정률법" as const,
+    remaining_value: 5_500_000,
+    business_months: 6,
+    short_period_basis: "기중취득" as const,
+  }
+
+  it("확정 금액 하나로 답하지 않고 두 해석을 병기한다", async () => {
+    const res = await handleFinCalc(null, shortFinal)
+    expect(res.isError).toBeFalsy()
+    const t = res.content[0].text
+    expect(t).toContain("두 해석이 갈립니다")
+    expect(t).toContain("5,499,000원") // ⓐ 가산분 월할 안 함
+    expect(t).toContain("3,740,250원") // ⓑ 가산분도 월할
+    expect(t).toContain("§26⑥")
+  })
+
+  it("6개월인데 12개월과 같은 금액이 될 수 있다는 사실을 밝힌다", async () => {
+    const res = await handleFinCalc(null, shortFinal)
+    expect(res.content[0].text).toContain("12개월과 같은 금액")
+  })
+
+  it("월할이 아닌 통상 마무리 연도는 종전대로 단일 금액이다 (불필요한 갈래 금지)", async () => {
+    const res = await handleFinCalc(null, { ...shortFinal, business_months: 12, short_period_basis: undefined })
+    const t = res.content[0].text
+    expect(t).not.toContain("두 해석이 갈립니다")
+    expect(t).toContain("상각범위액: 5,499,000원")
+  })
+
+  it("마무리 연도가 아닌 월할 사업연도도 단일 금액이다", async () => {
+    const res = await handleFinCalc(null, { ...shortFinal, remaining_value: 100_000_000 })
+    const t = res.content[0].text
+    expect(t).not.toContain("두 해석이 갈립니다")
   })
 })

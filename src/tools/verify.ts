@@ -14,7 +14,7 @@ import { findLaws, findRepealedLaw, resolvedLawMatches, INTERPUNCT_CHARS, type L
 import { resolveLawAlias, LAW_ALIAS_CANONICALS } from "../lib/search-normalizer.js"
 import { buildJO } from "../lib/law-parser.js"
 import { toArray } from "../lib/xml-parser.js"
-import { isAdminRuleName, verifyAdminRuleCitation, tryVerifyAdminRuleCitation } from "./admin-rule-citation.js"
+import { isAdminRuleName, isAdminRuleLikeName, verifyAdminRuleCitation, tryVerifyAdminRuleCitation } from "./admin-rule-citation.js"
 import { SOURCE_FOOTER, truncateWithHint, FIN_LAW_NAMES } from "../lib/fin-common.js"
 import { resolveVersionAt } from "../lib/historical-utils.js"
 
@@ -325,14 +325,36 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
   // 5) 따옴표 없는 행정규칙명 + 제N조 ("…기준 제3조" 등) — 자체 패치 #4의 접미사 확장.
   // 행정규칙은 antecedent를 남기지 않는다 — "같은 법"의 선행사가 되어
   // '판단 기준 시행령' 같은 오염이 생기던 회귀 방지
+  // 접미사에 규정·규칙을 포함한다: 「」 없이 쓴 "외국환거래규정 제23조"가 추출조차
+  // 되지 않아 **환각 인용("탄소배출권거래규정 제77조")까지 0건으로 조용히 통과**하고
+  // 있었다 (Codex 리뷰 중요 6, 실측). 「」 인용 경로(3번)는 이미 규정·규칙을 받는다
   const ADMIN_ARTICLE_RE = new RegExp(
-    `([가-힣0-9${IP}\\s]{2,30}?(?:고시|훈령|예규|통칙|기준|지침))\\s*(${ARTICLE_PART})`,
+    `([가-힣0-9${IP}\\s]{2,30}?(?:고시|훈령|예규|통칙|기준|지침|규정|규칙))\\s*(${ARTICLE_PART})`,
     "g"
   )
   for (const m of text.matchAll(ADMIN_ARTICLE_RE)) {
     const name = cleanLawName(trimToLawName(m[1]))
-    if (!isAdminRuleName(name)) continue
-    hits.push({ idx: m.index!, c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "행정규칙" } })
+    const end = m.index! + m[0].length
+    // 「」 인용과 일반 법령 경로가 이미 가져간 조문 토큰은 건너뛴다
+    // ("법인세법 시행규칙 제15조"는 1번이 처리한다 — 여기서 또 잡으면 행정규칙으로
+    //  판정되어 부령 조문이 "명칭만 확인"으로 강등된다)
+    if (articleEnds.has(end)) continue
+    if (isAdminRuleName(name)) {
+      // 고시·훈령류: 행정규칙 전용 경로 (명칭 실존만 검증)
+      hits.push({ idx: m.index!, c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "행정규칙" } })
+      articleEnds.add(end)
+      continue
+    }
+    // 「…규정」·「…규칙」은 부령(법령 DB)일 수도, 고시·훈령일 수도 있다 —
+    // 법령조문 경로로 보내면 법령 DB → 행정규칙 폴백 → 폐지 확인 순서가 이미 배선돼 있다.
+    // 시행규칙은 isAdminRuleLikeName이 걸러 1번 경로에 맡긴다
+    if (!isAdminRuleLikeName(name)) continue
+    hits.push({
+      idx: m.index!,
+      c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "법령조문" },
+      ...(isRuleAntecedentName(name) ? { ruleAntecedent: name } : {}),
+    })
+    articleEnds.add(end)
   }
 
   // 6) 기본통칙·집행기준
@@ -448,16 +470,20 @@ async function verifyLawCitation(
         return { mark: "⚠", line: `⚠ ${c.raw} — 법령 DB 0건, 시간 상한 도달로 행정규칙 DB 미확인 — 판정 불가 (없음 아님)` }
       }
       try {
-        const adminHit = await tryVerifyAdminRuleCitation(apiClient, [c.lawName], c.raw)
+        const adminHit = await tryVerifyAdminRuleCitation(apiClient, [c.lawName], c.raw, undefined, signal)
         if (adminHit) {
+          // 접두 일치는 tryVerify가 "⚠"로 시작하는 문구를 준다 — ✓로 승격하지 않는다
+          const exactHit = adminHit.startsWith("✓")
           // 조문이 붙어 있으면 명칭만 확인된 상태 — ✓ 집계 금지 (Opus 리뷰 중요 1)
           if (c.article) {
             return {
               mark: "⚠",
-              line: `⚠${adminHit.slice(1)} · ${c.article}의 존재는 미확인(행정규칙 조문 단위 API 없음) — 원문 확인 필요`,
+              line: exactHit
+                ? `⚠${adminHit.slice(1)} · ${c.article}의 존재는 미확인(행정규칙 조문 단위 API 없음) — 원문 확인 필요`
+                : `${adminHit} · ${c.article}도 미확인`,
             }
           }
-          return { mark: "✓", line: adminHit }
+          return exactHit ? { mark: "✓", line: adminHit } : { mark: "⚠", line: adminHit }
         }
         adminChecked = true
       } catch (e) {

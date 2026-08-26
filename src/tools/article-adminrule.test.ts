@@ -95,3 +95,42 @@ describe("fin_article — 행정규칙 조문 요청 (잔여①)", () => {
     expect(r.content[0].text).toContain("[LAW_NOT_FOUND]")
   })
 })
+
+/**
+ * Codex 공개 전 리뷰 차단 3 회귀 — 조회 실패를 부존재로 변환하던 문제.
+ * adminRuleNotice가 행정규칙 API 오류를 catch로 삼키고 null을 돌려주면,
+ * 호출자는 그것을 "행정규칙에도 없음"으로 읽어 `[LAW_NOT_FOUND] ✗없음`을 찍는다.
+ * 이 함수가 존재하는 이유(실존 고시를 없다고 단정하지 않기)와 정반대 동작이다.
+ */
+describe("fin_article — 행정규칙 조회 실패 (Codex 리뷰 차단 3)", () => {
+  const failingClient = (err: Error): LawApiClient =>
+    ({
+      searchLaw: async () => EMPTY_LAW_XML,
+      fetchApi: async () => EMPTY_LAW_XML,
+      searchAdminRule: async () => {
+        throw err
+      },
+    }) as unknown as LawApiClient
+
+  it("행정규칙 DB 장애를 '법령 없음'으로 단정하지 않는다", async () => {
+    const r = await handleFinArticle(failingClient(new Error("법제처 API가 HTML 오류 페이지를 반환했습니다")), {
+      law: "외국환거래규정",
+      article: "제9-5조",
+    })
+    const text = r.content[0].text
+    expect(text).not.toContain("[LAW_NOT_FOUND]")
+    expect(text).toContain("⚠판정불가")
+    expect(text).toContain("실패")
+    expect(text).toContain('"존재하지 않는 규정"으로 단정하지 마세요')
+  })
+
+  it("타임아웃도 부존재가 아니라 판정불가로 보고한다", async () => {
+    const r = await handleFinArticle(failingClient(new Error("요청 시간 초과 (3000ms)")), {
+      law: "외국환거래규정",
+      article: "제9-5조",
+    })
+    const text = r.content[0].text
+    expect(text).toContain("REQUEST_TIMEOUT")
+    expect(text).not.toContain("✗없음")
+  })
+})

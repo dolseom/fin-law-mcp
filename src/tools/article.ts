@@ -14,7 +14,7 @@
 import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
 import { findLaws, resolvedLawMatches, sameLawFamily, type LawInfo } from "../lib/law-search.js"
-import { formatFetchFailure } from "../lib/errors.js"
+import { formatFetchFailure, classifyErrorCode } from "../lib/errors.js"
 import { resolveVersionAt } from "../lib/historical-utils.js"
 import { buildJO } from "../lib/law-parser.js"
 import { cleanHtml, flattenContent, groupMokByReset } from "../lib/article-parser.js"
@@ -181,16 +181,20 @@ function findAnnexItems(node: any, acc: AnnexItem[], lawName: string): void {
  * 「외국환거래규정」(기재부 고시)처럼 법령 DB에 없는 행정규칙을 조문까지 붙여 물어오면
  * "✗없음"은 틀린 단정이 된다 — 옆 도구(fin_law_search·fin_verify)는 실존을 확인해 주는데
  * 조문 요청만 없음으로 답하던 모순(잔여①). 실존이면 조회 미지원임을 밝히고 경로를 준다.
- * 확인 실패·미발견은 null을 돌려 기존 판정 경로를 그대로 태운다.
+ *
+ * ⚠ 조회 **실패**를 null로 돌리면 안 된다: 호출측은 그것을 "행정규칙에도 없음"으로 읽어
+ * `[LAW_NOT_FOUND] ✗없음`을 찍는다 — 이 함수의 목적과 정확히 반대다 (Codex 리뷰 차단 3).
+ * 미발견만 null(기존 판정 경로)이고, 실패는 ⚠판정불가 문구로 구분해 돌린다.
  */
 async function adminRuleNotice(
   apiClient: LawApiClient,
   name: string,
-  articleLabel: string
+  articleLabel: string,
+  signal?: AbortSignal
 ): Promise<string | null> {
   if (!isAdminRuleLikeName(name)) return null
   try {
-    const rule = await findAdminRule(apiClient, name)
+    const rule = await findAdminRule(apiClient, name, undefined, signal)
     if (!rule) return null
     const meta = [rule.ruleType, rule.orgName, rule.promDate ? `발령 ${rule.promDate}` : ""].filter(Boolean).join(" · ")
     return (
@@ -199,8 +203,14 @@ async function adminRuleNotice(
       `💡 명칭 실존 검증은 fin_verify, 원문은 국가법령정보센터(law.go.kr) → 행정규칙에서 확인하세요.\n` +
       `⚠️ LLM은 조문 내용을 추측하지 마세요.`
     )
-  } catch {
-    return null
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return (
+      `[${classifyErrorCode(msg)}] "${name}" — 법령 DB 0건이고, 행정규칙 DB 조회는 **실패**했습니다 — ⚠판정불가 (0건이 아님).\n` +
+      `사유: ${msg}\n` +
+      `💡 "${name}"은 고시·훈령일 수 있습니다 — 잠시 후 재시도하거나 fin_verify로 명칭 실존을 확인하세요.\n` +
+      `⚠️ LLM은 이 결과를 "존재하지 않는 규정"으로 단정하지 마세요.`
+    )
   }
 }
 
@@ -432,14 +442,15 @@ export async function handleFinArticle(
     }
     // 어떤 위임은 본문이 붙고 어떤 건 제목만 나오는 이유를 밝힌다 — 고지가 없으면
     // "본문이 없는 조문"으로 읽힌다 (잔여③)
-    const missingBody = bodyEligible.filter((d) => !bodyMap.has(`${d.type}|${d.joNum}`)).length
-    if (missingBody > 0) {
-      const overflow = bodyEligible.length - needBody.length
-      const cause =
-        overflow > 0
-          ? `상위 ${BODY_LIMIT}건까지만 동봉(응답 시간 예산)`
-          : `조회 실패·시간 초과`
-      out += `\n※ 위임 조문 본문 ${missingBody}건은 제목만 표시했습니다 — ${cause}. 본문이 필요하면 fin_article로 해당 조문을 직접 조회하세요`
+    // 상한 초과와 조회 실패는 원인이 다르다 — 뭉뚱그리면 "실패한 3건"이 "상한 때문"으로
+    // 읽혀 재시도할 이유가 사라진다 (Codex 리뷰 개선 1)
+    const overflow = bodyEligible.length - needBody.length
+    const failed = needBody.filter((d) => !bodyMap.has(`${d.type}|${d.joNum}`)).length
+    if (overflow > 0 || failed > 0) {
+      const causes: string[] = []
+      if (overflow > 0) causes.push(`${overflow}건은 상위 ${BODY_LIMIT}건 상한 초과(응답 시간 예산)`)
+      if (failed > 0) causes.push(`${failed}건은 조회 실패·시간 초과 — "본문 없음"이 아님`)
+      out += `\n※ 위임 조문 본문 ${overflow + failed}건은 제목만 표시했습니다 (${causes.join(" / ")}). 본문이 필요하면 fin_article로 해당 조문을 직접 조회하세요`
     }
     return { status: "성공" as const, text: out.trim() }
   })().catch((e) => failed(e instanceof Error ? e.message : String(e)))

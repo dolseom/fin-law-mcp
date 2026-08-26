@@ -41,17 +41,20 @@ export interface AdminRuleMatch {
   promDate?: string
   orgName?: string
   ruleType?: string
+  /** 입력 명칭과 정확히 일치하는가. false면 접두 일치(더 긴 다른 규칙)라 단정 금지 */
+  exact: boolean
 }
 
 /** 행정규칙 DB(admrul)에서 명칭 실존 확인 — verify 외에 law_search의 0건 폴백도 사용 */
 export async function findAdminRule(
   apiClient: LawApiClient,
   name: string,
-  apiKey?: string
+  apiKey?: string,
+  signal?: AbortSignal
 ): Promise<AdminRuleMatch | null> {
   // display=100 (Opus 검토 권고 7): 법제처는 LIKE 부분검색+가나다순이라 정확한 규칙명이
   // 기본 20건 밖으로 밀릴 수 있다 — 법령 경로의 findLaws display=100과 같은 이유
-  const xml = await apiClient.searchAdminRule({ query: name, display: "100", apiKey })
+  const xml = await apiClient.searchAdminRule({ query: name, display: "100", apiKey, signal })
   // 장애 응답 판별 (Codex 검토 차단 3): searchAdminRule은 searchLaw와 달리 HTML/빈 응답
   // 검사가 없어 200 상태의 장애 페이지가 "admrul 0건"으로 파싱된다 — 그대로 두면
   // '검증 불가'가 ✗ NOT_FOUND(환각 의심)로 오보되므로 throw로 ⚠ 경로에 태운다
@@ -74,19 +77,27 @@ export async function findAdminRule(
   }
   const rules = doc.getElementsByTagName("admrul")
   const limit = Math.min(rules.length, 100)
+  // looseMatchLawName은 접두 일치를 허용한다 — 입력 「국세청 사무처리규정」에 대해
+  // 「국세청 사무처리규정 시행세칙」만 있어도 "실존"이 되어 버린다. 행정규칙에는
+  // 법령 쪽의 별칭 사전·tier 검사가 없어 오검증 위험이 더 크므로, 정확 일치를
+  // 먼저 찾고 접두 일치는 exact=false로 구분해 돌린다 (Codex 리뷰 중요 3)
+  const target = compactName(name)
+  let loose: AdminRuleMatch | null = null
   for (let i = 0; i < limit; i++) {
     const rule = rules[i]
     const ruleName = rule.getElementsByTagName("행정규칙명")[0]?.textContent?.trim() || ""
-    if (ruleName && looseMatchLawName(name, ruleName)) {
-      return {
-        name: ruleName,
-        promDate: rule.getElementsByTagName("발령일자")[0]?.textContent?.trim() || undefined,
-        orgName: rule.getElementsByTagName("소관부처명")[0]?.textContent?.trim() || undefined,
-        ruleType: rule.getElementsByTagName("행정규칙종류")[0]?.textContent?.trim() || undefined,
-      }
+    if (!ruleName || !looseMatchLawName(name, ruleName)) continue
+    const match: AdminRuleMatch = {
+      name: ruleName,
+      promDate: rule.getElementsByTagName("발령일자")[0]?.textContent?.trim() || undefined,
+      orgName: rule.getElementsByTagName("소관부처명")[0]?.textContent?.trim() || undefined,
+      ruleType: rule.getElementsByTagName("행정규칙종류")[0]?.textContent?.trim() || undefined,
+      exact: compactName(ruleName) === target,
     }
+    if (match.exact) return match
+    if (!loose) loose = match
   }
-  return null
+  return loose
 }
 
 /**
@@ -97,14 +108,24 @@ export async function tryVerifyAdminRuleCitation(
   apiClient: LawApiClient,
   candidates: string[],
   label: string,
-  apiKey?: string
+  apiKey?: string,
+  signal?: AbortSignal
 ): Promise<string | null> {
   for (const cand of candidates) {
-    const match = await findAdminRule(apiClient, cand, apiKey)
+    const match = await findAdminRule(apiClient, cand, apiKey, signal)
     if (match) {
       const meta = [match.ruleType, match.orgName, match.promDate ? `발령 ${match.promDate}` : undefined]
         .filter(Boolean)
         .join(" · ")
+      // 접두 일치는 ✓가 아니다 — 인용한 이름의 규칙이 실존한다는 증거가 아니라
+      // 이름이 그것으로 시작하는 **다른** 규칙이 있다는 뜻이다 (Codex 리뷰 중요 3)
+      if (!match.exact) {
+        return (
+          `⚠ ${label} — 이 명칭과 정확히 일치하는 행정규칙은 찾지 못했고, ` +
+          `이름이 겹치는 「${match.name}」${meta ? ` (${meta})` : ""}만 검색되었습니다. ` +
+          `표기를 확인하세요 — 실존 단정 불가 (없음도 아님)`
+        )
+      }
       return (
         `✓ ${label} — 행정규칙 「${match.name}」 실존${meta ? ` (${meta})` : ""}. ` +
         `※ 행정규칙은 조문 단위 검증 미지원 — 명칭 실존만 확인함`

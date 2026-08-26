@@ -64,7 +64,8 @@ describe("fin_article — 위임 본문 동봉 상한 고지 (잔여③)", () =>
     const text = r.content[0].text
     expect(text).toContain("위임 조문 본문")
     expect(text).toContain("제목만 표시")
-    expect(text).toContain("상위 3건까지만 동봉")
+    // 상한 초과와 조회 실패를 구분해 표기한다 (Codex 리뷰 개선 1)
+    expect(text).toMatch(/상위 3건 상한 초과|조회 실패·시간 초과/)
     // 직접 조회 경로를 안내한다
     expect(text).toContain("fin_article")
   })

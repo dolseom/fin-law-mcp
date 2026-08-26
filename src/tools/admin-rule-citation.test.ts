@@ -1,7 +1,7 @@
 // 자체 패치 #4 테스트 — verify_citations 행정규칙 인용 검증
 import { describe, expect, it } from "vitest"
 import type { LawApiClient } from "../lib/api-client.js"
-import { isAdminRuleName, isAdminRuleLikeName, tryVerifyAdminRuleCitation, verifyAdminRuleCitation } from "./admin-rule-citation.js"
+import { isAdminRuleName, isAdminRuleLikeName, findAdminRule, tryVerifyAdminRuleCitation, verifyAdminRuleCitation } from "./admin-rule-citation.js"
 // fin-law-mcp: upstream verify-citations 대신 자체 verify.ts의 추출기로 연결
 // (상한 15은 추출기 내부 고정)
 import { extractCitations as parseCitations } from "./verify.js"
@@ -172,5 +172,55 @@ describe("isAdminRuleLikeName — 행정규칙 병행 조회 대상 판정", () 
 
   it("가운뎃점·공백이 섞여도 접미사를 인식한다", () => {
     expect(isAdminRuleLikeName("외국환 거래 규정")).toBe(true)
+  })
+})
+
+/**
+ * Codex 공개 전 리뷰 중요 3 회귀 — 접두 일치를 실존으로 단정하던 문제.
+ * looseMatchLawName은 "공식 명칭이 입력명으로 시작하면 일치"를 허용한다.
+ * 행정규칙에는 법령 쪽의 별칭 사전·종류(tier) 검사가 없어, 입력한 규정보다
+ * 긴 다른 규칙만 있어도 ✓가 나가면 그대로 오검증이 된다.
+ */
+const PREFIX_ONLY_XML =
+  '<?xml version="1.0"?><AdmRulSearch><totalCnt>1</totalCnt><admrul>' +
+  "<행정규칙명>국세청 사무처리규정 시행세칙</행정규칙명><행정규칙종류>훈령</행정규칙종류>" +
+  "<소관부처명>국세청</소관부처명><발령일자>20260101</발령일자></admrul></AdmRulSearch>"
+
+const EXACT_XML =
+  '<?xml version="1.0"?><AdmRulSearch><totalCnt>2</totalCnt>' +
+  "<admrul><행정규칙명>국세청 사무처리규정 시행세칙</행정규칙명><행정규칙종류>훈령</행정규칙종류>" +
+  "<소관부처명>국세청</소관부처명><발령일자>20260101</발령일자></admrul>" +
+  "<admrul><행정규칙명>국세청 사무처리규정</행정규칙명><행정규칙종류>훈령</행정규칙종류>" +
+  "<소관부처명>국세청</소관부처명><발령일자>20260202</발령일자></admrul></AdmRulSearch>"
+
+function xmlStub(xml: string): LawApiClient {
+  return { searchAdminRule: async () => xml } as unknown as LawApiClient
+}
+
+describe("findAdminRule — 정확 일치와 접두 일치 구분 (Codex 리뷰 중요 3)", () => {
+  it("접두 일치만 있으면 exact=false로 표시한다", async () => {
+    const m = await findAdminRule(xmlStub(PREFIX_ONLY_XML), "국세청 사무처리규정")
+    expect(m).not.toBeNull()
+    expect(m!.exact).toBe(false)
+    expect(m!.name).toBe("국세청 사무처리규정 시행세칙")
+  })
+
+  it("목록에 정확 일치가 있으면 접두 일치보다 우선한다 (순서 무관)", async () => {
+    const m = await findAdminRule(xmlStub(EXACT_XML), "국세청 사무처리규정")
+    expect(m!.exact).toBe(true)
+    expect(m!.name).toBe("국세청 사무처리규정")
+  })
+
+  it("접두 일치는 ✓가 아니라 ⚠ 문구로 돌려준다 (실존 단정 금지)", async () => {
+    const line = await tryVerifyAdminRuleCitation(xmlStub(PREFIX_ONLY_XML), ["국세청 사무처리규정"], "국세청 사무처리규정")
+    expect(line).not.toBeNull()
+    expect(line!.startsWith("⚠")).toBe(true)
+    expect(line).toContain("정확히 일치하는 행정규칙은 찾지 못했")
+    expect(line).toContain("국세청 사무처리규정 시행세칙")
+  })
+
+  it("정확 일치는 종전대로 ✓ 문구다", async () => {
+    const line = await tryVerifyAdminRuleCitation(xmlStub(EXACT_XML), ["국세청 사무처리규정"], "국세청 사무처리규정")
+    expect(line!.startsWith("✓")).toBe(true)
   })
 })
