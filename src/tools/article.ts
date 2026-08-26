@@ -19,7 +19,7 @@ import { resolveVersionAt } from "../lib/historical-utils.js"
 import { buildJO } from "../lib/law-parser.js"
 import { cleanHtml, flattenContent, groupMokByReset } from "../lib/article-parser.js"
 import { parseThreeTierDelegation } from "../lib/three-tier-parser.js"
-import { isAdminRuleLikeName, findAdminRule } from "./admin-rule-citation.js"
+import { isAdminRuleLikeName, findAdminRule, stripTrailingParen } from "./admin-rule-citation.js"
 import { formatAnnexNo } from "./annex.js"
 import { extractTag, toArray } from "../lib/xml-parser.js"
 import {
@@ -196,7 +196,8 @@ async function adminRuleNotice(
   articleLabel: string,
   signal?: AbortSignal
 ): Promise<string | null> {
-  if (!isAdminRuleLikeName(name)) return null
+  // 괄호가 붙으면 이름이 ')'로 끝나 규정·규칙 판정을 통과하지 못해 폴백 자체가 꺼진다
+  if (!isAdminRuleLikeName(stripTrailingParen(name))) return null
   try {
     const rule = await findAdminRule(apiClient, name, undefined, signal)
     if (!rule) return null

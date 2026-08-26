@@ -13,7 +13,7 @@ import type { LawApiClient } from "../lib/api-client.js"
 import { stripNonLawKeywords, resolvedLawMatches } from "../lib/law-search.js"
 import { formatFetchFailure } from "../lib/errors.js"
 import { extractTag } from "../lib/xml-parser.js"
-import { isAdminRuleName, isAdminRuleLikeName, findAdminRule, type AdminRuleMatch } from "./admin-rule-citation.js"
+import { isAdminRuleName, isAdminRuleLikeName, findAdminRule, stripTrailingParen, type AdminRuleMatch } from "./admin-rule-citation.js"
 import {
   FIN_MINISTRY_CODES,
   FIN_LAW_NAMES,
@@ -136,8 +136,11 @@ export async function handleFinLawSearch(
   const { query, include_ordinance, basis_date } = parsed.data
   const basisYmd = basis_date ? basis_date.replace(/-/g, "") : undefined
 
-  // 검색어에서 부가 키워드 제거 ("관세법 과태료 기준" → "관세법")
-  const stripped = stripNonLawKeywords(query).trim() || query
+  // 검색어에서 부가 키워드 제거 ("관세법 과태료 기준" → "관세법").
+  // 괄호는 먼저 뗀다 — "외국환거래규정(기재부 고시)"를 그대로 두면 축약 사다리가
+  // "고시)"까지 잘라내 **완전히 무관한 법령**(「정부기관 및 공공법인 등의 광고시행에
+  // 관한 법률」)을 답으로 준다 (실측). 괄호 안은 대개 소관·발령 메타데이터다
+  const stripped = stripNonLawKeywords(stripTrailingParen(query)).trim() || query
   const strippedNote = stripped !== query ? ` (법령명 검색어로 정제: "${query}" → "${stripped}")` : ""
 
   try {
@@ -176,7 +179,7 @@ export async function handleFinLawSearch(
     // 조회 후보에 원본 질의도 넣는다: stripNonLawKeywords는 법령명 검색용 정제라
     // "조사사무처리규정"을 "조사사무 규정"으로 쪼개고, 그 형태로는 행정규칙 DB가
     // 원본 명칭을 못 찾는다 (실측). 행정규칙 명칭은 정제 전 이름이 정답에 가깝다
-    const adminCandidates = [...new Set([query.trim(), stripped].filter(Boolean))]
+    const adminCandidates = [...new Set([stripTrailingParen(query), query.trim(), stripped].filter(Boolean))]
     // 일치 판정에 stripped만 쓰면 안 된다: 정제가 「산업안전보건기준에 관한 규칙」의
     // '기준'을 지워 정식 부령이 "불일치"가 되고, 행정규칙 DB에 비슷한 이름이 있으면
     // 정상 법령에 [행정규칙] 배너가 붙는다 (테스트로 적발). 원본 질의도 함께 대조한다

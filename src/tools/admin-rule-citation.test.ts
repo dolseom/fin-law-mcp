@@ -281,3 +281,15 @@ describe("stripTrailingParen — 검색어·접미사 검사용 (종류 무관 �
     expect(stripTrailingParen("법인세법")).toBe("법인세법")
   })
 })
+
+describe("stripRuleNameMeta — 소관·종류 부연 괄호 (자체 점검)", () => {
+  it("소관+종류 부연은 메타데이터로 본다", () => {
+    expect(stripRuleNameMeta("외국환거래규정(기재부 고시)")).toBe(stripRuleNameMeta("외국환거래규정"))
+    expect(stripRuleNameMeta("조사사무처리규정(국세청 훈령)")).toBe(stripRuleNameMeta("조사사무처리규정"))
+  })
+
+  it("숫자가 든 괄호는 판·편 구분일 수 있어 남긴다", () => {
+    expect(stripRuleNameMeta("A규정(제1권)")).not.toBe(stripRuleNameMeta("A규정"))
+    expect(stripRuleNameMeta("A규정(제1권)")).not.toBe(stripRuleNameMeta("A규정(제2권)"))
+  })
+})
