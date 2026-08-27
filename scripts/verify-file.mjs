@@ -13,10 +13,13 @@
  *   LAW_OC                 (필수) 법제처 OPEN API 키. 저장소 .env에서 자동 로드
  *   FIN_VERIFY_FAIL_EXIT   ✗ 발견 시 종료 코드 (기본 1). Claude Code PostToolUse 훅에서는 2로 둘 것 —
  *                          종료 코드 2일 때만 stderr가 Claude에게 전달된다 (0이면 디버그 로그에만 남는다)
+ *   FIN_VERIFY_WARN_EXIT   사용 보류·미검증 잔여 시 종료 코드 (기본 1 — 비차단 hook error로 표시.
+ *                          FAIL_EXIT=0이면 기본 0). Claude에게 전문을 전달하려면 2
  *   FIN_VERIFY_BASIS_DATE  기준일 YYYY-MM-DD (생략 시 현행)
  *
- * 종료 코드: 0 = ✗ 없음 / 1(또는 FIN_VERIFY_FAIL_EXIT) = ✗ 있음 / 3 = 실행 불가(키·파일 오류)
- * ⚠(확인 실패)는 실패로 치지 않는다 — "없음"이 아니라 "확인 못 함"이므로 경고만 남긴다.
+ * 종료 코드: 0 = 통과 / FAIL_EXIT(기본 1) = ✗ 있음 / WARN_EXIT(기본 1) = 사용 보류·미검증 잔여
+ *           / 3 = 실행 불가(키·파일 오류)
+ * 일반 ⚠(확인 실패)는 실패로 치지 않는다 — "없음"이 아니라 "확인 못 함"이므로 경고만 남긴다.
  */
 
 import { config } from "dotenv"
@@ -31,12 +34,24 @@ config({ path: join(ROOT, ".env"), quiet: true })
 const FAIL_EXIT = Number.isFinite(Number(process.env.FIN_VERIFY_FAIL_EXIT))
   ? Number(process.env.FIN_VERIFY_FAIL_EXIT)
   : 1
+// 사용 보류·미검증 잔여의 종료 코드. 종전에는 0이었는데, PostToolUse에서 종료 코드 0의
+// stderr는 디버그 로그에만 남아 "따로 다시 보고한다"던 보고가 구조적으로 Claude에게
+// 도달 불가였다 (Claude 리뷰 중요 5 — HOOKS.md 자기 문서와 모순). 기본 1(비차단 오류 —
+// 대화 기록에 hook error + stderr 첫 줄 표시). Claude에게 전문을 전달하려면 2로.
+// FAIL_EXIT=0(경고만 모드)이면 이쪽도 0이 기본이다
+const WARN_EXIT = Number.isFinite(Number(process.env.FIN_VERIFY_WARN_EXIT))
+  ? Number(process.env.FIN_VERIFY_WARN_EXIT)
+  : FAIL_EXIT === 0
+    ? 0
+    : 1
 const MAX_BYTES = 512 * 1024
 /** fin_verify의 인용 상한(15건)에 맞춰 문단 단위로 나눈다 — 넘기면 뒷부분이 조용히 미검증된다 */
 const CHUNK_CITATION_LIMIT = 15
 const CHUNK_INTERVAL_MS = Number(process.env.FIN_VERIFY_INTERVAL_MS) || 3_000
-/** 인용 판정 라인 — 마크 뒤에 공백이 온다. 요약 헤더(⚠️…)와 구분하는 유일한 표식이다 */
-const VERDICT_LINE = /^[✓✗⚠]\s/
+/** 인용 판정 라인 — 마크 뒤에 공백이 온다. 요약 헤더(⚠️…)와 구분하는 유일한 표식이다.
+ * ⌛(폐지·연혁 추정)도 판정 라인이다 — 빼면 judged가 미달해 "상한 초과로 잘림"이라는
+ * 사실과 다른 사유가 출력된다 (Claude 리뷰 개선 9) */
+const VERDICT_LINE = /^[✓✗⚠⌛]\s/
 
 /** 훅은 stdin으로 JSON을 준다 — 인자와 stdin 양쪽을 받는다 */
 async function resolveTargetPath() {
@@ -147,8 +162,8 @@ for (let i = 0; i < chunks.length; i++) {
     // 않는다 — startsWith로 거르면 헤더가 ⚠ 1건으로 잘못 잡힌다 (스모크에서 실측)
     if (!VERDICT_LINE.test(t)) continue
     if (t.startsWith("✗")) failLines.push(t)
-    else if (t.startsWith("⚠")) warnLines.push(t)
-    else ok++
+    else if (t.startsWith("✓")) ok++
+    else warnLines.push(t) // ⚠와 ⌛ — 기본 분기를 ✓로 두면 새 마크가 "통과"로 샌다
   }
 }
 
@@ -177,10 +192,12 @@ if (warnLines.length > 0) {
 // soft 강등으로 ⚠가 된 뒤 "통과"로 보고됐다).
 // ✗ 처리보다 **앞에** 둔다 — 뒤에 두면 ✗가 있을 때 exit에 가려 보고되지 않는다
 // (Codex 3차 중요)
+// stderr 첫 줄이 요지를 담아야 한다 — 종료 코드가 2가 아닌 비차단 오류일 때 대화 기록에는
+// "hook error + stderr 첫 줄"만 표시되므로, 선행 개행이 있으면 빈 줄이 첫 줄이 된다
 const holdLines = warnLines.filter((l) => /사용\s*보류|사용을 보류/.test(l))
 if (holdLines.length > 0) {
   console.error(
-    `\n⚠ 사용 보류 ${holdLines.length}건 — 실존이 확인되지 않은 인용입니다. "통과"가 아닙니다:\n` +
+    `⚠ 사용 보류 ${holdLines.length}건 — 실존이 확인되지 않은 인용입니다. "통과"가 아닙니다:\n` +
       holdLines.map((l) => `  ${l}`).join("\n") +
       `\n\n정식 명칭으로 재검증하거나, 법령이 아닌 문서(사내 규정 등)라면 그렇게 표기하세요.`
   )
@@ -188,7 +205,7 @@ if (holdLines.length > 0) {
 
 if (failLines.length > 0) {
   const msg =
-    `\n✗ 실존하지 않는 인용 ${failLines.length}건 — 이 문서는 그대로 쓰면 안 됩니다\n` +
+    `✗ 실존하지 않는 인용 ${failLines.length}건 — 이 문서는 그대로 쓰면 안 됩니다\n` +
     failLines.map((l) => `  ${l}`).join("\n") +
     `\n\n해당 인용을 수정하거나 삭제한 뒤 다시 저장하세요.`
   // 훅에서 Claude가 읽는 경로는 stderr다
@@ -198,16 +215,17 @@ if (failLines.length > 0) {
 
 // 미검증분이 남았으면 "통과"라고 말할 수 없다 — 잘려나간 인용에 환각이 있어도
 // ✗ 집계에 들어오지 않는다. 한 문단에 인용을 16건 넘게 쓰면 16번째부터가 그렇다
-// (Codex 3차 차단: 경고만 찍고 마지막 줄에서 통과로 보고했다)
+// (Codex 3차 차단: 경고만 찍고 마지막 줄에서 통과로 보고했다).
+// 종료 코드 0이면 이 stderr는 어디에도 표시되지 않는다 — WARN_EXIT로 내보낸다 (중요 5)
 if (unjudged > 0) {
   console.error(
-    `\n⚠ 미검증 ${unjudged}건이 남아 "통과"로 판정하지 않습니다 — 검증되지 않은 인용에 ` +
+    `⚠ 미검증 ${unjudged}건이 남아 "통과"로 판정하지 않습니다 — 검증되지 않은 인용에 ` +
       `환각이 있어도 여기서는 드러나지 않습니다. 문단을 나눠 다시 검증하세요.`
   )
-  process.exit(0)
+  process.exit(WARN_EXIT)
 }
 
-if (holdLines.length > 0) process.exit(0)
+if (holdLines.length > 0) process.exit(WARN_EXIT)
 
 console.log("\n인용 검증 통과 — 실존하지 않는 인용 없음")
 process.exit(0)

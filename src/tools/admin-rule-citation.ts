@@ -201,16 +201,21 @@ export async function verifyAdminRuleCitation(
     const hit = await tryVerifyAdminRuleCitation(apiClient, candidates, label, apiKey, signal)
     if (hit) return hit
 
-    // 현행에 없으면 폐지·제명변경 연혁 확인 (환각과 폐지 규칙을 구분)
+    // 현행에 없으면 폐지·제명변경 연혁 확인 (환각과 폐지 규칙을 구분).
+    // 괄호는 떼고 조회한다 — 붙인 채면 폐지 연혁도 항상 0건이다 (Claude 리뷰 중요 3)
     for (const cand of candidates) {
-      const note = await detectAbolishedAdminRule(apiClient, cand, apiKey, signal)
+      const note = await detectAbolishedAdminRule(apiClient, stripTrailingParen(cand), apiKey, signal)
       if (note) {
         const firstLine = note.split("\n").find(line => line.trim()) || note
         return `⌛ ${label} — 폐지·개정 연혁의 행정규칙으로 추정. ${firstLine.trim()}`
       }
     }
 
-    if (SOFT_ADMIN_SUFFIX.test(rawName.trim()) && !STRICT_ADMIN_SUFFIX.test(rawName.trim())) {
+    // 접미사 판정은 괄호를 뗀 이름으로 — "사내 전결기준(2026. 1. 1.) 제3조"처럼 발령일
+    // 괄호가 붙으면 이름이 ')'로 끝나 soft 강등이 빗나가고, 더 정밀한 표기가 오히려
+    // ✗ 환각 낙인을 받는다 (Claude 리뷰 중요 3)
+    const suffixBase = stripTrailingParen(rawName.trim())
+    if (SOFT_ADMIN_SUFFIX.test(suffixBase) && !STRICT_ADMIN_SUFFIX.test(suffixBase)) {
       return `⚠ ${label} — 행정규칙 DB에서 확인 실패 ('${rawName}'이(가) 규칙명이 아닐 수 있음. 정식 명칭 재확인 필요)`
     }
     return `✗ ${label} — [NOT_FOUND] 행정규칙 DB에 해당 규칙 없음 (규칙명 오탈자 또는 존재하지 않는 규칙)`

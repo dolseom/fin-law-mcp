@@ -258,9 +258,14 @@ export async function handleFinArticle(
   const lookupTimer = setTimeout(() => lookupAborter.abort(), Math.max(0, deadlineAt - Date.now()))
 
   // ── ① 법령 확정 ──
+  // 조회·일치 판정은 괄호를 뗀 이름으로 — "법인세법(법률 제19193호로 개정된 것)"을
+  // 그대로 조회하면 실존 법령이 "정상 조회 후 0건 — ✗없음"으로 단정된다.
+  // 12def7e의 괄호 확대가 adminRuleNotice에만 닿고 본 경로에는 안 닿았던 자리
+  // (Claude 리뷰 중요 7 — fin_law_search는 같은 입력의 괄호를 떼고 찾는다)
+  const lawLookup = stripTrailingParen(input.law)
   let law: LawInfo
   try {
-    const laws = await findLaws(apiClient, input.law, undefined, 5)
+    const laws = await findLaws(apiClient, lawLookup, undefined, 5)
     if (laws.length === 0) {
       const notice = await adminRuleNotice(apiClient, input.law, articleLabel, lookupAborter.signal)
       if (notice) return { content: [{ type: "text", text: notice }] }
@@ -275,7 +280,7 @@ export async function handleFinArticle(
       }
     }
     // 정확 매칭 우선(부분매칭 함정 방어: "지방세법"→지방교부세법)
-    const exact = laws.find((l) => resolvedLawMatches(input.law, l.lawName))
+    const exact = laws.find((l) => resolvedLawMatches(lawLookup, l.lawName))
     if (!exact) {
       // LIKE 검색이 이름만 비슷한 법령을 물어와도 실제 대상이 행정규칙일 수 있다
       // (0건일 때만 확인하면 노이즈 1건에 폴백이 꺼진다 — 잔여②와 같은 함정)

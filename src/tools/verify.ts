@@ -73,7 +73,10 @@ interface Citation {
 
 const IP = INTERPUNCT_CHARS // 가운뎃점 5종 — 추출 정규식과 정규화가 같은 집합을 봐야 한다
 // 40자: "고용보험 및 산업재해보상보험의 보험료징수 등에 관한 법률" 같은 장명 법령 수용 (Codex 리뷰)
-const LAW_NAME_CHARS = `[가-힣0-9${IP}\\s]`
+// 공백은 가로 공백만 — \s는 \n을 포함해 제목·직전 줄이 법령명에 통째로 흡수된다
+// ("## 검토 메모\n\n당사 내부 회계관리규정 제5조"의 lawName이 "검토 메모 당사 …"가 되고,
+//  raw의 개행이 훅의 라인 단위 판정 집계를 깨뜨려 hold가 "통과"로 둔갑한다 — Claude 리뷰 차단 1)
+const LAW_NAME_CHARS = `[가-힣0-9${IP} \\t]`
 const ARTICLE_PART = `제\\s*\\d+\\s*조(?:의\\s*\\d+)?`
 const SUFFIX_PART = `((?:\\s*시행령|\\s*시행규칙)?)`
 // 조응 인용 — (?<![가-힣])가 없으면 "노동법 제5조"의 '동법'이 조응으로 매칭돼
@@ -87,8 +90,16 @@ const ANAPHOR_ARTICLE_RE = new RegExp(
   `(?<![가-힣])(같은\\s*법|동법|동\\s*시행령|같은\\s*영|동\\s*시행규칙|같은\\s*규칙|같은\\s*규정|동\\s*규정)${SUFFIX_PART}\\s*(${ARTICLE_PART})`,
   "g"
 )
-// 명시 법령명 + 제N조(의M)
-const LAW_ARTICLE_RE = new RegExp(`(${LAW_NAME_CHARS}{1,40}?(?:법률|법))${SUFFIX_PART}\\s*(${ARTICLE_PART})`, "g")
+// 명시 법령명 + 제N조(의M). 법령명과 조문 사이의 괄호를 선택적으로 받는다 —
+// 판결문식 구법 표기 "구 법인세법(2018. 12. 24. 법률 제16008호로 개정되기 전의 것) 제26조의2"가
+// 어느 패턴에도 걸리지 않아 환각 조문까지 "추출 0건"으로 조용히 통과했다 (Claude 리뷰 차단 2).
+// 괄호는 행정규칙 경로(3ac07ed)에만 넣고 더 빈번한 법률·시행령 쪽을 빠뜨렸던 자리다
+const LAW_ARTICLE_RE = new RegExp(
+  `(${LAW_NAME_CHARS}{1,40}?(?:법률|법))${SUFFIX_PART}(\\s*[(（][^)）]{0,60}[)）])?\\s*(${ARTICLE_PART})`,
+  "g"
+)
+// 괄호 내용이 "…로 개정되기 전의 것"류면 그 자체로 연혁 인용이다 ("구 " 접두가 없어도)
+const HISTORICAL_PAREN_RE = /개정되기\s*전|개정\s*전의\s*것|폐지되기\s*전/
 // 「…」 + 제N조 — 표준 표기. 이 결합 패턴이 없으면 「」 인용은 명칭 실존만 확인하고
 // 조문 검증을 우회한다 (Opus B2: 「법인세법」 제26조가 조문 확인 없이 통과)
 const QUOTED_ARTICLE_RE = new RegExp(`「([^」]{2,40})」\\s*(${ARTICLE_PART})`, "g")
@@ -229,6 +240,16 @@ function nameForSuffixCheck(name: string): string {
   return stripped || name
 }
 
+/**
+ * 매치 직전이 "구 "인가 — 「」 인용의 연혁 표지. path 1은 kept 슬라이스로 같은 검사를
+ * 하지만 「」 경로는 접두가 매치 밖에 있어 별도로 본다. 이게 없으면 '구 「법인세법」
+ * 제26조'가 raw에서 "구"를 잃고 현행 ✓를 받는다 (Claude 리뷰 중요 6 — Opus 중요 2의
+ * 수정이 무따옴표 경로에만 닿았던 절반 수정)
+ */
+function hasHistoricalPrefix(text: string, idx: number): boolean {
+  return /(?:^|[\s.,;·(（])구\s+$/.test(text.slice(Math.max(0, idx - 8), idx))
+}
+
 interface Hit {
   idx: number
   c: Citation
@@ -252,7 +273,7 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
 
   // 1) 명시 법령명 + 조문
   for (const m of text.matchAll(LAW_ARTICLE_RE)) {
-    const [, namePart, suffix, article] = m
+    const [, namePart, suffix, paren, article] = m
     const uncutBase = cleanLawName(namePart)
     const base = cleanLawName(trimToLawName(namePart))
     // 어절 컷 후 남은 게 조응 표현("동법")이나 외자("법")면 명시 인용이 아니다 —
@@ -262,8 +283,11 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     const end = m.index! + m[0].length
     // raw는 컷으로 버린 선행 문맥을 제외해 재구성 ("임원 상여금은 부가가치세법 제1조" 방지).
     // lastIndexOf로 컷 지점을 잡는다 — indexOf는 같은 법령명이 앞에도 나오면 엉뚱한
-    // 위치를 집어 raw에 문맥이 남는다 ("소득세법에 따라 소득세법 제12조", Opus 개선)
-    const kept = m[0].lastIndexOf(base.split(" ")[0])
+    // 위치를 집어 raw에 문맥이 남는다 ("소득세법에 따라 소득세법 제12조", Opus 개선).
+    // 탐색은 이름·접미사 구간까지만 — 괄호 안에 같은 이름이 나오면 lastIndexOf가
+    // 괄호 안쪽을 집어 raw가 괄호 중간부터 시작한다
+    const nameHead = namePart + (suffix || "")
+    const kept = nameHead.lastIndexOf(base.split(" ")[0])
     let raw = (kept > 0 ? m[0].slice(kept) : m[0]).trim()
     // "구 법인세법" — 연혁 인용 표지. 문맥 컷이 "구"를 지우면 어떤 인용이 검증됐는지
     // 사용자가 알 수 없고, 개정 전 조문을 가리킨 인용에 현행 ✓가 찍힌다 (Opus 리뷰 중요 2)
@@ -272,6 +296,8 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
       raw = `구 ${raw}`
       historical = true
     }
+    // "…(법률 제N호로 개정되기 전의 것)" — 괄호 내용 자체가 연혁 표지다 (구 접두 없이도)
+    if (paren && HISTORICAL_PAREN_RE.test(paren)) historical = true
     hits.push({
       idx: m.index!,
       c: {
@@ -325,9 +351,16 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
       // 고시·훈령류는 본법 선행사가 되지 않지만, "같은 규칙"의 대상도 아니다
       hits.push({ idx: m.index!, c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "행정규칙" } })
     } else if (LAW_LIKE_SUFFIX_RE.test(suffixName)) {
+      const historical = hasHistoricalPrefix(text, m.index!)
       hits.push({
         idx: m.index!,
-        c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "법령조문" },
+        c: {
+          raw: historical ? `구 ${m[0].trim()}` : m[0].trim(),
+          lawName: name,
+          article: normArticle(m[2]),
+          kind: "법령조문",
+          ...(historical ? { historical: true } : {}),
+        },
         // 「…에 관한 규칙」은 본법이 아니므로 "같은 법"의 선행사가 되면 안 된다.
         // 대신 "같은 규칙"의 선행사가 된다. 「…규정」은 어느 쪽 선행사도 아니다
         ...(isRuleLikeName(name)
@@ -349,9 +382,15 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     if (isAdminRuleName(suffixName)) {
       hits.push({ idx: m.index!, c: { raw: m[0], lawName: name, kind: "행정규칙" } })
     } else if (LAW_LIKE_SUFFIX_RE.test(suffixName)) {
+      const historical = hasHistoricalPrefix(text, m.index!)
       hits.push({
         idx: m.index!,
-        c: { raw: m[0], lawName: name, kind: "법령" },
+        c: {
+          raw: historical ? `구 ${m[0]}` : m[0],
+          lawName: name,
+          kind: "법령",
+          ...(historical ? { historical: true } : {}),
+        },
         ...(isRuleLikeName(name)
           ? isRuleAntecedentName(name)
             ? { ruleAntecedent: name }
@@ -372,8 +411,9 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
   const ADMIN_ARTICLE_RE = new RegExp(
     // 접미사 뒤의 발령일·발령번호 괄호를 함께 받는다 — "식품등의 표시기준(2024. 1. 15.)
     // 제1조"가 통째로 매칭되지 않아 추출 자체가 안 되던 자리 (Codex 3차 차단).
-    // 괄호는 선택이므로 기존 매칭에는 영향이 없다
-    `([가-힣0-9${IP}\\s]{2,30}?(?:고시|훈령|예규|통칙|기준|지침|규정|규칙)(?:\\s*[(（][^)）]{0,40}[)）])?)\\s*(${ARTICLE_PART})`,
+    // 괄호는 선택이므로 기존 매칭에는 영향이 없다.
+    // 이름 문자에 \n을 넣으면 안 된다 — 제목이 흡수돼 규정류는 복구 수단이 없다 (차단 1)
+    `(${LAW_NAME_CHARS}{2,30}?(?:고시|훈령|예규|통칙|기준|지침|규정|규칙)(?:\\s*[(（][^)）]{0,40}[)）])?)\\s*(${ARTICLE_PART})`,
     "g"
   )
   for (const m of text.matchAll(ADMIN_ARTICLE_RE)) {
@@ -459,6 +499,9 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
         lastRegSoft = !!h.c.soft
       }
     }
+    // raw는 반드시 한 줄로 — 「」 안 개행 등으로 raw에 \n이 남으면 판정 라인이 여러
+    // 물리 라인으로 쪼개져 verify-file 훅의 라인 단위 집계가 깨진다 (차단 1의 두 번째 방어선)
+    h.c.raw = h.c.raw.replace(/\s+/g, " ").trim()
     // dedup 키에 위치를 포함한다 — 서로 다른 법의 인용이 같은 lawName으로 절단됐을 때
     // 한 건이 조용히 증발하던 문제 방지 (Opus B-3②)
     const key = `${h.c.kind}|${h.c.lawName}|${h.c.article || ""}|${h.c.raw}`
@@ -541,7 +584,17 @@ async function verifyLawCitation(
     const msg = e instanceof Error ? e.message : String(e)
     return { mark: "⚠", line: `⚠ ${c.raw} — 조회 실패로 판정 불가 (없음 아님): ${msg}` }
   }
-  if (!best && laws.length === 0) {
+  if (!best) {
+    // 정확 일치가 없으면 유사 후보(LIKE 노이즈)가 있어도 아래 확인(행정규칙 폴백·폐지
+    // 연혁·약칭/soft hold)을 전부 거친다 — law_search·article은 잔여②에서 "노이즈 1건에
+    // 폴백이 꺼진다"며 정확 일치 게이트로 고쳤는데 verify만 0건 게이트로 남아,
+    // "당사 취업규칙"이 「유해ㆍ위험작업의 취업 제한에 관한 규칙」류 노이즈에 가려
+    // soft/hold 없이 일반 ⚠로 빠지고 훅이 "통과"를 보고했다 (Claude 리뷰 중요 4 —
+    // 절반 수정의 일곱 번째 사례)
+    const nearNote =
+      laws.length > 0
+        ? ` · 법령 DB에는 유사 명칭만 검색됨: ${laws.slice(0, 2).map((l) => `「${l.lawName}」`).join(", ")} (정확 일치 아님)`
+        : ""
     // 「…규정」·「…규칙」은 법령(대통령령·부령)일 수도, 행정규칙(고시·훈령)일 수도 있다.
     // 법령 DB 0건만으로 ✗를 찍으면 「외국환거래규정」(기재부 고시)·「조사사무처리규정」
     // (국세청 훈령) 같은 실존 문서에 '환각 의심' 낙인이 찍힌다 — 행정규칙 DB를
@@ -549,7 +602,7 @@ async function verifyLawCitation(
     let adminChecked = false
     if (isRuleLikeName(lookupName)) {
       if (signal?.aborted) {
-        return { mark: "⚠", line: `⚠ ${c.raw} — 법령 DB 0건, 시간 상한 도달로 행정규칙 DB 미확인 — 판정 불가 (없음 아님)` }
+        return { mark: "⚠", line: `⚠ ${c.raw} — 법령 DB 정확 일치 0건, 시간 상한 도달로 행정규칙 DB 미확인 — 판정 불가 (없음 아님)` }
       }
       try {
         const adminHit = await tryVerifyAdminRuleCitation(apiClient, [lookupName], c.raw, undefined, signal)
@@ -570,7 +623,7 @@ async function verifyLawCitation(
         adminChecked = true
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
-        return { mark: "⚠", line: `⚠ ${c.raw} — 법령 DB 0건, 행정규칙 DB 조회 실패로 판정 불가 (없음 아님): ${msg}` }
+        return { mark: "⚠", line: `⚠ ${c.raw} — 법령 DB 정확 일치 0건, 행정규칙 DB 조회 실패로 판정 불가 (없음 아님): ${msg}` }
       }
     }
     // 폐지·연혁 확인 — 현행 0건이 '지어낸 법령'인지 '폐지된 법령'인지 가른다.
@@ -597,6 +650,28 @@ async function verifyLawCitation(
       }
       if (!signal?.aborted) histChecked = true
     }
+    const dbNote =
+      laws.length > 0
+        ? `「${c.lawName}」 — 법령 DB 정확 일치 없음${adminChecked ? " · 행정규칙 DB 0건" : ""}${histChecked ? " · 폐지·연혁 DB 0건" : ""}${nearNote}`
+        : adminChecked && histChecked
+          ? `「${c.lawName}」 법령·행정규칙·연혁 DB 모두 0건 (정상 조회)`
+          : histChecked
+            ? `법령 「${c.lawName}」 실존하지 않음 — 현행·연혁 모두 0건 (정상 조회)`
+            : `법령 「${c.lawName}」 실존하지 않음 (정상 조회 후 0건)`
+    // 따옴표 없는 규정·규칙은 사내 문서일 수 있다 — "당사 취업규칙 제12조"는 정당한
+    // 인용인데 법령 DB에는 없다. ✗로 단정하면 실무자의 정상 문서를 환각으로 낙인찍는다.
+    // hold로 사용 보류는 요구하되 "없음" 단정은 하지 않는다.
+    // 약칭 판정보다 먼저 본다 — "당사 취업규칙"(압축 6자)은 약칭 형태와도 겹치지만
+    // 사내 문서 안내가 더 정확하다 (둘 다 hold ⚠라 판정 강도는 같다).
+    // "[사용 보류]"를 앞쪽에 두는 이유: 훅은 이 문구로 hold를 식별하는데, 라인 끝에만
+    // 있으면 출력 절단 시 hold가 조용히 사라진다 (Claude 리뷰 개선 10)
+    if (c.soft) {
+      return {
+        mark: "⚠",
+        hold: true,
+        line: `⚠ ${c.raw} — [사용 보류] ${dbNote}. 사내 규정·사규 등 법령이 아닌 문서일 수 있어 "없음"으로 단정하지 않습니다 — 법령 인용이라면 정식 명칭을 확인하세요 (그 전까지 사용 보류)`,
+      }
+    }
     // 미등재 약칭("조특법")에 대한 LIKE 0건은 법령 부존재의 증거가 아니라 별칭 사전의
     // 공백일 뿐이다. ✗(환각 의심)로 단정하면 실무자가 맞는 인용을 지운다 (Opus B-2).
     // 단, ⚠로만 두면 순수 환각("탄소세법")이 '사용 금지' 경고 없이 빠져나간다 —
@@ -605,34 +680,19 @@ async function verifyLawCitation(
       return {
         mark: "⚠",
         hold: true,
-        line: `⚠ ${c.raw} — 「${c.lawName}」은 약칭 형태이나 ${histChecked ? "현행·연혁 법령 DB 어디에도 없습니다" : "법제처 검색에 잡히지 않았습니다"} (미등재 약칭 또는 환각 — 없음 단정 아님). 정식 명칭으로 재검증 전까지 이 인용의 사용을 보류하세요`,
+        line: `⚠ ${c.raw} — [사용 보류] 「${c.lawName}」은 약칭 형태이나 ${histChecked ? "현행·연혁 법령 DB 어디에도 없습니다" : "법제처 검색에 잡히지 않았습니다"}${nearNote} (미등재 약칭 또는 환각 — 없음 단정 아님). 정식 명칭으로 재검증 전까지 이 인용의 사용을 보류하세요`,
       }
     }
-    const dbNote =
-      adminChecked && histChecked
-        ? `「${c.lawName}」 법령·행정규칙·연혁 DB 모두 0건 (정상 조회)`
-        : histChecked
-          ? `법령 「${c.lawName}」 실존하지 않음 — 현행·연혁 모두 0건 (정상 조회)`
-          : `법령 「${c.lawName}」 실존하지 않음 (정상 조회 후 0건)`
-    // 따옴표 없는 규정·규칙은 사내 문서일 수 있다 — "당사 취업규칙 제12조"는 정당한
-    // 인용인데 법령 DB에는 없다. ✗로 단정하면 실무자의 정상 문서를 환각으로 낙인찍는다.
-    // hold로 사용 보류는 요구하되 "없음" 단정은 하지 않는다
-    if (c.soft) {
+    if (laws.length > 0) {
+      // 유사 후보만 있는 경우 — ✗(환각 의심) 단정은 하지 않되, 어느 확인을 거쳤는지 남긴다
+      const alias = resolveLawAlias(lookupName)
+      const cutNote = c.uncut ? ` / 원문 표기: 「${c.uncut}」 (문맥 제거 후 「${c.lawName}」로 조회)` : ""
       return {
         mark: "⚠",
-        hold: true,
-        line: `⚠ ${c.raw} — ${dbNote}. 사내 규정·사규 등 법령이 아닌 문서일 수 있어 "없음"으로 단정하지 않습니다 — 법령 인용이라면 정식 명칭을 확인하세요 (그 전까지 사용 보류)`,
+        line: `⚠ ${c.raw} — 정확 일치 법령 없음 (유사: ${laws.slice(0, 2).map((l) => `「${l.lawName}」`).join(", ")}${alias.canonical !== lookupName ? ` / 별칭 해석: ${alias.canonical}` : ""}${cutNote}). 표기 확인 필요`,
       }
     }
     return { mark: "✗", line: `✗ ${c.raw} — ${dbNote}. 법령명 오기 또는 환각 의심` }
-  }
-  if (!best) {
-    const alias = resolveLawAlias(c.lawName)
-    const cutNote = c.uncut ? ` / 원문 표기: 「${c.uncut}」 (문맥 제거 후 「${c.lawName}」로 조회)` : ""
-    return {
-      mark: "⚠",
-      line: `⚠ ${c.raw} — 정확 일치 법령 없음 (유사: ${laws.slice(0, 2).map((l) => `「${l.lawName}」`).join(", ")}${alias.canonical !== c.lawName ? ` / 별칭 해석: ${alias.canonical}` : ""}${cutNote}). 표기 확인 필요`,
-    }
   }
   const trimNote =
     usedName !== c.lawName ? ` · 표기 주의: 「${c.lawName}」에서 선행 문맥을 제외한 「${usedName}」로 해석` : ""
@@ -780,7 +840,12 @@ export async function handleFinVerify(
   // 미확인 약칭은 ⚠(없음 단정 아님)이지만 환각일 수도 있다 — 조용히 통과시키지 않는다
   if (results.some((r) => r.hold)) out += `⚠️ 미확인 약칭 인용 있음 — 정식 명칭으로 재검증 전까지 해당 인용 사용 보류\n`
   if (counts["⚠"] > 0) out += `※ ⚠는 "없음"이 아니라 확인 실패입니다 — 재시도하거나 원문으로 확인하세요\n`
-  out += "\n" + results.map((r) => r.line).join("\n")
+  // 절단은 라인 단위로 — 전체 문자 절단(truncateWithHint)만 있으면 15건 상한 안에서도
+  // 뒤쪽 판정 라인(✗ 포함)이 통째로 잘려 훅에서 judged 미달 → "통과" 강등이 될 수 있다
+  // (Claude 리뷰 개선 10). 라인별 상한 480자 × 15건 + 헤더·푸터 < 8000이라
+  // 판정 라인 자체는 절대 잘리지 않는다. 마크와 raw는 라인 앞쪽이라 항상 살아남는다
+  const capLine = (s: string) => (s.length <= 480 ? s : s.slice(0, 480) + " …(세부 절단 — 이 인용은 단독 재검증)")
+  out += "\n" + results.map((r) => capLine(r.line)).join("\n")
   out += `\n\n${SOURCE_FOOTER}`
 
   return { content: [{ type: "text", text: truncateWithHint(out, 8000, "인용을 나눠 재검증") }] }
