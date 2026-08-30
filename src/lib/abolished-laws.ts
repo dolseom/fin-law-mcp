@@ -62,18 +62,28 @@ export function parseAbolishedLawsXml(xmlText: string, query: string): Abolished
     .sort((a, b) => (a.name < b.name ? -1 : 1))
 }
 
-/** 폐지 법령 조회 — 보조 정보이므로 실패는 전파하지 않고 빈 배열 */
+/**
+ * 폐지 법령 조회 — 보조 정보이므로 실패는 전파하지 않고 빈 배열.
+ *
+ * ⚠ 이 함수를 **판정**(환각 여부·부존재 단정)에 쓰면 안 된다 — 실패가 빈 배열로 위장돼
+ * "폐지 이력 없음"과 구분되지 않는다 (Codex 4차 개선 지적. 현재 활성 소비자 없음 —
+ * 배선하려면 lookupFailed를 구분하는 findRepealedLaw를 쓸 것). 안내문 동봉 같은
+ * 보조 용도 전용이다.
+ */
 export async function findAbolishedLaws(
   apiClient: LawApiClient,
   query: string,
   apiKey?: string
 ): Promise<AbolishedLaw[]> {
-  const cacheKey = `abolished-law:${query.toLowerCase().trim()}`
+  // 명칭 끝 괄호(발령일·개정 부연)는 떼고 조회한다 — 붙인 채면 eflaw도 항상 0건이다.
+  // tools/admin-rule-citation.ts의 stripTrailingParen과 같은 규칙 (lib→tools 순환 방지 인라인)
+  const lookup = query.replace(/\s*[([［【][^)\]］】]{0,60}[)\]］】]\s*$/, "").trim() || query.trim()
+  const cacheKey = `abolished-law:${lookup.toLowerCase()}`
   const cached = lawCache.get<AbolishedLaw[]>(cacheKey)
   if (cached) return cached
   try {
-    const xml = await apiClient.searchLaw(query, apiKey, 50, "eflaw")
-    const parsed = parseAbolishedLawsXml(xml, query)
+    const xml = await apiClient.searchLaw(lookup, apiKey, 50, "eflaw")
+    const parsed = parseAbolishedLawsXml(xml, lookup)
     lawCache.set(cacheKey, parsed, 60 * 60 * 1000)
     return parsed
   } catch {

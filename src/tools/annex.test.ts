@@ -3,7 +3,8 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { parseAnnexSelector, titleMatchesAnnexNo, extractBundledSection, isUnnumberedAnnex, formatAnnexNo } from "./annex.js"
+import { parseAnnexSelector, titleMatchesAnnexNo, extractBundledSection, isUnnumberedAnnex, formatAnnexNo, handleFinAnnex } from "./annex.js"
+import type { LawApiClient } from "../lib/api-client.js"
 
 describe("parseAnnexSelector — 별표 선택값 해석", () => {
   it("정수 입력은 6자리 코드 후보(본번호×100)를 만든다", () => {
@@ -115,5 +116,35 @@ describe("formatAnnexNo — 법제처 6자리 코드 → 표시 표기", () => {
   it("코드 형식이 아니면 그대로 둔다", () => {
     expect(formatAnnexNo("별표 6")).toBe("별표 6")
     expect(formatAnnexNo("")).toBe("")
+  })
+})
+
+/**
+ * Codex 4차 중요 회귀 — 별표 직행 경로만 괄호를 못 벗겨, "법인세법 시행규칙(2024. 3. 22.
+ * 개정)" 같은 입력이 실존 별표를 "정상 조회 결과 없음"으로 단정하던 문제.
+ */
+describe("handleFinAnnex — 괄호 붙은 법령명 (Codex 4차 중요)", () => {
+  it("조회·소속 대조는 괄호를 뗀 이름으로 간다", async () => {
+    let requested = ""
+    const client = {
+      getAnnexes: async (p: { lawName: string }) => {
+        requested = p.lawName
+        return JSON.stringify({
+          별표목록: [
+            {
+              별표명: "업종별 자산의 기준내용연수와 내용연수범위표",
+              별표번호: "000600",
+              법령명: "법인세법 시행규칙",
+            },
+          ],
+        })
+      },
+    } as unknown as LawApiClient
+    const res = await handleFinAnnex(client, { law: "법인세법 시행규칙(2024. 3. 22. 개정)" })
+    expect(requested).toBe("법인세법 시행규칙")
+    const text = res.content[0].text
+    expect(text).toContain("1건")
+    expect(text).not.toContain("0건")
+    expect(text).toContain("기준내용연수") // 소속 대조(sameLawFamily)도 괄호 뗀 이름 기준
   })
 })

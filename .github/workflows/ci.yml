@@ -30,9 +30,11 @@ jobs:
 
       - run: npm run typecheck
 
-      - run: npm test
-
+      # 훅 회귀 테스트(test/verify-file-hook.test.ts)는 build/를 import해 서브프로세스로
+      # 돈다 — build가 test보다 앞이어야 CI에서 skip되지 않는다
       - run: npm run build
+
+      - run: npm test
 
       # 클린 체크아웃에서 실제로 배포 가능한 패키지가 나오는지 확인한다
       # (build/가 gitignore라 prepack 훅이 없으면 빈 패키지가 나온 이력이 있다)

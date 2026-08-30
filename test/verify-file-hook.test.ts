@@ -108,5 +108,33 @@ describe.skipIf(!hasBuild)("verify-file 훅 — ⌛ 판정 집계 (개선 9)", (
     expect(r.stdout).toContain("⌛")
     expect(r.stdout).toContain("✓0 / ✗0 / ⚠1") // ⌛가 judged에 들어간다
     expect(r.stdout + r.stderr).not.toContain("미검증") // 집계 미달이면 여기가 터진다
+    // ⌛는 "통과"가 아니다 — 폐지 규칙 인용을 그대로 두면 안 된다 (Codex 4차 차단)
+    expect(r.stdout).not.toContain("인용 검증 통과")
+    expect(r.status).toBe(1)
+  }, 30_000)
+})
+
+/**
+ * Codex 4차 차단 회귀 — 일반 ⚠(조회 실패)가 exit 0으로 끝나면, 검증이 하나도 안 된
+ * 문서(전 인용 API 장애)가 "통과"로 읽힌다. 0의 stderr는 디버그 로그에만 남는다.
+ */
+describe.skipIf(!hasBuild)("verify-file 훅 — 일반 ⚠도 통과로 삼키지 않는다 (Codex 4차 차단)", () => {
+  it("전 인용이 조회 실패(⚠)면 WARN_EXIT로 끝나고 판정 불가를 보고한다", () => {
+    const r = runHook("법인세법 제26조를 검토한다.\n", { scenario: "api-error" })
+    expect(r.stdout).toContain("✓0 / ✗0 / ⚠1")
+    expect(r.stdout).not.toContain("인용 검증 통과")
+    expect(r.stderr).toContain("판정 불가")
+    expect(r.stderr).not.toContain("삭제한 뒤") // 확인 실패는 삭제 지시가 아니다
+    expect(r.status).toBe(1)
+  }, 30_000)
+
+  it("FAIL_EXIT=0 + WARN_EXIT=2 혼합에서도 보류 보고가 ✗의 exit 0에 가려지지 않는다", () => {
+    // ✗(환각)와 hold(사내 규정)가 한 문서에 — 종료 코드는 해당 코드의 최댓값(2)
+    const r = runHook("가상자산투기억제법 제3조와 당사 내부 회계관리규정 제5조를 검토한다.\n", {
+      env: { FIN_VERIFY_FAIL_EXIT: "0", FIN_VERIFY_WARN_EXIT: "2" },
+    })
+    expect(r.stderr).toContain("실존하지 않는 인용")
+    expect(r.stderr).toContain("사용 보류")
+    expect(r.status).toBe(2)
   }, 30_000)
 })

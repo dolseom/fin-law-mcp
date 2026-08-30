@@ -169,3 +169,35 @@ describe("fin_article — 행정규칙 접두 일치 (Codex 2차 차단 2)", () 
     expect(r.content[0].text).not.toContain("AMBIGUOUS")
   })
 })
+
+/**
+ * 법제처 lawService.do 거동 변화 대응 (2026-08-30 실측) — efYd 없는 eflaw 호출이
+ * HTML 오류 페이지로 돌아오기 시작했다 (같은 MST·JO의 target=law는 정상,
+ * eflaw+efYd 동반도 정상). 현행 조회가 eflaw로 남아 있으면 fin_article 본문이
+ * 전면 "⚠ 조회 실패"가 되고, 위임 본문 동봉은 catch에 삼켜져 조용히 빠진다.
+ */
+describe("fin_article — 현행 조문 조회는 target=law", () => {
+  const LAW_HIT_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<LawSearch><totalCnt>1</totalCnt>
+  <law id="1"><법령명한글>법인세법</법령명한글><법령일련번호>280349</법령일련번호><법령ID>1563</법령ID>
+    <법령구분명>법률</법령구분명><소관부처명>기획재정부</소관부처명>
+    <시행일자>20260701</시행일자><제개정구분명>일부개정</제개정구분명><현행연혁코드>현행</현행연혁코드></law>
+</LawSearch>`
+
+  it("efYd 없는 lawService 호출에 eflaw를 쓰지 않는다", async () => {
+    const targets: string[] = []
+    const client = {
+      searchLaw: async () => LAW_HIT_XML,
+      fetchApi: async (p: { endpoint: string; target: string }) => {
+        if (p.endpoint === "lawService.do") targets.push(p.target)
+        return '{"법령":{}}'
+      },
+      searchAdminRule: async () => ADMRUL_EMPTY_XML,
+      getThreeTier: async () => "{}",
+      getAnnexes: async () => "{}",
+    } as unknown as LawApiClient
+    await handleFinArticle(client, { law: "법인세법", article: "제26조" })
+    expect(targets.length).toBeGreaterThan(0)
+    expect(targets.every((t) => t === "law")).toBe(true)
+  })
+})

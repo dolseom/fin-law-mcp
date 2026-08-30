@@ -746,3 +746,52 @@ describe("가지급금인정이자 — 이자율 0% 거부 (Claude 리뷰 중요
     expect(t).toContain("9,000,000")
   })
 })
+
+/**
+ * Codex 4차 중요 회귀 — 개별 입력이 각자 "유효"해도 곱셈에서 부동소수점 overflow가
+ * 나면 ∞·NaN이 isError 없이 확신형 결과로 출력되던 문제 (principal 1e308 →
+ * "이자 시가: ∞원" + 익금산입 판정, severance_pay 1e308 → "NaN원").
+ */
+describe("극단값 입력 거부 (Codex 4차 중요 — ∞·NaN 방지)", () => {
+  it("principal 1e308은 거부된다 (종전: '이자 시가: ∞원' 확신형 출력)", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "가지급금인정이자",
+      principal: 1e308,
+      days: 365,
+      rate_type: "당좌대출이자율",
+    })
+    expect(res.isError).toBe(true)
+    expect(res.content[0].text).toContain("1경")
+  })
+
+  it("severance_pay 1e308도 거부된다 (종전: 'NaN원')", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "퇴직소득세",
+      severance_pay: 1e308,
+      service_years: 1,
+    })
+    expect(res.isError).toBe(true)
+  })
+
+  it("days 100년 초과는 거부된다", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "가지급금인정이자",
+      principal: 100_000_000,
+      days: 50_000,
+      rate_type: "당좌대출이자율",
+    })
+    expect(res.isError).toBe(true)
+    expect(res.content[0].text).toContain("36,600")
+  })
+
+  it("상한 안의 큰 값은 정상 계산된다 (과잉 거부 방지 — ∞·NaN 없이)", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "가지급금인정이자",
+      principal: 1e15,
+      days: 365,
+      rate_type: "당좌대출이자율",
+    })
+    expect(res.isError).toBeFalsy()
+    expect(res.content[0].text).not.toMatch(/∞|NaN/)
+  })
+})

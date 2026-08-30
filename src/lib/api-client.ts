@@ -192,8 +192,10 @@ export class LawApiClient {
     efYd?: string
     apiKey?: string
   }): Promise<string> {
+    // 현행 조회는 target=law — 법제처가 efYd 없는 eflaw lawService를 HTML 오류로
+    // 돌려주기 시작했다 (2026-08-30 실측). eflaw는 기준일(efYd) 조회에만
     const apiParams = new URLSearchParams({
-      target: "eflaw",
+      target: params.efYd ? "eflaw" : "law",
       OC: this.getApiKey(params.apiKey),
       type: "JSON",
     })

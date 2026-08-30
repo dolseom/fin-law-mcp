@@ -98,8 +98,11 @@ const LAW_ARTICLE_RE = new RegExp(
   `(${LAW_NAME_CHARS}{1,40}?(?:법률|법))${SUFFIX_PART}(\\s*[(（][^)）]{0,60}[)）])?\\s*(${ARTICLE_PART})`,
   "g"
 )
-// 괄호 내용이 "…로 개정되기 전의 것"류면 그 자체로 연혁 인용이다 ("구 " 접두가 없어도)
-const HISTORICAL_PAREN_RE = /개정되기\s*전|개정\s*전의\s*것|폐지되기\s*전/
+// 괄호 내용이 "…로 개정되기 전의 것"류면 그 자체로 연혁 인용이다 ("구 " 접두가 없어도).
+// "개정 전"·"전부개정 전"·"일부개정 전"·"폐지 전"도 연혁 표지다 — "되기"를 필수로 두면
+// 이 변형들이 현행 ✓를 받는다 (Codex 4차 중요). 단 "전" 뒤에 한글이 이어지면
+// ("개정 전제로") 표지가 아니다 — "전의 것"만 예외로 허용
+const HISTORICAL_PAREN_RE = /(?:개정|폐지)\s*(?:되기\s*)?전(?:의\s*것)?(?![가-힣])/
 // 「…」 + 제N조 — 표준 표기. 이 결합 패턴이 없으면 「」 인용은 명칭 실존만 확인하고
 // 조문 검증을 우회한다 (Opus B2: 「법인세법」 제26조가 조문 확인 없이 통과)
 const QUOTED_ARTICLE_RE = new RegExp(`「([^」]{2,40})」\\s*(${ARTICLE_PART})`, "g")
@@ -265,22 +268,62 @@ export function extractCitations(text: string): Citation[] {
   return extractCitationsWithTotal(text).citations
 }
 
+// 제목·목록·표·인용구 라인 — 줄 잇기(joinWrappedLines)의 경계가 된다
+const MD_STRUCT_LINE_RE = /^\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|\||>)/
+
+/**
+ * 줄바꿈으로 감싸인(soft-wrap) 인용 복원 — 차단 1(개행 흡수)의 반대 방향.
+ *
+ * 이름 문자 클래스에서 \n을 빼자 "국가를 당사자로 하는 계약에 관한\n법률 제7조"처럼
+ * 법령명이 줄 중간에서 감싸진 정상 인용이 추출 0건이 됐다 (Codex 4차 차단 — 0건이면
+ * 훅이 그대로 통과한다). 앞 줄이 구두점 없이 한글로 끝나고 다음 줄이 한글로 이어지면
+ * 같은 문장이 감싸진 것으로 보고 한 줄로 잇는다.
+ *
+ * 제목 흡수(차단 1)가 재발하지 않는 이유: 마크다운 구조 라인(#·목록·표·인용구)은 잇지
+ * 않고, 빈 줄(문단 경계)은 조건을 만족하지 못하며, 한국어 산문의 문장 끝은 거의 항상
+ * 구두점('.'·다 등 뒤 마침표)으로 끝난다. 구두점 없는 평문 제목이 바로 위에 붙는
+ * 잔여 케이스는 이어진 뒤에도 기존 어절 컷·접속 부사 제거가 같은 줄 문맥과 동일하게
+ * 처리한다 — 단일 라인 의미론과 같아질 뿐 더 나빠지지 않는다.
+ */
+function joinWrappedLines(text: string): string {
+  const lines = text.split("\n")
+  const out: string[] = []
+  for (const line of lines) {
+    const prev = out[out.length - 1]
+    if (
+      prev !== undefined &&
+      /[가-힣][ \t]*$/.test(prev) &&
+      /^[ \t]*[가-힣]/.test(line) &&
+      !MD_STRUCT_LINE_RE.test(prev) &&
+      !MD_STRUCT_LINE_RE.test(line)
+    ) {
+      out[out.length - 1] = `${prev.replace(/[ \t]+$/, "")} ${line.replace(/^[ \t]+/, "")}`
+    } else {
+      out.push(line)
+    }
+  }
+  return out.join("\n")
+}
+
 /** 절단 전 총 발견 건수 포함 — 16번째 이후 인용이 조용히 사라지지 않게 (Opus I4) */
 export function extractCitationsWithTotal(text: string): { citations: Citation[]; total: number } {
+  // 줄바꿈으로 감싸인 인용을 먼저 복원한다 — 이후 모든 패스·오프셋은 이 텍스트 기준
+  text = joinWrappedLines(text)
   const hits: Hit[] = []
   const articleEnds = new Set<number>() // 같은 조문 토큰의 이중 매치 방지 (명시 우선)
   const quotedStarts = new Set<number>() // 「」+조문으로 소비된 「 위치 — 단독 「」 중복 방지
 
-  // 1) 명시 법령명 + 조문
-  for (const m of text.matchAll(LAW_ARTICLE_RE)) {
+  // 1) 명시 법령명 + 조문.
+  // offset: 괄호 안 재탐색 시 매치의 절대 위치 보정 (0 = 본문 직접 매치)
+  const processLawArticleMatch = (m: RegExpMatchArray, offset: number): void => {
     const [, namePart, suffix, paren, article] = m
     const uncutBase = cleanLawName(namePart)
     const base = cleanLawName(trimToLawName(namePart))
     // 어절 컷 후 남은 게 조응 표현("동법")이나 외자("법")면 명시 인용이 아니다 —
     // 조응 정규식이 같은 자리를 따로 매칭한다
-    if (base.length < 2 || ANAPHOR_WORDS.has(base.replace(/\s+/g, ""))) continue
+    if (base.length < 2 || ANAPHOR_WORDS.has(base.replace(/\s+/g, ""))) return
     const suffixNorm = suffix ? suffix.trim() : ""
-    const end = m.index! + m[0].length
+    const end = offset + m.index! + m[0].length
     // raw는 컷으로 버린 선행 문맥을 제외해 재구성 ("임원 상여금은 부가가치세법 제1조" 방지).
     // lastIndexOf로 컷 지점을 잡는다 — indexOf는 같은 법령명이 앞에도 나오면 엉뚱한
     // 위치를 집어 raw에 문맥이 남는다 ("소득세법에 따라 소득세법 제12조", Opus 개선).
@@ -299,7 +342,7 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     // "…(법률 제N호로 개정되기 전의 것)" — 괄호 내용 자체가 연혁 표지다 (구 접두 없이도)
     if (paren && HISTORICAL_PAREN_RE.test(paren)) historical = true
     hits.push({
-      idx: m.index!,
+      idx: offset + m.index!,
       c: {
         raw,
         lawName: suffixNorm ? `${base} ${suffixNorm}` : base,
@@ -311,6 +354,20 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
       antecedent: base,
     })
     articleEnds.add(end)
+    // 괄호 안의 별도 인용 — "법인세법(소득세법 제12조) 제26조"에서 바깥 매치가 괄호를
+    // 소비하면 안쪽 「소득세법 제12조」는 이 패스에서 영영 매칭되지 않는다 (Codex 4차
+    // 중요 — 괄호 허용의 반작용). 괄호 내용을 재탐색해 별도 인용으로 살린다.
+    // 재귀는 1단계에서 끝난다 — 괄호 내용([^)）])에는 닫는 괄호가 없어 안쪽 매치가
+    // 다시 괄호 그룹을 가질 수 없다
+    if (paren) {
+      const parenOffset = offset + m.index! + m[0].indexOf(paren)
+      for (const inner of paren.matchAll(LAW_ARTICLE_RE)) {
+        processLawArticleMatch(inner, parenOffset)
+      }
+    }
+  }
+  for (const m of text.matchAll(LAW_ARTICLE_RE)) {
+    processLawArticleMatch(m, 0)
   }
 
   // 2) 조응 인용 — 명시 매치가 이미 차지한 조문 토큰은 건너뛴다
@@ -727,9 +784,12 @@ async function verifyLawCitation(
     }
     const extra: Record<string, string> = { MST: mst, JO: buildJO(c.article) }
     if (efYd) extra.efYd = efYd
+    // 현행 확인은 target=law — 법제처가 efYd 없는 eflaw lawService를 HTML 오류로
+    // 돌려주기 시작했다 (2026-08-30 게이트20 실측: 전 문장 ⚠. article만 고치고
+    // verify를 빠뜨리면 반쪽 수정의 아홉 번째가 된다). eflaw는 기준일 조회에만
     const jsonText = await apiClient.fetchApi({
       endpoint: "lawService.do",
-      target: "eflaw",
+      target: efYd ? "eflaw" : "law",
       type: "JSON",
       extraParams: extra,
       signal,

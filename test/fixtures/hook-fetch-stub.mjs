@@ -8,6 +8,7 @@
  * 시나리오는 HOOK_STUB_SCENARIO 환경변수로 고른다:
  *   all-empty        모든 DB 0건 (soft hold·✗ 경로)
  *   abolished-admrul 현행 행정규칙 0건 + 폐지 연혁 실존 (⌛ 경로)
+ *   api-error        모든 호출이 500 (⚠ 조회 실패 경로 — 검증이 하나도 안 된 문서)
  */
 
 const EMPTY_LAW = '<?xml version="1.0"?><LawSearch><totalCnt>0</totalCnt></LawSearch>'
@@ -23,6 +24,9 @@ const scenario = process.env.HOOK_STUB_SCENARIO || "all-empty"
 
 globalThis.fetch = async (input) => {
   const url = String(input)
+  if (scenario === "api-error") {
+    return new Response("Internal Server Error", { status: 500 })
+  }
   let body
   if (url.includes("target=admrul")) {
     body =

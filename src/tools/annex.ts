@@ -11,6 +11,7 @@ import { z } from "zod"
 import { parse as parseKoreanDoc } from "kordoc"
 import type { LawApiClient } from "../lib/api-client.js"
 import { sameLawFamily } from "../lib/law-search.js"
+import { stripTrailingParen } from "./admin-rule-citation.js"
 import { formatFetchFailure } from "../lib/errors.js"
 import { fetchWithRetry } from "../lib/fetch-with-retry.js"
 import { flattenContent } from "../lib/article-parser.js"
@@ -245,12 +246,17 @@ export async function handleFinAnnex(
   const { law, keyword, kind, annex_no } = parsed.data
 
   try {
-    const jsonText = await apiClient.getAnnexes({ lawName: law, knd: kind })
+    // 조회·소속 대조는 괄호를 뗀 이름으로 — "법인세법(2026. 1. 1. 개정)"을 그대로
+    // 조회하면 실존 별표가 "정상 조회 결과 없음"으로 단정된다. article·law_search·verify는
+    // 보정됐는데 별표 직행 경로만 남아 있었다 (Codex 4차 중요 — 반쪽 수정의 같은 패턴).
+    // 출력 헤더의 표시는 원문(law) 그대로 둔다
+    const lawLookup = stripTrailingParen(law)
+    const jsonText = await apiClient.getAnnexes({ lawName: lawLookup, knd: kind })
     const acc: AnnexEntry[] = []
-    collectAnnexes(JSON.parse(jsonText), acc, law)
+    collectAnnexes(JSON.parse(jsonText), acc, lawLookup)
 
     // 소속 법령 대조 (유사 법령 별표 혼입 방어 — 같은 패밀리의 하위법령 별표는 통과)
-    let entries = acc.filter((a) => !a.owner || sameLawFamily(law, a.owner))
+    let entries = acc.filter((a) => !a.owner || sameLawFamily(lawLookup, a.owner))
     if (keyword) {
       const ck = compactName(keyword)
       entries = entries.filter((a) => compactName(a.name).includes(ck))
@@ -284,7 +290,7 @@ export async function handleFinAnnex(
       .map((a) => {
         // 소속 법령을 함께 보인다 — 같은 패밀리라도 시행령 별표와 시행규칙 별표는
         // 다른 문서다. 번호 없는 별표가 여러 건일 때는 이것이 유일한 구분 수단이다
-        const ownerNote = a.owner && compactName(a.owner) !== compactName(law) ? ` — ${a.owner}` : ""
+        const ownerNote = a.owner && compactName(a.owner) !== compactName(lawLookup) ? ` — ${a.owner}` : ""
         let line = `  · [${formatAnnexNo(a.no)}]${ownerNote} ${a.name}`
         if (a.fileLink) {
           const url = a.fileLink.startsWith("http") ? a.fileLink : `https://www.law.go.kr${a.fileLink}`

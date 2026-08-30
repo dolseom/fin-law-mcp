@@ -737,3 +737,126 @@ describe("verify — 폐지 행정규칙 ⌛ 판정 (훅 집계 대상)", () => 
     expect(text).toContain("폐지·개정 연혁의 행정규칙으로 추정")
   })
 })
+
+/**
+ * Codex 4차 차단 회귀 — 개행 제외(차단 1 수정)의 반작용: 줄바꿈으로 감싸인 정상
+ * 인용이 추출 0건이 되고, 0건이면 훅이 그대로 통과한다. 앞 줄이 구두점 없이 한글로
+ * 끝나고 다음 줄이 한글로 이어지면 감싸진 문장으로 보고 한 줄로 잇는다.
+ */
+describe("extractCitations — 줄바꿈으로 감싸인 인용 복원 (Codex 4차 차단)", () => {
+  it("법령명이 줄 중간에서 감싸여도 추출된다", () => {
+    const cites = extractCitations("국가를 당사자로 하는 계약에 관한\n법률 제7조에 따라 계약한다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).toBe("국가를 당사자로 하는 계약에 관한 법률")
+    expect(cites[0].article).toBe("제7조")
+  })
+
+  it("법령명과 조문 사이가 감싸여도 추출된다", () => {
+    const cites = extractCitations("이 계약은 법인세법\n제26조에 따라 처리한다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).toBe("법인세법")
+  })
+
+  it("마크다운 제목 라인은 잇지 않는다 (빈 줄 없이 붙어도 차단 1 유지)", () => {
+    const cites = extractCitations("## 검토 메모\n당사 내부 회계관리규정 제5조에 따라 처리한다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).not.toContain("검토")
+  })
+
+  it("구두점으로 끝난 문장은 잇지 않는다 (차단 1 유지)", () => {
+    const cites = extractCitations("결론은 다음과 같다.\n법인세법 제26조를 적용한다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].raw).toBe("법인세법 제26조")
+  })
+
+  it("빈 줄(문단 경계)은 잇지 않는다", () => {
+    const cites = extractCitations("검토 메모\n\n당사 내부 회계관리규정 제5조에 따라 처리한다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).not.toContain("메모")
+  })
+})
+
+/**
+ * Codex 4차 중요 회귀 — 괄호 허용(차단 2 수정)의 반작용: 바깥 매치가 괄호를 소비하면
+ * 괄호 안의 별도 인용("법인세법(소득세법 제12조) 제26조"의 소득세법 제12조)이 이 패스에서
+ * 영영 매칭되지 않아 검증을 우회한다.
+ */
+describe("extractCitations — 괄호 안의 별도 인용 (Codex 4차 중요)", () => {
+  it("괄호 안의 타법 조문도 별도 인용으로 추출된다", () => {
+    const cites = extractCitations("법인세법(소득세법 제12조) 제26조를 본다.")
+    expect(cites).toHaveLength(2)
+    expect(cites.map((c) => `${c.lawName} ${c.article}`)).toEqual([
+      "법인세법 제26조",
+      "소득세법 제12조",
+    ])
+  })
+
+  it("연혁 괄호(조문 없는 내용)는 안쪽 인용을 만들지 않는다", () => {
+    const cites = extractCitations(
+      "구 법인세법(2018. 12. 24. 법률 제16008호로 개정되기 전의 것) 제26조의2를 본다."
+    )
+    expect(cites).toHaveLength(1)
+  })
+})
+
+/**
+ * Codex 4차 중요 회귀 — 연혁 표지 변형("개정 전"·"전부개정 전"·"일부개정 전")이
+ * "되기" 필수 패턴을 빠져나가 현행 ✓를 받던 문제.
+ */
+describe("extractCitations — 연혁 괄호 변형 (Codex 4차 중요)", () => {
+  it("'개정 전'·'전부개정 전'·'일부개정 전'도 연혁 표지다", () => {
+    for (const paren of ["개정 전", "전부개정 전", "2011. 4. 14. 법률 제10600호로 일부개정 전", "폐지 전"]) {
+      const cites = extractCitations(`상법(${paren}) 제42조를 본다.`)
+      expect(cites, paren).toHaveLength(1)
+      expect(cites[0].historical, paren).toBe(true)
+    }
+  })
+
+  it("'전' 뒤에 한글이 이어지면 연혁 표지가 아니다 ('개정 전문 반영')", () => {
+    const cites = extractCitations("상법(개정 전문 반영) 제42조를 본다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].historical).toBeUndefined()
+  })
+})
+
+/**
+ * 법제처 lawService.do 거동 변화 (2026-08-30 게이트20 실측) — efYd 없는 eflaw 호출이
+ * HTML 오류로 반환되기 시작해, 현행 조문 확인이 전 문장 ⚠(판정 불가)가 됐다.
+ * article 경로만 고치고 verify를 빠뜨리는 반쪽 수정을 막는 계약 박제.
+ */
+describe("verify — 현행 조문 확인은 target=law (법제처 eflaw 거동 변화)", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const CURRENT_LAW_XML =
+    '<?xml version="1.0"?><LawSearch><totalCnt>1</totalCnt><law id="1">' +
+    "<법령명한글>법인세법</법령명한글><법령ID>1563</법령ID>" +
+    "<법령일련번호>280349</법령일련번호><법령구분명>법률</법령구분명>" +
+    "<현행연혁코드>현행</현행연혁코드><시행일자>20260701</시행일자></law></LawSearch>"
+  const ARTICLE_JSON =
+    '{"법령":{"조문":{"조문단위":[{"조문여부":"조문","조문번호":"26","조문제목":"손금불산입"}]}}}'
+
+  it("efYd 없는 lawService 호출에 eflaw를 쓰지 않는다 (✓ 정상 판정 유지)", async () => {
+    const urls: string[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input)
+        urls.push(url)
+        if (url.includes("lawService.do")) return new Response(ARTICLE_JSON, { status: 200 })
+        if (url.includes("target=admrul"))
+          return new Response(ADMRUL_EMPTY_XML, { status: 200 })
+        return new Response(CURRENT_LAW_XML, { status: 200 })
+      })
+    )
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "법인세법 제26조에 따른다.",
+    })
+    expect(res.content[0].text).toContain("✓")
+    const svc = urls.filter((u) => u.includes("lawService.do"))
+    expect(svc.length).toBeGreaterThan(0)
+    for (const u of svc) {
+      expect(u).not.toContain("target=eflaw")
+      expect(u).toContain("target=law")
+    }
+  })
+})

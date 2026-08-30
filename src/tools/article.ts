@@ -352,9 +352,12 @@ export async function handleFinArticle(
   const articleP: Promise<SectionResult> = (async () => {
     const extraParams: Record<string, string> = { MST: law.mst, JO: buildJO(articleLabel) }
     if (efYd) extraParams.efYd = efYd
+    // 현행 조회는 target=law — 법제처가 efYd 없는 eflaw lawService를 HTML 오류로 돌려주기
+    // 시작했다 (2026-08-30 실측: eflaw+MST+JO는 HTML, 같은 파라미터의 law는 정상,
+    // eflaw+efYd 동반도 정상). eflaw는 기준일(efYd) 조회에만 쓴다
     const jsonText = await apiClient.fetchApi({
       endpoint: "lawService.do",
-      target: "eflaw",
+      target: efYd ? "eflaw" : "law",
       type: "JSON",
       extraParams,
       signal: aborter.signal,
@@ -429,9 +432,11 @@ export async function handleFinArticle(
             await Promise.all(
               items.map(async (d) => {
                 try {
+                  // 위임 본문 동봉은 현행 전용 경로 — target=law (efYd 없는 eflaw는
+                  // HTML 오류가 되어 catch로 삼켜지고 본문이 조용히 빠진다. 2026-08-30 실측)
                   const jt = await apiClient.fetchApi({
                     endpoint: "lawService.do",
-                    target: "eflaw",
+                    target: "law",
                     type: "JSON",
                     extraParams: { MST: decree.mst, JO: buildJO(d.joNum!) },
                     signal: bodyAborter.signal,
