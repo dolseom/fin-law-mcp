@@ -118,11 +118,12 @@ if (total === 0) {
  * 사라져 멀쩡한 인용이 ⚠가 된다 — 나눌 필요가 없을 때는 나누지 않는 것이 정확하다.
  */
 function chunkByCitations(fullText) {
-  if (total <= CHUNK_CITATION_LIMIT) return [fullText]
+  if (total <= CHUNK_CITATION_LIMIT) return { chunks: [fullText], plannedTotal: total }
   const paragraphs = fullText.split(/\n\s*\n/).filter((p) => p.trim())
   const chunks = []
   let buf = []
   let bufCount = 0
+  let plannedTotal = 0
   for (const p of paragraphs) {
     const n = extractCitationsWithTotal(p).total
     if (n === 0) continue
@@ -133,12 +134,16 @@ function chunkByCitations(fullText) {
     }
     buf.push(p)
     bufCount += n
+    plannedTotal += n
   }
   if (buf.length > 0) chunks.push(buf.join("\n\n"))
-  return chunks.length > 0 ? chunks : [fullText]
+  return chunks.length > 0 ? { chunks, plannedTotal } : { chunks: [fullText], plannedTotal: total }
 }
 
-const chunks = chunkByCitations(text)
+// judged와의 대조 기준은 plannedTotal — 전체 문서의 total은 전역 dedup 결과인데
+// 청크 검증은 문단별 추출 합이라, 같은 인용이 여러 문단에 반복되면 judged가 total을
+// 넘어 미검증 잔여가 가려질 수 있다 (Codex 5차 개선 — max(0, …)이 음수를 0으로 접음)
+const { chunks, plannedTotal } = chunkByCitations(text)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const client = new LawApiClient({ apiKey: process.env.LAW_OC })
 const basis_date = process.env.FIN_VERIFY_BASIS_DATE
@@ -175,10 +180,10 @@ console.log(`  ✓${ok} / ✗${failLines.length} / ⚠${warnLines.length}`)
 // 절단 고지는 요약 헤더에만 있어 판정 라인 필터에 걸러진다. 판정 합과 인용 수가
 // 어긋나는 것으로만 드러나던 것을 명시한다 (Opus 리뷰 개선 6)
 const judged = ok + failLines.length + warnLines.length
-const unjudged = Math.max(0, total - judged)
+const unjudged = Math.max(0, plannedTotal - judged)
 if (unjudged > 0) {
   console.log(
-    `\n⚠ 인용 ${total}건 중 ${judged}건만 판정됐습니다 (${unjudged}건 미검증 — 한 문단의 인용이 ` +
+    `\n⚠ 검증 대상 ${plannedTotal}건 중 ${judged}건만 판정됐습니다 (${unjudged}건 미검증 — 한 문단의 인용이 ` +
       `상한 ${CHUNK_CITATION_LIMIT}건을 넘어 잘렸습니다). 그 문단을 나눠 다시 검증하세요.`
   )
 }
@@ -232,11 +237,14 @@ if (unjudged > 0) {
 // 일반 ⚠(조회 실패·타임아웃·⌛ 연혁 추정)도 종료 코드 0으로 삼키지 않는다 — 0이면
 // 이 보고는 디버그 로그에만 남아, 검증이 하나도 안 된 문서가 "통과"로 읽힌다
 // (Codex 4차 차단). ⚠는 여전히 "없음"이 아니라 "확인 못 함"이다 — 삭제 지시가 아니라
-// 원문 확인 요청이며, 그래서 FAIL_EXIT가 아니라 WARN_EXIT(기본 1, 비차단)로 나간다
-if (failLines.length === 0 && holdLines.length === 0 && unjudged === 0 && plainWarnCount > 0) {
+// 원문 확인 요청이며, 그래서 FAIL_EXIT가 아니라 WARN_EXIT(기본 1, 비차단)로 나간다.
+// ✗·보류와 섞여 있어도 생략하지 않는다 — 조건부로 두면 혼합 상황에서 일반 ⚠ 정보가
+// stderr에서 유실된다 (Codex 5차 중요). 첫 줄 우선순위(✗→보류→미검증→⚠)는 순서로 유지
+if (plainWarnCount > 0) {
   console.error(
     `⚠ 판정 불가 ${plainWarnCount}건 — 확인에 실패한 인용이 있어 "통과"가 아닙니다 ` +
-      `("없음" 아님 — 삭제하지 말고 원문·재시도로 직접 확인하세요).`
+      `("없음" 아님 — 삭제하지 말고 원문·재시도로 직접 확인하세요):\n` +
+      warnLines.filter((l) => !holdLines.includes(l)).map((l) => `  ${l}`).join("\n")
   )
 }
 

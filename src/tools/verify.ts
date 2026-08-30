@@ -100,9 +100,11 @@ const LAW_ARTICLE_RE = new RegExp(
 )
 // 괄호 내용이 "…로 개정되기 전의 것"류면 그 자체로 연혁 인용이다 ("구 " 접두가 없어도).
 // "개정 전"·"전부개정 전"·"일부개정 전"·"폐지 전"도 연혁 표지다 — "되기"를 필수로 두면
-// 이 변형들이 현행 ✓를 받는다 (Codex 4차 중요). 단 "전" 뒤에 한글이 이어지면
-// ("개정 전제로") 표지가 아니다 — "전의 것"만 예외로 허용
-const HISTORICAL_PAREN_RE = /(?:개정|폐지)\s*(?:되기\s*)?전(?:의\s*것)?(?![가-힣])/
+// 이 변형들이 현행 ✓를 받는다 (Codex 4차 중요). 세부 (Codex 5차 중요 — 양방향):
+//  · "전의"로 이어지는 표기("개정 전의 법령")도 표지다 — "전의 것"만 허용하면 놓친다
+//  · "전" 뒤에 한글이 이어지면("개정 전제로") 표지가 아니다
+//  · "전·후 비교"류 대조 표현은 연혁 인용이 아니다 — 구두점 뒤의 "후"를 배제
+const HISTORICAL_PAREN_RE = /(?:개정|폐지)\s*(?:되기\s*)?전의?(?:\s*것)?(?![가-힣])(?!\s*[·ㆍ/／\-~〜]\s*후)/
 // 「…」 + 제N조 — 표준 표기. 이 결합 패턴이 없으면 「」 인용은 명칭 실존만 확인하고
 // 조문 검증을 우회한다 (Opus B2: 「법인세법」 제26조가 조문 확인 없이 통과)
 const QUOTED_ARTICLE_RE = new RegExp(`「([^」]{2,40})」\\s*(${ARTICLE_PART})`, "g")
@@ -279,46 +281,83 @@ const MD_STRUCT_LINE_RE = /^\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|\||>)/
  * 훅이 그대로 통과한다). 앞 줄이 구두점 없이 한글로 끝나고 다음 줄이 한글로 이어지면
  * 같은 문장이 감싸진 것으로 보고 한 줄로 잇는다.
  *
+ * 입력은 \n으로 정규화돼 있어야 한다 — CRLF를 그대로 split("\n")하면 앞 줄이 \r로
+ * 끝나 잇기 조건이 전부 실패하고, Windows 문서의 감싸인 인용이 도로 0건이 된다
+ * (Codex 5차 차단 — 호출부 extractCitationsWithTotal에서 정규화).
+ *
  * 제목 흡수(차단 1)가 재발하지 않는 이유: 마크다운 구조 라인(#·목록·표·인용구)은 잇지
  * 않고, 빈 줄(문단 경계)은 조건을 만족하지 못하며, 한국어 산문의 문장 끝은 거의 항상
- * 구두점('.'·다 등 뒤 마침표)으로 끝난다. 구두점 없는 평문 제목이 바로 위에 붙는
- * 잔여 케이스는 이어진 뒤에도 기존 어절 컷·접속 부사 제거가 같은 줄 문맥과 동일하게
- * 처리한다 — 단일 라인 의미론과 같아질 뿐 더 나빠지지 않는다.
+ * 구두점으로 끝난다. 구두점 없는 평문 제목이 바로 위에 붙는 잔여 케이스를 위해
+ * **이은 위치(joins)를 돌려준다** — 추출기가 법령명이 이음새를 가로지르면 이음새 뒤
+ * 이름을 우선 쓰고 전체 이름을 uncut 재시도로 보존한다 (Codex 5차 중요 — 제목 오염이
+ * 정상 인용을 ✗로 만드는 것 방지).
  */
-function joinWrappedLines(text: string): string {
+function joinWrappedLines(text: string): { text: string; joins: number[] } {
   const lines = text.split("\n")
-  const out: string[] = []
-  for (const line of lines) {
-    const prev = out[out.length - 1]
+  const joins: number[] = []
+  let out = ""
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (i === 0) {
+      out = line
+      continue
+    }
+    const lastNl = out.lastIndexOf("\n")
+    const prev = out.slice(lastNl + 1)
     if (
-      prev !== undefined &&
       /[가-힣][ \t]*$/.test(prev) &&
       /^[ \t]*[가-힣]/.test(line) &&
       !MD_STRUCT_LINE_RE.test(prev) &&
       !MD_STRUCT_LINE_RE.test(line)
     ) {
-      out[out.length - 1] = `${prev.replace(/[ \t]+$/, "")} ${line.replace(/^[ \t]+/, "")}`
+      out = out.slice(0, lastNl + 1) + prev.replace(/[ \t]+$/, "")
+      joins.push(out.length) // 삽입한 공백의 위치 — 이 좌표가 이름을 가로지르면 이음새다
+      out += ` ${line.replace(/^[ \t]+/, "")}`
     } else {
-      out.push(line)
+      out += `\n${line}`
     }
   }
-  return out.join("\n")
+  return { text: out, joins }
 }
+
+// 이음새 뒤 조각이 이름 노릇을 못 하는 경우 — 접미사 토큰 단독이면 법령명이 줄
+// 중간(접미사 직전)에서 감싸진 것이므로 전체를 한 이름으로 유지해야 한다
+const BARE_SUFFIX_TOKENS = new Set([
+  "법", "법률", "시행령", "시행규칙", "규칙", "규정", "고시", "훈령", "예규", "지침", "기준", "통칙",
+])
 
 /** 절단 전 총 발견 건수 포함 — 16번째 이후 인용이 조용히 사라지지 않게 (Opus I4) */
 export function extractCitationsWithTotal(text: string): { citations: Citation[]; total: number } {
-  // 줄바꿈으로 감싸인 인용을 먼저 복원한다 — 이후 모든 패스·오프셋은 이 텍스트 기준
-  text = joinWrappedLines(text)
+  // CRLF·CR을 \n으로 정규화한 뒤 줄바꿈으로 감싸인 인용을 복원한다 — 정규화 없이는
+  // Windows 문서(\r\n)에서 잇기 조건이 전부 실패해 감싸인 인용이 0건으로 돌아간다
+  // (Codex 5차 차단). 이후 모든 패스·오프셋은 이 텍스트 기준
+  const joined = joinWrappedLines(text.replace(/\r\n?/g, "\n"))
+  text = joined.text
+  const joins = joined.joins
   const hits: Hit[] = []
   const articleEnds = new Set<number>() // 같은 조문 토큰의 이중 매치 방지 (명시 우선)
   const quotedStarts = new Set<number>() // 「」+조문으로 소비된 「 위치 — 단독 「」 중복 방지
 
   // 1) 명시 법령명 + 조문.
-  // offset: 괄호 안 재탐색 시 매치의 절대 위치 보정 (0 = 본문 직접 매치)
-  const processLawArticleMatch = (m: RegExpMatchArray, offset: number): void => {
+  // offset: 괄호 안 재탐색 시 매치의 절대 위치 보정 / inParen: 괄호 안 인용 여부
+  const processLawArticleMatch = (m: RegExpMatchArray, offset: number, inParen: boolean): void => {
     const [, namePart, suffix, paren, article] = m
-    const uncutBase = cleanLawName(namePart)
-    const base = cleanLawName(trimToLawName(namePart))
+    let uncutBase = cleanLawName(namePart)
+    let base = cleanLawName(trimToLawName(namePart))
+    // 법령명이 줄 이음새(join)를 가로지르면 이음새 앞은 평문 제목일 수 있다 —
+    // "2026년 세무 검토 대상\n택지소유상한에 관한 법률 제5조"를 통으로 조회하면
+    // 정상 인용이 ✗가 된다 (Codex 5차 중요). 이음새 뒤 이름을 우선 쓰되, 전체 이름은
+    // uncut으로 보존해 검증 단계가 양쪽을 시도한다 (findVerifyTarget의 uncut 재시도).
+    // 이음새 뒤가 접미사 단독("법률")이면 진짜 감싸인 이름이므로 전체를 유지한다
+    const nameStartAbs = offset + m.index!
+    const lastJoinInName = joins.filter((j) => j > nameStartAbs && j < nameStartAbs + namePart.length).pop()
+    if (lastJoinInName !== undefined) {
+      const afterJoin = cleanLawName(trimToLawName(namePart.slice(lastJoinInName - nameStartAbs + 1)))
+      if (afterJoin.length >= 2 && !BARE_SUFFIX_TOKENS.has(afterJoin) && afterJoin.length < base.length) {
+        uncutBase = cleanLawName(namePart)
+        base = afterJoin
+      }
+    }
     // 어절 컷 후 남은 게 조응 표현("동법")이나 외자("법")면 명시 인용이 아니다 —
     // 조응 정규식이 같은 자리를 따로 매칭한다
     if (base.length < 2 || ANAPHOR_WORDS.has(base.replace(/\s+/g, ""))) return
@@ -351,7 +390,10 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
         ...(compact(uncutBase) !== compact(base) ? { uncut: suffixNorm ? `${uncutBase} ${suffixNorm}` : uncutBase } : {}),
         ...(historical ? { historical: true } : {}),
       },
-      antecedent: base,
+      // 괄호 안 인용은 조응("같은 법")의 선행사가 되지 않는다 — 괄호 내용은 텍스트
+      // 좌표상 바깥 인용 뒤에 오므로 선행사를 덮어써서, "법인세법(소득세법 제12조)
+      // 제26조 … 같은 법"의 같은 법이 소득세법으로 해소된다 (Codex 5차 중요)
+      ...(inParen ? {} : { antecedent: base }),
     })
     articleEnds.add(end)
     // 괄호 안의 별도 인용 — "법인세법(소득세법 제12조) 제26조"에서 바깥 매치가 괄호를
@@ -362,12 +404,12 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     if (paren) {
       const parenOffset = offset + m.index! + m[0].indexOf(paren)
       for (const inner of paren.matchAll(LAW_ARTICLE_RE)) {
-        processLawArticleMatch(inner, parenOffset)
+        processLawArticleMatch(inner, parenOffset, true)
       }
     }
   }
   for (const m of text.matchAll(LAW_ARTICLE_RE)) {
-    processLawArticleMatch(m, 0)
+    processLawArticleMatch(m, 0, false)
   }
 
   // 2) 조응 인용 — 명시 매치가 이미 차지한 조문 토큰은 건너뛴다
@@ -566,7 +608,23 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
     seen.add(key)
     out.push(h.c)
   }
-  return { citations: out.slice(0, MAX_CITATIONS), total: out.length }
+  // 같은 법령·조문인데 raw만 다른 인용은, 한쪽 raw가 다른 쪽에 포함되면 짧은 쪽을
+  // 흡수한다 — "법인세법(법인세법 제26조) 제26조"의 괄호 재탐색이 같은 인용을 두 건으로
+  // 만들어 15건 상한을 소모하고 뒤쪽 인용을 미검증으로 밀어내던 것 (Codex 5차 개선).
+  // raw 포함 관계를 요구하므로 B-3②(다른 원문의 같은 lawName 절단)는 흡수되지 않는다
+  const absorbed = out.filter(
+    (c, i) =>
+      !out.some(
+        (o, j) =>
+          j !== i &&
+          o.kind === c.kind &&
+          o.lawName === c.lawName &&
+          (o.article || "") === (c.article || "") &&
+          o.raw !== c.raw &&
+          o.raw.includes(c.raw)
+      )
+  )
+  return { citations: absorbed.slice(0, MAX_CITATIONS), total: absorbed.length }
 }
 
 // ── 검증 ────────────────────────────────────────────────────────────────

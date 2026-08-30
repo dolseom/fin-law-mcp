@@ -41,7 +41,7 @@ node scripts/verify-file.mjs 검토서.md
 | --- | --- |
 | `LAW_OC` | (필수) 법제처 OPEN API 키. 저장소 `.env`에서 자동 로드된다 |
 | `FIN_VERIFY_FAIL_EXIT` | ✗ 발견 시 종료 코드 (기본 `1`). **훅으로 쓸 때는 `2`** — 아래 3절 참고 |
-| `FIN_VERIFY_WARN_EXIT` | 사용 보류·미검증 잔여·판정 불가(⚠·⌛) 시 종료 코드 (기본 `1` — 비차단 오류로 표시. `FAIL_EXIT=0`이면 기본 `0`). **보류 상세까지 Claude에게 전달하려면 훅에서는 `2` 권장** |
+| `FIN_VERIFY_WARN_EXIT` | 사용 보류·미검증 잔여·판정 불가(⚠·⌛) 시 종료 코드 (기본 `1` — 비차단 오류로 표시. `FAIL_EXIT=0`이면 기본 `0` = 전면 경고만 모드). **보류 상세까지 Claude에게 전달하려면 훅에서는 `2` 권장**. ⚠ `FAIL_EXIT=0`만 설정하면 API 장애·보류까지 exit 0이 된다 — ✗만 완화하려는 것이면 `WARN_EXIT`를 명시적으로 함께 설정하라 |
 | `FIN_VERIFY_BASIS_DATE` | 기준일 `YYYY-MM-DD`. 과거 시점 기준으로 검토서를 쓸 때 |
 | `FIN_VERIFY_INTERVAL_MS` | 구간 간 간격 (기본 3000). 법제처 분당 한도 회피용 |
 

@@ -137,4 +137,38 @@ describe.skipIf(!hasBuild)("verify-file 훅 — 일반 ⚠도 통과로 삼키�
     expect(r.stderr).toContain("사용 보류")
     expect(r.status).toBe(2)
   }, 30_000)
+
+  it("✗·⌛ 혼합에서도 일반 ⚠(판정 불가) 상세가 stderr에서 유실되지 않는다 (Codex 5차 중요)", () => {
+    // ⌛(폐지 연혁 추정)과 ✗(환각)가 한 문서에 — 종전에는 fail·hold가 있으면
+    // 일반 ⚠ 보고가 stdout에만 남아 훅 소비자에게 닿지 않았다
+    const r = runHook("수입식품등의 표시기준 제3조와 가상자산투기억제법 제3조를 본다.\n", {
+      scenario: "abolished-admrul",
+    })
+    expect(r.stderr).toContain("실존하지 않는 인용") // ✗ — 첫 줄 우선순위 유지
+    expect(r.stderr).toContain("판정 불가") // 일반 ⚠(⌛) 상세도 stderr에
+    expect(r.stderr).toContain("⌛")
+    expect(r.stderr.split("\n")[0]).toContain("✗")
+    expect(r.status).toBe(1)
+  }, 30_000)
+})
+
+describe.skipIf(!hasBuild)("verify-file 훅 — CRLF 문서 (Codex 5차 차단)", () => {
+  it("CRLF로 감싸인 인용이 '인용 0건 통과'로 우회되지 않는다", () => {
+    const r = runHook("국가를 당사자로 하는 계약에 관한\r\n법률 제7조에 따라 계약한다.\r\n")
+    expect(r.stdout).not.toContain("법령 인용이 없습니다") // 0건 우회면 회귀
+    expect(r.stdout).toContain("인용 1건")
+  }, 30_000)
+})
+
+describe.skipIf(!hasBuild)("verify-file 훅 — 청크 집계 기준 (Codex 5차 개선)", () => {
+  it("문단 간 중복 인용이 상한 절단 미검증을 가리지 않는다", () => {
+    // 문단1: 한 문단에 16건 (상한 15 초과 → 1건 절단) / 문단2: 문단1과 중복 1건.
+    // 전역 dedup total 16 vs 청크 판정 합 16 — 종전 기준(total)으로는 미검증 0으로
+    // 접혀 절단이 가려졌다. plannedTotal(17) 기준이면 미검증 1건이 드러난다
+    const para1 = Array.from({ length: 16 }, (_, i) => `법인세법 제${i + 1}조`).join(", ") + "를 본다."
+    const para2 = "법인세법 제1조를 다시 본다."
+    const r = runHook(`${para1}\n\n${para2}\n`, { env: { FIN_VERIFY_INTERVAL_MS: "1" } })
+    expect(r.stdout + r.stderr).toContain("미검증")
+    expect(r.status).not.toBe(0)
+  }, 30_000)
 })

@@ -860,3 +860,82 @@ describe("verify — 현행 조문 확인은 target=law (법제처 eflaw 거동 
     }
   })
 })
+
+/**
+ * Codex 5차 차단·중요 회귀 — 줄 잇기(joinWrappedLines)의 두 결함:
+ * ① CRLF 문서에서 앞 줄이 \r로 끝나 잇기 조건이 전부 실패 → 감싸인 인용이 도로 0건
+ * ② 구두점 없는 평문 제목이 다음 줄 인용과 이어져 법령명이 오염 → 정상 인용이 ✗
+ */
+describe("extractCitations — CRLF·평문 제목 (Codex 5차)", () => {
+  it("CRLF 문서의 감싸인 인용도 추출된다 [차단]", () => {
+    const cites = extractCitations("국가를 당사자로 하는 계약에 관한\r\n법률 제7조에 따라 계약한다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).toBe("국가를 당사자로 하는 계약에 관한 법률")
+  })
+
+  it("CR만 쓰는 문서도 동일하다", () => {
+    const cites = extractCitations("결론은 다음과 같다.\r법인세법 제26조를 적용한다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).toBe("법인세법")
+  })
+
+  it("평문 제목이 이어져도 이음새 뒤 이름으로 조회하고 전체는 uncut으로 보존한다 [중요]", () => {
+    const cites = extractCitations("2026년 세무 검토 대상\n택지소유상한에 관한 법률 제5조에 따른 부담금")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).toBe("택지소유상한에 관한 법률")
+    expect(cites[0].uncut).toContain("2026년") // 검증 단계 재시도·고지용
+    expect(cites[0].raw).toBe("택지소유상한에 관한 법률 제5조") // 제목이 raw에 남지 않는다
+  })
+
+  it("이음새 뒤가 접미사 단독('법률')이면 감싸인 이름 전체를 유지한다 (과잉 컷 방지)", () => {
+    const cites = extractCitations("국가를 당사자로 하는 계약에 관한\n법률 제7조에 따라 계약한다.")
+    expect(cites[0].lawName).toBe("국가를 당사자로 하는 계약에 관한 법률")
+  })
+})
+
+/**
+ * Codex 5차 중요 회귀 — 괄호 내부 인용이 텍스트 좌표상 바깥 인용 뒤에 삽입돼
+ * "같은 법"의 선행사를 덮어쓰던 문제.
+ */
+describe("extractCitations — 괄호 내부 인용은 조응 선행사가 아니다 (Codex 5차 중요)", () => {
+  it("'같은 법'은 괄호 안 법령이 아니라 바깥 법령으로 해소된다", () => {
+    const cites = extractCitations("법인세법(소득세법 제12조) 제26조를 보고, 같은 법 제27조도 검토한다.")
+    expect(cites).toHaveLength(3)
+    const anaphor = cites.find((c) => c.raw.includes("같은 법"))
+    expect(anaphor!.lawName).toBe("법인세법") // 소득세법이면 회귀
+  })
+
+  it("괄호 밖 인용의 조응 해소는 그대로다 (기존 회귀 유지)", () => {
+    const cites = extractCitations("법인세법 제26조를 보고, 같은 법 제27조도 검토한다.")
+    expect(cites[1].lawName).toBe("법인세법")
+  })
+})
+
+/**
+ * Codex 5차 개선 회귀 — 괄호 안팎의 동일 인용이 두 건으로 잡혀 15건 상한을 소모하던 문제.
+ * raw 포함 관계일 때만 흡수한다 — 서로 다른 원문의 같은 절단(B-3②)은 유지.
+ */
+describe("extractCitations — 괄호 안팎 동일 인용 흡수 (Codex 5차 개선)", () => {
+  it("같은 법령·조문이 괄호 안팎에 있으면 한 건이다", () => {
+    const { citations, total } = extractCitationsWithTotal("법인세법(법인세법 제26조) 제26조를 본다.")
+    expect(total).toBe(1)
+    expect(citations).toHaveLength(1)
+  })
+
+  it("괄호 안이 다른 조문이면 흡수하지 않는다", () => {
+    const { total } = extractCitationsWithTotal("법인세법(법인세법 제25조) 제26조를 본다.")
+    expect(total).toBe(2)
+  })
+})
+
+describe("extractCitations — 연혁 괄호 '전의' 변형 (Codex 5차 중요)", () => {
+  it("'개정 전의 법령'도 연혁 표지다", () => {
+    const cites = extractCitations("법인세법(개정 전의 법령) 제26조를 본다.")
+    expect(cites[0].historical).toBe(true)
+  })
+
+  it("'개정 전·후 비교'는 연혁 표지가 아니다 (과잉 인식 방지)", () => {
+    const cites = extractCitations("법인세법(개정 전·후 비교) 제26조를 본다.")
+    expect(cites[0].historical).toBeUndefined()
+  })
+})
