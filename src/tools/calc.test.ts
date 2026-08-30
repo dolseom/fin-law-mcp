@@ -710,3 +710,39 @@ describe("감가상각 — 월할 사업연도의 마무리 연도 (Codex 리뷰
     expect(t).not.toContain("두 해석이 갈립니다")
   })
 })
+
+/**
+ * Claude(Fable) 리뷰 중요 8 회귀 — 가중평균차입이자율 0% 입력이 무경고로
+ * "익금산입하지 않음"이라는 정반대 확신형 결론을 만들던 문제. 가장 그럴듯한
+ * 오용이 무상 대여(약정이자율 0)와의 혼동인데, 무상대여야말로 인정이자 과세의
+ * 전형 사안이다 — 계산을 거부하고 갈래를 안내해야 한다.
+ */
+describe("가지급금인정이자 — 이자율 0% 거부 (Claude 리뷰 중요 8)", () => {
+  it("가중평균차입이자율 0%는 계산을 거부하고 갈래를 안내한다", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "가지급금인정이자",
+      principal: 100_000_000,
+      days: 365,
+      rate_type: "가중평균차입이자율",
+      weighted_average_rate: 0,
+    })
+    const t = res.content[0].text
+    expect(t).toContain("계산을 거부")
+    expect(t).toContain("무상 대여")
+    expect(t).toContain("당좌대출이자율")
+    expect(t).not.toContain("익금산입하지 않음")
+  })
+
+  it("0이 아닌 가중평균차입이자율은 종전대로 계산된다 (과잉 거부 방지)", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "가지급금인정이자",
+      principal: 100_000_000,
+      days: 365,
+      rate_type: "가중평균차입이자율",
+      weighted_average_rate: 9,
+    })
+    const t = res.content[0].text
+    expect(t).not.toContain("계산을 거부")
+    expect(t).toContain("9,000,000")
+  })
+})

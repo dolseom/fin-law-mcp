@@ -559,3 +559,181 @@ describe("extractCitations — 괄호가 붙은 행정규칙 인용 (Codex 3차 
     expect(cites[0].lawName).toBe("법인세법")
   })
 })
+
+/**
+ * Claude(Fable) 리뷰 차단 1 회귀 — 법령명 추출이 **개행을 넘어** 문서 제목·직전 줄을 흡수.
+ * 흡수된 raw의 개행이 verify-file 훅의 라인 단위 집계를 깨뜨려 hold 인용이 있는
+ * 문서가 "인용 검증 통과"로 둔갑했다 (제목이 흡수된 규정류는 어절 컷 복구도 없다).
+ */
+describe("extractCitations — 개행 흡수 방지 (Claude 리뷰 차단 1)", () => {
+  it("문서 제목이 개행을 넘어 규정류 법령명에 흡수되지 않는다", () => {
+    const cites = extractCitations("## 검토 메모\n\n당사 내부 회계관리규정 제5조에 따라 처리한다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).not.toContain("검토")
+    expect(cites[0].lawName).toContain("회계관리규정")
+    expect(cites[0].raw).not.toMatch(/\n/)
+  })
+
+  it("직전 줄 문장이 '법' 접미사 법령명에 흡수되지 않는다", () => {
+    const cites = extractCitations("결론은 다음과 같다.\n법인세법 제26조를 적용한다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).toBe("법인세법")
+    expect(cites[0].raw).toBe("법인세법 제26조")
+  })
+
+  it("raw는 항상 한 줄이다 (「」 안 개행 포함 — 훅 라인 집계 불변식)", () => {
+    const cites = extractCitations("「법인세법\n시행령」 제43조에 따른다.")
+    expect(cites.length).toBeGreaterThanOrEqual(1)
+    for (const c of cites) expect(c.raw).not.toMatch(/\n/)
+  })
+
+  it("같은 줄 안의 정상 인용은 그대로 추출된다 (과잉 차단 방지)", () => {
+    const cites = extractCitations("검토 결과 법인세법 제26조 및 소득세법 제12조를 적용한다.")
+    expect(cites.map((c) => c.lawName)).toEqual(["법인세법", "소득세법"])
+  })
+})
+
+/**
+ * Claude(Fable) 리뷰 차단 2 회귀 — 판결문식 구법 인용(법령명+개정연혁 괄호+제N조)이
+ * 어느 패턴에도 걸리지 않아 **추출 0건**으로 조용히 통과했다. 환각 구법 조문이
+ * 검증을 통째로 우회하는 구멍이다.
+ */
+describe("extractCitations — 판결문식 구법 괄호 인용 (Claude 리뷰 차단 2)", () => {
+  it("'구 법인세법(…개정되기 전의 것) 제26조의2'가 추출되고 historical 표지가 붙는다", () => {
+    const cites = extractCitations(
+      "구 법인세법(2018. 12. 24. 법률 제16008호로 개정되기 전의 것) 제26조의2에 따라 처리한다."
+    )
+    expect(cites).toHaveLength(1)
+    expect(cites[0].lawName).toBe("법인세법")
+    expect(cites[0].article).toBe("제26조의2")
+    expect(cites[0].historical).toBe(true)
+    expect(cites[0].raw).toContain("구 법인세법")
+  })
+
+  it("'구' 접두 없이 괄호 문구만으로도 연혁 표지가 붙는다", () => {
+    const cites = extractCitations("법인세법(법률 제16008호로 개정되기 전의 것) 제26조를 본다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].historical).toBe(true)
+  })
+
+  it("'폐지되기 전' 변형도 연혁 표지다", () => {
+    const cites = extractCitations("택지소유상한에 관한 법률(폐지되기 전의 것) 제5조를 본다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].historical).toBe(true)
+  })
+
+  it("연혁 문구가 아닌 괄호(약칭 정의)는 연혁으로 오인하지 않는다", () => {
+    const cites = extractCitations('법인세법(이하 "법"이라 한다) 제26조에 따른다.')
+    expect(cites).toHaveLength(1)
+    expect(cites[0].article).toBe("제26조")
+    expect(cites[0].historical).toBeUndefined()
+  })
+})
+
+/**
+ * Claude(Fable) 리뷰 중요 6 회귀 — 구 「○○법」이 historical 미표지로 현행 ✓를 받던
+ * 절반 수정 (Opus 중요 2의 수정이 무따옴표 경로에만 닿았다).
+ */
+describe("extractCitations — 구 「」 연혁 표지 (Claude 리뷰 중요 6)", () => {
+  it("구 「법인세법」 제26조 — raw에 '구' 보존 + historical", () => {
+    const cites = extractCitations("구 「법인세법」 제26조에 따라 손금불산입한다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].raw).toBe("구 「법인세법」 제26조")
+    expect(cites[0].historical).toBe(true)
+  })
+
+  it("조문 없는 구 「」 법령 인용에도 표지가 붙는다", () => {
+    const cites = extractCitations("구 「택지소유상한에 관한 법률」에 따른 부담금이다.")
+    const hit = cites.find((c) => c.lawName.includes("택지"))
+    expect(hit).toBeDefined()
+    expect(hit!.historical).toBe(true)
+    expect(hit!.raw.startsWith("구 ")).toBe(true)
+  })
+
+  it("'친구' 등 단어 꼬리의 '구'는 연혁 표지가 아니다", () => {
+    const cites = extractCitations("친구 「법인세법」 제26조 이야기를 했다.")
+    expect(cites).toHaveLength(1)
+    expect(cites[0].historical).toBeUndefined()
+  })
+
+  it("'구'가 없는 「」 인용에는 표지가 없다 (기존 회귀 유지)", () => {
+    const cites = extractCitations("「법인세법」 제26조에 따른다.")
+    expect(cites[0].historical).toBeUndefined()
+  })
+})
+
+/**
+ * Claude(Fable) 리뷰 중요 4 회귀 — verify만 0건 게이트로 남아, LIKE 노이즈 1건에
+ * 행정규칙 폴백·폐지 연혁·soft hold가 전부 미도달이었다 ("절반 수정"의 일곱 번째).
+ * "당사 취업규칙"이 「유해ㆍ위험작업의 취업 제한에 관한 규칙」류 노이즈에 가려
+ * 사용 보류 없이 일반 ⚠로 빠지고 훅이 "통과"를 보고했다.
+ */
+describe("verify — LIKE 노이즈에도 폴백·hold 도달 (Claude 리뷰 중요 4)", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const NOISE_LAW_XML =
+    '<?xml version="1.0"?><LawSearch><totalCnt>1</totalCnt><law id="1">' +
+    "<법령명한글>유해ㆍ위험작업의 취업 제한에 관한 규칙</법령명한글><법령ID>77</법령ID>" +
+    "<법령일련번호>777</법령일련번호><법령구분명>고용노동부령</법령구분명>" +
+    "<현행연혁코드>현행</현행연혁코드><시행일자>20240101</시행일자></law></LawSearch>"
+
+  it("soft 인용은 유사 후보(노이즈)가 있어도 [사용 보류]로 판정된다", async () => {
+    stubFetchByUrl([
+      { match: "target=admrul", body: ADMRUL_EMPTY_XML },
+      { match: "target=eflaw", body: EMPTY_LAW_XML },
+      { match: "target=law&", body: NOISE_LAW_XML },
+    ])
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "당사 취업규칙 제12조에 정한 바에 따른다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("[사용 보류]")
+    expect(text).toContain("유사 명칭만 검색됨")
+    expect(text).not.toMatch(/^✗ /m) // ✗ 판정 라인 없음 (헤더의 ✗0 카운트는 무관)
+  })
+
+  it("정확 일치가 있으면 종전대로 후보 검증 경로다 (과잉 강등 방지)", async () => {
+    const EXACT_LAW_XML =
+      '<?xml version="1.0"?><LawSearch><totalCnt>1</totalCnt><law id="1">' +
+      "<법령명한글>유해ㆍ위험작업의 취업 제한에 관한 규칙</법령명한글><법령ID>77</법령ID>" +
+      "<법령일련번호>777</법령일련번호><법령구분명>고용노동부령</법령구분명>" +
+      "<현행연혁코드>현행</현행연혁코드><시행일자>20240101</시행일자></law></LawSearch>"
+    stubFetchByUrl([
+      { match: "target=admrul", body: ADMRUL_EMPTY_XML },
+      { match: "target=law&", body: EXACT_LAW_XML },
+    ])
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "「유해ㆍ위험작업의 취업 제한에 관한 규칙」에 따른다.",
+    })
+    const text = res.content[0].text
+    expect(text).not.toContain("[사용 보류]")
+  })
+})
+
+/**
+ * Claude(Fable) 리뷰 개선 9 연동 — ⌛(폐지·연혁 추정 행정규칙) 판정이 tool 출력에
+ * 실제로 존재해야 훅의 VERDICT_LINE 회귀 테스트가 의미를 가진다.
+ */
+describe("verify — 폐지 행정규칙 ⌛ 판정 (훅 집계 대상)", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const ABOLISHED_ADMRUL_HISTORY_XML =
+    '<?xml version="1.0"?><AdmRulSearch><totalCnt>1</totalCnt><admrul id="1">' +
+    "<행정규칙명>수입식품등의 표시기준</행정규칙명><행정규칙일련번호>2100000012345</행정규칙일련번호>" +
+    "<행정규칙ID>9999</행정규칙ID><발령일자>20200101</발령일자><제개정구분명>폐지</제개정구분명>" +
+    "<현행연혁구분>연혁</현행연혁구분><행정규칙종류>고시</행정규칙종류>" +
+    "<소관부처명>식품의약품안전처</소관부처명></admrul></AdmRulSearch>"
+
+  it("현행 0건 + 폐지 연혁 실존이면 ⌛ 마크로 판정된다", async () => {
+    stubFetchByUrl([
+      { match: "nw=2", body: ABOLISHED_ADMRUL_HISTORY_XML },
+      { match: "target=admrul", body: ADMRUL_EMPTY_XML },
+    ])
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "수입식품등의 표시기준 제3조에 따른다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("⌛")
+    expect(text).toContain("폐지·개정 연혁의 행정규칙으로 추정")
+  })
+})

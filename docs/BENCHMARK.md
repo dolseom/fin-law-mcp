@@ -128,7 +128,31 @@ npm run test:live
 | 35 | `fin_ruling_search`에 빈 `domains` → 한 번도 조회하지 않고 **"전체 성공"** | 빈 배열을 허용했다. 호출측은 "검색했지만 결과 없음"으로 읽는다 | `src/tools/ruling-search.test.ts` — 빈 domains |
 | 36 | `verify-file` 훅이 **"사용 보류" 항목이 있는데도 "인용 검증 통과"** | 27번의 ⚠ 강등이 훅의 마지막 관문을 통과해 버렸다 | 훅 실문서 검증 (`scripts/verify-file.mjs`) |
 
-**총 36개 회귀 사례.**
+### 3.5 리뷰 라운드 2 — Codex 3차 + Claude(Fable) 리뷰 (2026-08-27)
+
+두 독립 채널이 **서로 겹치지 않는** 결함을 냈다. 여기서도 반쪽 수정("판정 함수는 고쳤는데
+소비자는 안 고침")이 세 건 더 나왔다 — 이 저장소에서 같은 패턴의 일곱 번째까지다.
+
+| # | 증상 | 원인 | 박제 |
+| --- | --- | --- | --- |
+| 37 | 괄호 붙은 행정규칙 인용(`식품등의 표시기준(2024. 1. 15.) 제1조`)이 **추출조차 되지 않음** — 실존이든 환각이든 검증 통째 우회 | 32번 수정이 검색·검증 단계만 고치고 추출 정규식은 그대로였다 | `src/tools/verify.test.ts` — 괄호 붙은 행정규칙 인용 |
+| 38 | 한 문단에 인용 16건 이상이면 미검증분을 숨기고 훅이 **"인용 검증 통과"** | 경고만 찍고 마지막 줄에서 통과로 보고했다 | `scripts/verify-file.mjs` — 미검증 잔여 시 통과 금지 |
+| 39 | 괄호 정규화가 「A규정(제1권)」·「A규정(제2권)」을 **같은 규칙**으로 만듦 | 37번의 반작용. 용도 분리: `stripRuleNameMeta`(판 구분 유지)와 `stripTrailingParen`(검색어용) | `src/tools/admin-rule-citation.test.ts` — 메타 괄호 |
+| 40 | hold 재보고가 ✗와 함께 있으면 **실행되지 않음** | ✗ 처리의 exit에 가렸다 — 보고를 exit보다 앞으로 | `test/verify-file-hook.test.ts` |
+| 41 | 37번 수정이 **소비자에 또 미전파** — `fin_article`은 괄호 이름을 그대로 조회해 실존 고시를 `✗없음`, `fin_law_search`는 무관 법령 3건을 확신형 제시 | verify 경로만 고쳤다 (반쪽 수정) | `src/tools/article-adminrule.test.ts` |
+| 42 | 법령명 추출이 **개행을 넘어 문서 제목 흡수** → raw의 개행이 훅 라인 집계를 깨뜨려 hold 문서가 "통과"로 둔갑 [차단] | 이름 문자 클래스의 `\s`가 `\n`을 포함했다 | `src/tools/verify.test.ts` — 개행 흡수 방지 + `test/verify-file-hook.test.ts` |
+| 43 | 판결문식 구법 인용(`구 법인세법(…개정되기 전의 것) 제26조의2`)이 **추출 0건** — 환각 구법 조문이 조용히 통과 [차단] | 괄호 허용(37번)이 행정규칙 경로에만 들어가고 더 빈번한 법률·시행령 쪽을 빠뜨렸다 | `src/tools/verify.test.ts` — 구법 괄호 인용 |
+| 44 | 발령일 괄호가 붙은 soft 인용(`사내 전결기준(2026. 1. 1.) 제3조`)이 **✗ 낙인** — 더 정밀한 표기가 더 나쁜 판정 | soft 접미사 판정·폐지 연혁 조회가 괄호를 못 벗겼다 | `src/tools/admin-rule-citation.test.ts` — 발령일 괄호 soft |
+| 45 | LIKE 노이즈 1건에 **폴백·hold 전부 미도달** — `당사 취업규칙`이 무관 법령에 가려 사용 보류 없이 일반 ⚠, 훅은 "통과" | verify만 0건 게이트로 남았다 (law_search·article은 이미 정확 일치 게이트) | `src/tools/verify.test.ts` — LIKE 노이즈 hold |
+| 46 | 훅의 hold·미검증 보고가 **구조적으로 아무에게도 안 닿음** | 종료 코드 0의 stderr는 디버그 로그에만 남는다 → `FIN_VERIFY_WARN_EXIT`(기본 1) 신설 | `test/verify-file-hook.test.ts` — WARN_EXIT |
+| 47 | `구 「법인세법」 제26조`가 **현행 ✓** + raw에서 '구' 소실 | Opus 중요 2 수정이 무따옴표 경로에만 닿았다 (반쪽 수정) | `src/tools/verify.test.ts` — 구 「」 연혁 표지 |
+| 48 | 41번 수정도 **본 경로에는 미전파** — `fin_article`의 법령 확정이 괄호 이름 그대로 조회 | 폴백 판정에만 넣고 `findLaws` 호출은 안 고쳤다 | `src/tools/article.ts` — lawLookup |
+| 49 | calc 인정이자 이자율 0% 입력이 무경고 **"익금산입하지 않음"** — 무상대여(전형적 과세 사안)와 혼동한 입력일수록 정반대 결론 | 0%를 유효값으로 받았다 | `src/tools/calc.test.ts` — 이자율 0% 거부 |
+| 50 | 훅이 ⌛ 판정을 못 세어 **거짓 "상한 초과로 잘림"** 사유 출력 | VERDICT_LINE에 ⌛가 없고, 미지 마크 기본 분기가 ✓였다 | `test/verify-file-hook.test.ts` — ⌛ 집계 |
+| 51 | 출력 전체 절단이 **뒤쪽 ✗ 라인을 통째로 지움** → 훅에서 judged 미달 | 절단을 라인별 480자 상한으로 + hold 마커를 라인 앞쪽에 | `src/tools/verify.ts` — capLine |
+| 52 | 유사 후보 안내의 별칭 표시가 컷 전 이름 기준이라 어긋남 | lookupName 기준으로 통일 | `src/tools/verify.ts` |
+
+**총 52개 회귀 사례.**
 
 ---
 

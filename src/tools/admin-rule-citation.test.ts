@@ -293,3 +293,43 @@ describe("stripRuleNameMeta — 소관·종류 부연 괄호 (자체 점검)", (
     expect(stripRuleNameMeta("A규정(제1권)")).not.toBe(stripRuleNameMeta("A규정(제2권)"))
   })
 })
+
+/**
+ * Claude(Fable) 리뷰 중요 3 회귀 — soft 접미사 판정·폐지 연혁 조회가 발령일 괄호를
+ * 못 벗겨, 더 정밀한 표기("사내 전결기준(2026. 1. 1.) 제3조")가 오히려 ✗ 환각
+ * 낙인을 받던 문제. 접미사 판정과 연혁 조회 양쪽 모두 괄호를 뗀 이름을 봐야 한다.
+ */
+describe("발령일 괄호가 붙은 soft 접미사 인용 (Claude 리뷰 중요 3)", () => {
+  it("괄호 때문에 soft 강등이 빗나가 ✗ 낙인이 찍히지 않는다 + 연혁 조회는 괄호 뗀 이름", async () => {
+    const calls: Array<{ query: string; nw?: string }> = []
+    const client = {
+      searchAdminRule: async (p: { query: string; nw?: string }) => {
+        calls.push({ query: p.query, nw: p.nw })
+        return EMPTY_XML
+      },
+    } as unknown as LawApiClient
+    const line = await verifyAdminRuleCitation(
+      client,
+      ["사내 전결기준(2026. 1. 1.)"],
+      "사내 전결기준(2026. 1. 1.) 제3조",
+      "사내 전결기준(2026. 1. 1.)"
+    )
+    expect(line.startsWith("⚠")).toBe(true)
+    expect(line).not.toContain("✗")
+    expect(line).toContain("규칙명이 아닐 수 있음")
+    // 폐지 연혁 조회(nw=2)가 괄호를 뗀 이름으로 나갔는가 — 붙인 채면 항상 0건이다
+    const histCall = calls.find((c) => c.nw === "2")
+    expect(histCall).toBeDefined()
+    expect(histCall!.query).toBe("사내 전결기준")
+  })
+
+  it("strict 접미사(고시)는 괄호가 붙어도 종전대로 ✗ 유지 (환각 검출력 보존)", async () => {
+    const line = await verifyAdminRuleCitation(
+      stubClient(EMPTY_XML),
+      ["가공전산처리고시(2026. 1. 1.)"],
+      "가공전산처리고시(2026. 1. 1.) 제3조",
+      "가공전산처리고시(2026. 1. 1.)"
+    )
+    expect(line.startsWith("✗")).toBe(true)
+  })
+})
