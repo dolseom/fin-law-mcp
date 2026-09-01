@@ -3,7 +3,15 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { parseAnnexSelector, titleMatchesAnnexNo, extractBundledSection, isUnnumberedAnnex, formatAnnexNo, handleFinAnnex } from "./annex.js"
+import {
+  parseAnnexSelector,
+  titleMatchesAnnexNo,
+  extractBundledSection,
+  isUnnumberedAnnex,
+  formatAnnexNo,
+  parseAdminRuleAnnexes,
+  handleFinAnnex,
+} from "./annex.js"
 import type { LawApiClient } from "../lib/api-client.js"
 
 describe("parseAnnexSelector — 별표 선택값 해석", () => {
@@ -146,5 +154,114 @@ describe("handleFinAnnex — 괄호 붙은 법령명 (Codex 4차 중요)", () =>
     expect(text).toContain("1건")
     expect(text).not.toContain("0건")
     expect(text).toContain("기준내용연수") // 소속 대조(sameLawFamily)도 괄호 뗀 이름 기준
+  })
+})
+
+/**
+ * 행정규칙 별표·서식 (2026-09-01 신설).
+ * 고시·훈령에도 별표·별지가 있는데 법령 별표 API(licbyl)만 봐서 "0건"으로 답해 왔다.
+ * 실측: 조사사무처리규정 별표 1 + 별지 66, 외국환거래규정 52, 법인세 사무처리규정 20.
+ */
+const ADMRUL_BODY = [
+  '<?xml version="1.0"?><AdmRulService><행정규칙기본정보><행정규칙명>조사사무처리규정</행정규칙명>',
+  "<조문형식여부>Y</조문형식여부></행정규칙기본정보>",
+  "<별표번호>0001</별표번호><별표가지번호>00</별표가지번호><별표구분>별표</별표구분>",
+  "<별표제목><![CDATA[조사공무원의 행동수칙]]></별표제목>",
+  "<별표서식파일링크>/LSW/flDownload.do?flSeq=1</별표서식파일링크><별표내용><![CDATA[…]]></별표내용>",
+  "<별표번호>0001</별표번호><별표가지번호>01</별표가지번호><별표구분>별지</별표구분>",
+  "<별표제목><![CDATA[납세자권리헌장 등 수령 및 낭독 확인서]]></별표제목>",
+  "<별표서식파일링크>/LSW/flDownload.do?flSeq=2</별표서식파일링크><별표내용><![CDATA[…]]></별표내용>",
+  "<별표번호>0020</별표번호><별표가지번호>00</별표가지번호><별표구분>별지</별표구분>",
+  "<별표제목><![CDATA[장부·서류 등 반환 확인서]]></별표제목>",
+  "<별표서식파일링크>/LSW/flDownload.do?flSeq=3</별표서식파일링크><별표내용><![CDATA[…]]></별표내용>",
+  "</AdmRulService>",
+].join("")
+
+const ADMRUL_SEARCH = [
+  '<?xml version="1.0"?><AdmRulSearch><totalCnt>1</totalCnt><admrul>',
+  "<행정규칙명>조사사무처리규정</행정규칙명><행정규칙종류>훈령</행정규칙종류>",
+  "<소관부처명>국세청</소관부처명><행정규칙일련번호>2100000277992</행정규칙일련번호>",
+  "</admrul></AdmRulSearch>",
+].join("")
+
+const EMPTY_ANNEX_JSON = JSON.stringify({ 별표목록: [] })
+
+function adminRuleClient(overrides: Partial<Record<string, unknown>> = {}): LawApiClient {
+  return {
+    getAnnexes: async () => EMPTY_ANNEX_JSON,
+    searchAdminRule: async () => ADMRUL_SEARCH,
+    getAdminRule: async () => ADMRUL_BODY,
+    ...overrides,
+  } as unknown as LawApiClient
+}
+
+describe("parseAdminRuleAnnexes — 행정규칙 본문의 별표·서식", () => {
+  it("요청한 구분만 돌려주고 나머지 구분의 건수를 함께 센다", () => {
+    const { entries, byKind } = parseAdminRuleAnnexes(ADMRUL_BODY, "3", "조사사무처리규정")
+    expect(entries).toHaveLength(2) // 별지 2건
+    expect(byKind).toEqual({ 별표: 1, 별지: 2 })
+  })
+
+  it("본번호4 + 가지번호2의 법령 별표 코드로 맞춘다 (formatAnnexNo 호환)", () => {
+    const { entries } = parseAdminRuleAnnexes(ADMRUL_BODY, "3", "조사사무처리규정")
+    expect(entries[0].no).toBe("000101")
+    expect(formatAnnexNo(entries[0].no, "별지")).toBe("별지 1의1")
+    expect(entries[1].no).toBe("002000")
+  })
+})
+
+describe("formatAnnexNo — 구분 라벨", () => {
+  it("라벨을 주면 그 구분으로 표기한다 (별지를 '별표 20'으로 적지 않는다)", () => {
+    expect(formatAnnexNo("002000", "별지")).toBe("별지 20")
+    expect(formatAnnexNo("000000", "서식")).toBe("서식")
+  })
+})
+
+describe("fin_annex — 행정규칙 폴백", () => {
+  it("법령 DB에 없는 고시·훈령의 별지를 찾아 준다", async () => {
+    const res = await handleFinAnnex(adminRuleClient(), {
+      law: "조사사무처리규정",
+      kind: "3",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("[행정규칙] 「조사사무처리규정」")
+    expect(text).toContain("훈령 · 국세청")
+    expect(text).toContain("[별지 20]") // 별지를 '별표'로 표기하지 않는다
+    expect(text).toContain("2건")
+  })
+
+  it("요청한 구분이 0건이면 다른 구분의 건수와 kind 코드를 안내한다", async () => {
+    const res = await handleFinAnnex(adminRuleClient(), { law: "조사사무처리규정", kind: "2" })
+    const text = res.content[0].text
+    expect(text).toContain("0건")
+    expect(text).toContain("별지 2건")
+    expect(text).toContain('별지=kind "3"')
+  })
+
+  it("행정규칙 조회 실패는 '0건'이 아니라 ⚠ 판정 불가다", async () => {
+    const res = await handleFinAnnex(
+      adminRuleClient({
+        searchAdminRule: async () => {
+          throw new Error("법제처 서버 오류 (503)")
+        },
+      }),
+      { law: "조사사무처리규정", kind: "1" }
+    )
+    const text = res.content[0].text
+    expect(text).toContain("⚠ 판정 불가")
+    expect(text).toContain("503")
+  })
+
+  it("접두 일치(다른 규칙)로는 별표를 보여주지 않는다", async () => {
+    const other = ADMRUL_SEARCH.replace(
+      "<행정규칙명>조사사무처리규정</행정규칙명>",
+      "<행정규칙명>조사사무처리규정 시행세칙</행정규칙명>"
+    )
+    const res = await handleFinAnnex(adminRuleClient({ searchAdminRule: async () => other }), {
+      law: "조사사무처리규정",
+      kind: "3",
+    })
+    expect(res.content[0].text).toContain("0건")
+    expect(res.content[0].text).not.toContain("[별지 20]")
   })
 })

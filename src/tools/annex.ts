@@ -11,7 +11,7 @@ import { z } from "zod"
 import { parse as parseKoreanDoc } from "kordoc"
 import type { LawApiClient } from "../lib/api-client.js"
 import { sameLawFamily } from "../lib/law-search.js"
-import { stripTrailingParen } from "./admin-rule-citation.js"
+import { stripTrailingParen, isAdminRuleLikeName, findAdminRule } from "./admin-rule-citation.js"
 import { formatFetchFailure } from "../lib/errors.js"
 import { fetchWithRetry } from "../lib/fetch-with-retry.js"
 import { flattenContent } from "../lib/article-parser.js"
@@ -90,12 +90,62 @@ function collectAnnexes(node: any, acc: AnnexEntry[], lawName: string): void {
  * "[별표]"다). "별표 0"으로 적으면 원문에 없는 번호를 만들어내는 것이라, 그대로
  * 인용하면 틀린 표기가 된다
  */
-export function formatAnnexNo(no: string): string {
+export function formatAnnexNo(no: string, label = "별표"): string {
   if (!/^\d{4,6}$/.test(no)) return no
   const main = parseInt(no.slice(0, 4), 10)
   const branch = parseInt(no.slice(4, 6) || "0", 10)
-  if (main === 0 && branch === 0) return "별표"
-  return branch > 0 ? `별표 ${main}의${branch}` : `별표 ${main}`
+  if (main === 0 && branch === 0) return label
+  return branch > 0 ? `${label} ${main}의${branch}` : `${label} ${main}`
+}
+
+/** 행정규칙 본문(admrul)의 별표·서식 블록 파싱 — 법령 별표 API(licbyl)가 다루지 않는 영역.
+ *
+ * 고시·훈령에도 별표·서식이 있다 (실측 2026-09-01: 외국환거래규정 52건,
+ * 조사사무처리규정 67건, 법인세 사무처리규정 20건). 국세청 훈령의 별지서식은
+ * 실무 수요가 있는데 fin_annex는 법령 DB만 봐서 "0건"으로 답해 왔다.
+ *
+ * 파일 링크 형식(/LSW/flDownload.do?flSeq=…)이 법령 별표와 같아 추출 경로를 그대로 쓴다.
+ */
+export function parseAdminRuleAnnexes(
+  xml: string,
+  kind: string,
+  ruleName: string
+): { entries: AnnexEntry[]; byKind: Record<string, number> } {
+  const wantKind = ADMIN_ANNEX_KIND[kind]
+  const pick = (block: string, tag: string): string => {
+    const m = new RegExp(`<${tag}>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?</${tag}>`).exec(block)
+    return m ? m[1].trim() : ""
+  }
+  const entries: AnnexEntry[] = []
+  const byKind: Record<string, number> = {}
+  for (const raw of xml.split("<별표번호>").slice(1)) {
+    const no = (/^([^<]*)</.exec(raw)?.[1] || "").trim()
+    // 제목이 없으면 별표 블록이 아니다 (본문 텍스트에 태그명이 섞인 경우 방어)
+    const name = pick(raw, "별표제목")
+    if (!name || !/^\d+$/.test(no)) continue
+    const gubun = pick(raw, "별표구분") || "별표"
+    byKind[gubun] = (byKind[gubun] || 0) + 1
+    if (wantKind && gubun !== wantKind) continue
+    const branch = (pick(raw, "별표가지번호") || "0").replace(/\D/g, "") || "0"
+    entries.push({
+      // 법령 별표와 같은 6자리 코드로 맞춘다 (본번호 4 + 가지번호 2) — formatAnnexNo·
+      // parseAnnexSelector가 그대로 동작한다
+      no: String(parseInt(no, 10)).padStart(4, "0") + String(parseInt(branch, 10)).padStart(2, "0"),
+      name,
+      fileLink: pick(raw, "별표서식파일링크"),
+      owner: ruleName,
+    })
+  }
+  return { entries, byKind }
+}
+
+/** fin_annex의 kind 코드 → 행정규칙 본문의 별표구분 값 */
+const ADMIN_ANNEX_KIND: Record<string, string> = {
+  "1": "별표",
+  "2": "서식",
+  "3": "별지",
+  "4": "별도",
+  "5": "부록",
 }
 
 /** 번호가 없는 별표인가 (법제처가 000000으로 주는 단일 별표) */
@@ -157,7 +207,9 @@ const isBundledAnnex = (title: string) => /별표\s*\d+\s*[~\-]\s*\d+/.test(titl
 async function extractAnnexContent(
   entries: AnnexEntry[],
   selector: string,
-  law: string
+  law: string,
+  /** 표기 라벨 — 별지 서식을 "[별표 N]"으로 적으면 원문에 없는 표기가 된다 */
+  kindLabel = "별표"
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   const { codes, mainNo } = parseAnnexSelector(selector)
   // 별표번호 정확 일치를 제목 매칭보다 먼저 전량 스캔한다 — 법제처는 별표명 가나다순으로
@@ -182,7 +234,7 @@ async function extractAnnexContent(
       content: [
         {
           type: "text",
-          text: `⚠ [${formatAnnexNo(matched.no)}] ${matched.name} — 법제처 응답에 파일 링크가 없어 내용을 추출할 수 없습니다. annex_no 없이 목록을 재조회하세요.\n\n${SOURCE_FOOTER}`,
+          text: `⚠ [${formatAnnexNo(matched.no, kindLabel)}] ${matched.name} — 법제처 응답에 파일 링크가 없어 내용을 추출할 수 없습니다. annex_no 없이 목록을 재조회하세요.\n\n${SOURCE_FOOTER}`,
         },
       ],
       isError: true,
@@ -204,7 +256,7 @@ async function extractAnnexContent(
       content: [
         {
           type: "text",
-          text: `[${formatAnnexNo(matched.no)}] ${matched.name}\n이미지 기반 PDF(${result.pageCount ?? "?"}페이지)라 텍스트 추출이 불가합니다. 원문: ${url}\n\n${SOURCE_FOOTER}`,
+          text: `[${formatAnnexNo(matched.no, kindLabel)}] ${matched.name}\n이미지 기반 PDF(${result.pageCount ?? "?"}페이지)라 텍스트 추출이 불가합니다. 원문: ${url}\n\n${SOURCE_FOOTER}`,
         },
       ],
     }
@@ -214,7 +266,7 @@ async function extractAnnexContent(
       content: [
         {
           type: "text",
-          text: `⚠ [${formatAnnexNo(matched.no)}] ${matched.name} — 표 추출 실패: ${!result.success ? result.error : "본문 없음"}. 원문: ${url}\n\n${SOURCE_FOOTER}`,
+          text: `⚠ [${formatAnnexNo(matched.no, kindLabel)}] ${matched.name} — 표 추출 실패: ${!result.success ? result.error : "본문 없음"}. 원문: ${url}\n\n${SOURCE_FOOTER}`,
         },
       ],
       isError: true,
@@ -226,7 +278,7 @@ async function extractAnnexContent(
     if (section) markdown = section
   }
   const text =
-    `[기준: 현행] ${law} [${formatAnnexNo(matched.no)}] ${matched.name}\n` +
+    `[기준: 현행] ${law} [${formatAnnexNo(matched.no, kindLabel)}] ${matched.name}\n` +
     `(파일: ${result.fileType.toUpperCase()}${result.pageCount ? ` · ${result.pageCount}페이지` : ""} · 원문: ${url})\n\n` +
     `${markdown}\n\n${SOURCE_FOOTER}`
   return { content: [{ type: "text", text: truncateWithHint(text, 20_000, "원문 파일 링크로 전체 확인") }] }
@@ -257,25 +309,69 @@ export async function handleFinAnnex(
 
     // 소속 법령 대조 (유사 법령 별표 혼입 방어 — 같은 패밀리의 하위법령 별표는 통과)
     let entries = acc.filter((a) => !a.owner || sameLawFamily(lawLookup, a.owner))
+
+    // 법령 DB에 별표가 없고 이름이 고시·훈령·규정류면 행정규칙 본문의 별표를 본다.
+    // 고시·훈령에도 별표·서식이 있는데(실측: 외국환거래규정 52건·조사사무처리규정 67건)
+    // 법령 별표 API만 보고 "0건"으로 답해 왔다 (law_search·verify의 행정규칙 폴백과 같은 배선)
+    let adminRuleLabel = ""
+    let adminRuleFailure = ""
+    let adminRuleOtherKinds = ""
+    if (entries.length === 0 && isAdminRuleLikeName(lawLookup)) {
+      try {
+        const match = await findAdminRule(apiClient, lawLookup)
+        // 접두 일치(더 긴 다른 규칙)로 남의 별표를 보여주지 않는다 — 정확 일치만
+        if (match?.exact && match.seq) {
+          const body = await apiClient.getAdminRule(match.seq)
+          const found = parseAdminRuleAnnexes(body, kind, match.name)
+          const meta = [match.ruleType, match.orgName].filter(Boolean).join(" · ")
+          if (found.entries.length > 0) {
+            entries = found.entries
+            adminRuleLabel = `[행정규칙] 「${match.name}」${meta ? ` (${meta})` : ""} `
+          } else {
+            // 요청한 구분에는 없지만 다른 구분에는 있다 — 국세청 훈령의 서식은 대개
+            // '별지'(kind=3)다. 이걸 안 밝히면 실존 서식 66건이 "0건"으로 읽힌다
+            const others = Object.entries(found.byKind)
+              .map(([k, n]) => `${k} ${n}건`)
+              .join(" · ")
+            if (others) {
+              const codeOf = Object.entries(ADMIN_ANNEX_KIND)
+                .filter(([, v]) => found.byKind[v])
+                .map(([k, v]) => `${v}=kind "${k}"`)
+                .join(", ")
+              adminRuleOtherKinds =
+                `\n💡 「${match.name}」${meta ? ` (${meta})` : ""}은 행정규칙이며 ${others}이 있습니다` +
+                (codeOf ? ` — ${codeOf}로 재호출하세요` : "")
+            }
+          }
+        }
+      } catch (e) {
+        // 실패를 "0건"으로 바꾸지 않는다 — 아래 0건 안내에 사유를 붙인다
+        adminRuleFailure = e instanceof Error ? e.message : String(e)
+      }
+    }
     if (keyword) {
       const ck = compactName(keyword)
       entries = entries.filter((a) => compactName(a.name).includes(ck))
     }
 
+    const kindLabel = { "1": "별표", "2": "서식", "3": "별지", "4": "별도", "5": "부록" }[kind]
+
     // 별표 지정 → 파일 다운로드 + 표 추출 (목록 대신 내용 반환)
     if (annex_no && entries.length > 0) {
-      return await extractAnnexContent(entries, annex_no, law)
+      return await extractAnnexContent(entries, annex_no, law, kindLabel)
     }
     // 번호 없는 별표는 annex_no로 지정할 수 없다. keyword로 한 건까지 좁혀졌다면
     // 지정된 것이나 마찬가지이므로 내용을 준다 — 이게 없으면 "keyword로 지정하세요"라는
     // 안내를 따라도 목록만 다시 나와서 내용에 도달할 방법이 없다
     if (!annex_no && keyword && entries.length === 1 && isUnnumberedAnnex(entries[0].no)) {
-      return await extractAnnexContent(entries, entries[0].no, law)
+      return await extractAnnexContent(entries, entries[0].no, law, kindLabel)
     }
 
-    const kindLabel = { "1": "별표", "2": "서식", "3": "별지", "4": "별도", "5": "부록" }[kind]
     if (entries.length === 0) {
-      let text = `[기준: 현행] ${law} ${kindLabel} — 0건 (정상 조회 결과 없음)`
+      let text = adminRuleFailure
+        ? `[기준: 현행] ${law} ${kindLabel} — ⚠ 판정 불가 (0건 아님): 법령 DB 0건 + 행정규칙 조회 실패 — ${adminRuleFailure}`
+        : `[기준: 현행] ${law} ${kindLabel} — 0건 (정상 조회 결과 없음)`
+      if (adminRuleOtherKinds) text += adminRuleOtherKinds
       if (keyword) text += `\n💡 키워드 "${keyword}" 없이 재시도하거나, 내용연수표·세율표는 시행규칙(예: "${law.replace(/(시행령|시행규칙)?$/, "")} 시행규칙")에서 찾으세요`
       text += `\n\n${SOURCE_FOOTER}`
       return { content: [{ type: "text", text }] }
@@ -283,7 +379,8 @@ export async function handleFinAnnex(
 
     entries.sort((a, b) => (a.no > b.no ? 1 : -1))
     const shown = entries.slice(0, 20)
-    let text = `[기준: 현행] ${law} ${kindLabel} — ${entries.length}건${keyword ? ` (키워드 "${keyword}" 필터)` : ""}`
+    // 행정규칙 별표는 라벨에 규칙명이 이미 들어간다 — law를 또 붙이면 이름이 두 번 나온다
+    let text = `[기준: 현행] ${adminRuleLabel || `${law} `}${kindLabel} — ${entries.length}건${keyword ? ` (키워드 "${keyword}" 필터)` : ""}`
     if (entries.length > shown.length) text += ` · 표시 ${shown.length}건 / 전체 ${entries.length}건 (키워드로 좁히세요)`
     text += "\n"
     text += shown
@@ -291,7 +388,9 @@ export async function handleFinAnnex(
         // 소속 법령을 함께 보인다 — 같은 패밀리라도 시행령 별표와 시행규칙 별표는
         // 다른 문서다. 번호 없는 별표가 여러 건일 때는 이것이 유일한 구분 수단이다
         const ownerNote = a.owner && compactName(a.owner) !== compactName(lawLookup) ? ` — ${a.owner}` : ""
-        let line = `  · [${formatAnnexNo(a.no)}]${ownerNote} ${a.name}`
+        // 표기는 요청한 구분을 따른다 — 별지 서식을 "[별표 14]"로 적으면 원문에 없는
+        // 표기를 만들어 그대로 인용하면 틀린 인용이 된다 (행정규칙 별지에서 실제로 발생)
+        let line = `  · [${formatAnnexNo(a.no, kindLabel)}]${ownerNote} ${a.name}`
         if (a.fileLink) {
           const url = a.fileLink.startsWith("http") ? a.fileLink : `https://www.law.go.kr${a.fileLink}`
           line += `\n      다운로드: ${url.replace(/&amp;/g, "&")}`
@@ -308,7 +407,7 @@ export async function handleFinAnnex(
         `keyword로 지정하세요 (예: keyword="${(shown[0]?.name || "").slice(0, 8)}")\n${SOURCE_FOOTER}`
     } else {
       const numbered = shown.find((a) => !isUnnumberedAnnex(a.no))
-      const example = numbered ? formatAnnexNo(numbered.no).replace("별표 ", "") : "6"
+      const example = numbered ? formatAnnexNo(numbered.no, kindLabel).replace(`${kindLabel} `, "") : "6"
       text += `\n\n※ 표 내용이 필요하면 annex_no로 재호출하세요 (예: annex_no="${example}") — 표 구조를 마크다운으로 반환`
       if (unnumbered.length > 0) {
         text += `\n※ 번호 없는 ${kindLabel} ${unnumbered.length}건은 annex_no로 지정할 수 없습니다 — keyword로 지정하세요`
