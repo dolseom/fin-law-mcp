@@ -14,6 +14,7 @@ const DRF_RETRY = { retryOn: [404, 429, 503, 504], retries: 2, timeout: 3000 }
 import { requestContext } from "./session-state.js"
 import { getLawApiBaseUrl } from "./law-url-config.js"
 import { createTokenBucket, createDailyCap, createSemaphore, type TokenBucket, type DailyCap, type Semaphore } from "./rate-limit.js"
+import { createResponseCacheFromEnv, isCacheableBody, type ResponseCache, type ResponseCacheStats } from "./response-cache.js"
 
 const LAW_API_BASE = getLawApiBaseUrl()
 
@@ -22,6 +23,7 @@ export class LawApiClient {
   private bucket: TokenBucket
   private dailyCap: DailyCap
   private semaphore: Semaphore
+  private cache: ResponseCache
 
   constructor(config: { apiKey: string }) {
     this.defaultApiKey = config.apiKey
@@ -34,6 +36,14 @@ export class LawApiClient {
     this.bucket = createTokenBucket(ratePerMin)
     this.dailyCap = createDailyCap(daily)
     this.semaphore = createSemaphore(maxConcurrency)
+    // 같은 URL의 반복 조회를 프로세스 안에서 접는다 (FIN_CACHE_TTL_SEC=0이면 비활성).
+    // 인용 5건이 같은 법령을 가리키면 종전엔 검색·조문 조회가 5회씩 나갔다
+    this.cache = createResponseCacheFromEnv()
+  }
+
+  /** 캐시 적중 통계 — 진단용 (fin_ping) */
+  cacheStats(): ResponseCacheStats {
+    return this.cache.stats()
   }
 
   /** 호출 전 한도 게이트 — 초과는 RATE_LIMITED로 throw (0건 위장 금지: 호출측에서 ⚠ 처리) */
@@ -47,13 +57,24 @@ export class LawApiClient {
   /** 모든 DRF 호출의 단일 관문 — 동시 실행 상한(세마포어) + rate limit 게이트를 거친다 */
   private async drfFetch(url: string, opts: Parameters<typeof fetchWithRetry>[1] = DRF_RETRY): Promise<Response> {
     const signal = opts?.signal as AbortSignal | undefined
+    // 캐시 적중은 세마포어·rate limit 앞에서 처리한다 — 나가지 않는 호출이
+    // 동시성 슬롯과 분당 토큰을 먹으면 캐시의 의미가 없다
+    const cached = this.cache.get(url)
+    if (cached !== undefined) return new Response(cached, { status: 200 })
     const release = await this.semaphore.acquire()
     try {
       // 세마포어 대기 중 deadline이 지났으면 호출하지 않는다 — 뒤늦은 호출은
       // 결과를 쓰지도 못하면서 쿼터만 소모한다 (Codex 리뷰 중요 4)
       if (signal?.aborted) throw new Error("요청 취소됨(도구 deadline) — 대기 중 취소되어 호출하지 않음")
       this.gate() // 토큰 소모는 실제 호출 직전 — 세마포어 대기 중 소모하지 않는다
-      return await fetchWithRetry(url, opts)
+      const res = await fetchWithRetry(url, opts)
+      // 오류 응답은 담지 않는다 — 일시 장애를 TTL 동안 고정하면 "조용한 실패"가 된다.
+      // 본문을 한 번 읽어 캐시에 넣고 같은 내용의 새 Response를 돌려준다
+      // (호출부는 .text()만 쓴다 — clone()은 큰 응답에서 메모리를 두 배로 쓴다)
+      if (!res.ok || !this.cache.enabled) return res
+      const text = await res.text()
+      if (isCacheableBody(text)) this.cache.set(url, text)
+      return new Response(text, { status: res.status, statusText: res.statusText })
     } finally {
       release()
     }
@@ -308,7 +329,7 @@ export class LawApiClient {
   /**
    * 행정규칙 조회
    */
-  async getAdminRule(id: string, apiKey?: string): Promise<string> {
+  async getAdminRule(id: string, apiKey?: string, signal?: AbortSignal): Promise<string> {
     const apiParams = new URLSearchParams({
       target: "admrul",
       OC: this.getApiKey(apiKey),
@@ -317,7 +338,8 @@ export class LawApiClient {
     })
 
     const url = `${LAW_API_BASE}/lawService.do?${apiParams.toString()}`
-    const response = await this.drfFetch(url)
+    // 본문이 크다(실측 213~405KB) — 도구 deadline을 전파해 상한 이후 조회를 끊는다
+    const response = await this.drfFetch(url, signal ? { ...DRF_RETRY, signal } : DRF_RETRY)
     await this.throwIfError(response, "getAdminRule")
 
     const text = await response.text()

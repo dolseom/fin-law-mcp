@@ -278,6 +278,21 @@ const ADMRUL_HIT_XML =
   '<?xml version="1.0"?><AdmRulSearch><totalCnt>1</totalCnt><admrul>' +
   "<행정규칙명>조사사무처리규정</행정규칙명><행정규칙종류>훈령</행정규칙종류>" +
   "<소관부처명>국세청</소관부처명><발령일자>20240101</발령일자></admrul></AdmRulSearch>"
+/** 본문 조회 ID(행정규칙일련번호)가 함께 오는 응답 — 조문 대조 경로를 탄다 */
+const ADMRUL_HIT_WITH_SEQ_XML = ADMRUL_HIT_XML.replace(
+  "<발령일자>20240101</발령일자>",
+  "<발령일자>20240101</발령일자><행정규칙일련번호>2100000277992</행정규칙일련번호>"
+)
+/** 조문 형식(조문형식여부=Y) 본문 — 제23조는 있고 제99조는 없다 */
+const ADMRUL_BODY_XML =
+  '<?xml version="1.0"?><AdmRulService><행정규칙기본정보><행정규칙명>조사사무처리규정</행정규칙명>' +
+  "<조문형식여부>Y</조문형식여부></행정규칙기본정보><조문내용>제1조(목적) 이 규정은 …</조문내용>" +
+  "<조문내용>제23조(조사의 개시) 조사공무원은 … 제99조에 따라 …</조문내용>" +
+  "<조문내용>제24조(조사의 연기) …</조문내용></AdmRulService>"
+/** 통짜 본문(조문형식여부=N) — 조문 단위 판정 불가 */
+const ADMRUL_BODY_FLAT_XML =
+  '<?xml version="1.0"?><AdmRulService><행정규칙기본정보><행정규칙명>조사사무처리규정</행정규칙명>' +
+  "<조문형식여부>N</조문형식여부></행정규칙기본정보><조문내용>제1-1조 … 제10-2조 …</조문내용></AdmRulService>"
 const ADMRUL_EMPTY_XML = '<?xml version="1.0"?><AdmRulSearch><totalCnt>0</totalCnt></AdmRulSearch>'
 
 function stubFetchByUrl(routes: Array<{ match: string; body: string }>) {
@@ -294,16 +309,81 @@ function stubFetchByUrl(routes: Array<{ match: string; body: string }>) {
 describe("「…규정」 법령 DB 0건 → 행정규칙 폴백 (Opus B-0① 재검증 회귀)", () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it("실존 행정규칙(훈령)이 ✗ 환각 의심이 아니라 ✓ 명칭 실존으로 판정된다", async () => {
+  it("실존 행정규칙(훈령)이 ✗ 환각 의심으로 판정되지 않는다 (본문 조회 ID 없음 → ⚠)", async () => {
     stubFetchByUrl([{ match: "target=admrul", body: ADMRUL_HIT_XML }])
     const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
       text: "「조사사무처리규정」 제23조에 따라 세무조사를 실시한다.",
     })
     const text = res.content[0].text
-    expect(text).toContain("✓")
     expect(text).toContain("행정규칙 「조사사무처리규정」 실존")
-    expect(text).toContain("명칭 실존만") // 검증범위 정직 표기 유지
+    // 조문이 붙었는데 대조를 못 했으면 ✓가 아니다 — 미검증 조문이 "통과"로 읽히면 안 된다
+    expect(text).toContain("제23조는 미확인")
     expect(text).not.toContain("환각 의심")
+  })
+
+  /**
+   * 행정규칙 조문 대조 (2026-09-01 실측으로 가능해진 검증).
+   * `lawService.do?target=admrul&ID=…`이 본문을 주고, 조문형식여부=Y면 <조문내용>이
+   * "제N조(제목) …"로 구조화되어 온다 — 그 경우에만 ✓/✗를 낸다.
+   */
+  it("조문 형식 규칙이면 조문 존재까지 대조해 ✓", async () => {
+    stubFetchByUrl([
+      { match: "lawService.do", body: ADMRUL_BODY_XML },
+      { match: "target=admrul", body: ADMRUL_HIT_WITH_SEQ_XML },
+    ])
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "「조사사무처리규정」 제23조에 따라 세무조사를 실시한다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("✓")
+    expect(text).toContain("제23조 확인")
+    expect(text).toContain("본문 조문 3개와 대조함")
+  })
+
+  it("없는 조문은 ✗ — 본문 중간의 참조('제99조에 따라')를 조문으로 세지 않는다", async () => {
+    stubFetchByUrl([
+      { match: "lawService.do", body: ADMRUL_BODY_XML },
+      { match: "target=admrul", body: ADMRUL_HIT_WITH_SEQ_XML },
+    ])
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "「조사사무처리규정」 제99조에 따라 세무조사를 실시한다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("✗")
+    expect(text).toContain("제99조가 없음")
+  })
+
+  it("조문 형식이 아닌 규칙(통짜 본문)은 종전대로 ⚠ — 조문 단위 판정을 하지 않는다", async () => {
+    stubFetchByUrl([
+      { match: "lawService.do", body: ADMRUL_BODY_FLAT_XML },
+      { match: "target=admrul", body: ADMRUL_HIT_WITH_SEQ_XML },
+    ])
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "「조사사무처리규정」 제23조에 따라 세무조사를 실시한다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("⚠")
+    expect(text).toContain("조문 형식이 아니어서")
+    expect(text).toContain("✗0") // 요약 헤더 기준 — ✗ 판정이 하나도 없다
+  })
+
+  it("본문 조회가 실패하면 '조문 없음'이 아니라 ⚠ (조용한 실패 금지)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input)
+        if (url.includes("lawService.do")) return new Response("서버 오류", { status: 500 })
+        if (url.includes("target=admrul")) return new Response(ADMRUL_HIT_WITH_SEQ_XML, { status: 200 })
+        return new Response(EMPTY_LAW_XML, { status: 200 })
+      })
+    )
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "「조사사무처리규정」 제23조에 따라 세무조사를 실시한다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("⚠")
+    expect(text).toContain("확인 실패로 판정 불가")
+    expect(text).toContain("✗0") // 조회 실패를 "없음"으로 바꾸지 않는다
   })
 
   it("법령·행정규칙·연혁 DB 모두 0건이면 확인 범위를 밝히고 ✗", async () => {

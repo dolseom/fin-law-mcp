@@ -801,20 +801,25 @@ async function verifyLawCitation(
         return { mark: "⚠", line: `⚠ ${c.raw} — 법령 DB 정확 일치 0건, 시간 상한 도달로 행정규칙 DB 미확인 — 판정 불가 (없음 아님)` }
       }
       try {
-        const adminHit = await tryVerifyAdminRuleCitation(apiClient, [lookupName], c.raw, undefined, signal)
+        // 조문을 함께 넘겨 본문 대조까지 시킨다 — 조문 형식 규칙이면 ✓/✗, 통짜 본문이면
+        // ⚠(조문 미확인)가 그대로 돌아온다. 판정 문구가 이미 조문까지 반영하므로
+        // 여기서 다시 강등하지 않는다 (강등은 대조를 못 할 때 함수가 스스로 한다)
+        const adminHit = await tryVerifyAdminRuleCitation(
+          apiClient,
+          [lookupName],
+          c.raw,
+          undefined,
+          signal,
+          c.article
+        )
         if (adminHit) {
-          // 접두 일치는 tryVerify가 "⚠"로 시작하는 문구를 준다 — ✓로 승격하지 않는다
-          const exactHit = adminHit.startsWith("✓")
-          // 조문이 붙어 있으면 명칭만 확인된 상태 — ✓ 집계 금지 (Opus 리뷰 중요 1)
-          if (c.article) {
-            return {
-              mark: "⚠",
-              line: exactHit
-                ? `⚠${adminHit.slice(1)} · ${c.article}의 존재는 미확인(행정규칙 조문 단위 API 없음) — 원문 확인 필요`
-                : `${adminHit} · ${c.article}도 미확인`,
-            }
-          }
-          return exactHit ? { mark: "✓", line: adminHit } : { mark: "⚠", line: adminHit }
+          // 접두 일치·조문 미확인은 tryVerify가 "⚠"로 시작하는 문구를 준다 — 승격하지 않는다
+          const mark: CheckResult["mark"] = adminHit.startsWith("✓")
+            ? "✓"
+            : adminHit.startsWith("✗")
+              ? "✗"
+              : "⚠"
+          return { mark, line: adminHit }
         }
         adminChecked = true
       } catch (e) {
@@ -1012,13 +1017,19 @@ export async function handleFinVerify(
       }
       if (c.kind === "행정규칙") {
         try {
-          let line = await verifyAdminRuleCitation(apiClient, [c.lawName], c.raw, c.lawName, undefined, aborter.signal)
-          // 조문이 붙은 행정규칙 인용은 명칭만 확인된 것이다 — ✓로 집계하면 검증 안 된
-          // 조문이 "검증 통과"로 읽히고, verify-file 훅의 마지막 관문이 통째로 열린다
-          // (Opus 리뷰 중요 1). 명칭 실존은 밝히되 판정은 ⚠(조문 미검증)로 내린다
-          if (c.article && line.startsWith("✓")) {
-            line = `⚠${line.slice(1)} · ${c.article}의 존재는 미확인(행정규칙 조문 단위 API 없음) — 원문 확인 필요`
-          }
+          // 조문을 함께 넘긴다 — 조문 형식(조문형식여부=Y) 규칙은 본문 조문과 대조해
+          // ✓/✗로 판정하고, 통짜 본문인 규칙은 종전처럼 ⚠(조문 미확인)로 돌아온다.
+          // 명칭만 확인하고 ✓를 주면 없는 조문이 "검증 통과"로 읽힌다는 원칙(Opus 리뷰
+          // 중요 1)은 그대로다 — 강등 대신 실제 대조로 지킨다
+          const line = await verifyAdminRuleCitation(
+            apiClient,
+            [c.lawName],
+            c.raw,
+            c.lawName,
+            undefined,
+            aborter.signal,
+            c.article
+          )
           const mark: CheckResult["mark"] = line.startsWith("✓") ? "✓" : line.startsWith("✗") ? "✗" : "⚠"
           results.push({ mark, line })
         } catch (e) {

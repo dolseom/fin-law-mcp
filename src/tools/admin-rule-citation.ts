@@ -85,6 +85,52 @@ export interface AdminRuleMatch {
   ruleType?: string
   /** 입력 명칭과 정확히 일치하는가. false면 접두 일치(더 긴 다른 규칙)라 단정 금지 */
   exact: boolean
+  /** 행정규칙일련번호 — 본문 조회(getAdminRule)의 ID. 조문 존재 확인에 쓴다 */
+  seq?: string
+}
+
+/** 행정규칙 본문에서 조문 존재를 확인한 결과 */
+export type AdminArticleCheck =
+  | { status: "확인"; total: number }
+  | { status: "없음"; total: number }
+  /** 조문 형식이 아닌 규칙(조문형식여부=N) — 통짜 본문이라 조문 단위 판정 불가 */
+  | { status: "형식아님" }
+
+/**
+ * 행정규칙 본문을 받아 인용된 조문이 실제로 있는지 확인한다.
+ *
+ * 2026-09-01 실측: `lawService.do?target=admrul&ID=…`은 본문을 돌려주고, `조문형식여부`가
+ * Y인 규칙은 `<조문내용>`이 "제N조(제목) 본문" 형태로 구조화되어 온다
+ * (조사사무처리규정 113개·법인세 사무처리규정 205개·상속세 및 증여세 사무처리규정 76개).
+ * N인 규칙(외국환거래규정 등)은 통짜 텍스트에 "제1-1조" 같은 자체 체계를 써서
+ * 조문 단위 판정을 하면 안 된다 — 그 경우 "형식아님"으로 돌려 ⚠를 유지한다.
+ *
+ * 실패는 throw한다 — 조회 실패를 "조문 없음"으로 바꾸면 실존 조문이 ✗가 된다
+ * (이 저장소에서 세 번 밟은 함정: B-0·잔여②파생2·차단3).
+ */
+export async function checkAdminRuleArticle(
+  apiClient: LawApiClient,
+  seq: string,
+  article: string,
+  apiKey?: string,
+  signal?: AbortSignal
+): Promise<AdminArticleCheck> {
+  const xml = await apiClient.getAdminRule(seq, apiKey, signal)
+  if (!xml || !xml.trim()) throw new Error("행정규칙 본문이 빈 응답 — 조문 확인 불가")
+  const format = /<조문형식여부>\s*([YN])\s*<\/조문형식여부>/.exec(xml)?.[1]
+  const bodies = xml.split("<조문내용>").slice(1)
+  // 조문형식여부가 없거나 N이면 조문 단위 판정을 하지 않는다
+  if (format !== "Y" || bodies.length === 0) return { status: "형식아님" }
+  const numbers = new Set<string>()
+  for (const b of bodies) {
+    // "제5조의2(관할 조정 사유) …" — 조문 표제로 **시작**하는 것만 본다.
+    // 본문 중간의 참조("제23조에 따라")를 세면 없는 조문이 실존으로 둔갑한다
+    const m = /^(?:<!\[CDATA\[)?\s*제\s*(\d+)\s*조(?:\s*의\s*(\d+))?/.exec(b)
+    if (m) numbers.add(m[2] ? `제${m[1]}조의${m[2]}` : `제${m[1]}조`)
+  }
+  if (numbers.size === 0) return { status: "형식아님" }
+  const want = article.replace(/\s+/g, "")
+  return numbers.has(want) ? { status: "확인", total: numbers.size } : { status: "없음", total: numbers.size }
 }
 
 /** 행정규칙 DB(admrul)에서 명칭 실존 확인 — verify 외에 law_search의 0건 폴백도 사용 */
@@ -144,6 +190,7 @@ export async function findAdminRule(
       orgName: rule.getElementsByTagName("소관부처명")[0]?.textContent?.trim() || undefined,
       ruleType: rule.getElementsByTagName("행정규칙종류")[0]?.textContent?.trim() || undefined,
       exact: stripRuleNameMeta(ruleName) === target,
+      seq: rule.getElementsByTagName("행정규칙일련번호")[0]?.textContent?.trim() || undefined,
     }
     if (match.exact) return match
     if (!loose) loose = match
@@ -160,7 +207,13 @@ export async function tryVerifyAdminRuleCitation(
   candidates: string[],
   label: string,
   apiKey?: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /**
+   * 인용된 조문("제23조"). 주면 명칭 실존에 그치지 않고 본문에서 조문 존재까지 대조한다
+   * — 조문 형식(조문형식여부=Y) 규칙에 한해 ✓/✗ 판정이 가능하다 (2026-09-01 실측).
+   * 생략하면 종전대로 명칭 실존만 확인한다 (law_search 폴백 등 조문 없는 호출부)
+   */
+  article?: string
 ): Promise<string | null> {
   for (const cand of candidates) {
     const match = await findAdminRule(apiClient, cand, apiKey, signal)
@@ -177,9 +230,49 @@ export async function tryVerifyAdminRuleCitation(
           `표기를 확인하세요 — 실존 단정 불가 (없음도 아님)`
         )
       }
+      // 조문이 붙은 인용은 본문까지 대조한다 — 명칭만 확인하고 ✓를 주면 없는 조문이
+      // "검증 통과"로 읽힌다 (Opus 리뷰 중요 1이 ⚠ 강등으로 막아 둔 자리를, 이제
+      // 실제 대조로 판정한다)
+      if (article) {
+        // 본문 조회 ID가 없으면 대조 자체가 불가능하다 — 명칭만 확인하고 ✓를 주면
+        // 조문이 검증되지 않은 채 "통과"로 읽힌다 (Opus 리뷰 중요 1의 구멍)
+        if (!match.seq) {
+          return (
+            `⚠ ${label} — 행정규칙 「${match.name}」 실존${meta ? ` (${meta})` : ""} · ` +
+            `${article}는 미확인 (본문 조회 ID를 받지 못해 조문 대조 불가) — 원문 확인 필요`
+          )
+        }
+        try {
+          const check = await checkAdminRuleArticle(apiClient, match.seq, article, apiKey, signal)
+          if (check.status === "확인") {
+            return (
+              `✓ ${label} — 행정규칙 「${match.name}」 ${article} 확인${meta ? ` (${meta})` : ""} · ` +
+              `본문 조문 ${check.total}개와 대조함`
+            )
+          }
+          if (check.status === "없음") {
+            return (
+              `✗ ${label} — 행정규칙 「${match.name}」은 실존하나 ${article}가 없음 ` +
+              `(본문 조문 ${check.total}개 대조${meta ? ` · ${meta}` : ""}). 조문 번호 확인`
+            )
+          }
+          return (
+            `⚠ ${label} — 행정규칙 「${match.name}」 실존${meta ? ` (${meta})` : ""} · ` +
+            `${article}는 미확인 — 이 규칙은 조문 형식이 아니어서(본문이 통짜 텍스트) 조문 단위 대조 불가. 원문 확인 필요`
+          )
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          // deadline 취소는 상위(fin_verify)가 ⌛로 표기해야 한다 — 여기서 ⚠로 삼키지 않는다
+          if (/취소됨/.test(msg)) throw e
+          return (
+            `⚠ ${label} — 행정규칙 「${match.name}」 실존${meta ? ` (${meta})` : ""} · ` +
+            `${article} 확인 실패로 판정 불가 (없음 아님): ${msg}`
+          )
+        }
+      }
       return (
         `✓ ${label} — 행정규칙 「${match.name}」 실존${meta ? ` (${meta})` : ""}. ` +
-        `※ 행정규칙은 조문 단위 검증 미지원 — 명칭 실존만 확인함`
+        `※ 명칭 실존만 확인함 (조문 미지정)`
       )
     }
   }
@@ -195,10 +288,12 @@ export async function verifyAdminRuleCitation(
   apiKey?: string,
   // verify의 20초 상한을 이 경로에도 전파한다 — 없으면 상한 이후에도 조회가 살아
   // 쿼터를 소모한다 (Codex 2차 중요: 이 함수만 signal을 받지 않았다)
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** 인용된 조문 — 주면 본문 대조까지 한다 (조문 형식 규칙에 한해 ✓/✗) */
+  article?: string
 ): Promise<string> {
   try {
-    const hit = await tryVerifyAdminRuleCitation(apiClient, candidates, label, apiKey, signal)
+    const hit = await tryVerifyAdminRuleCitation(apiClient, candidates, label, apiKey, signal, article)
     if (hit) return hit
 
     // 현행에 없으면 폐지·제명변경 연혁 확인 (환각과 폐지 규칙을 구분).
