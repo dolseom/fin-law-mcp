@@ -69,6 +69,12 @@ interface Citation {
    * ("당사 취업규칙 제12조"는 정당한 인용이지 환각이 아니다)
    */
   soft?: boolean
+  /**
+   * 줄바꿈이 낱말 **안쪽**을 끊은 것으로 보고 공백 없이 이어 붙여 복원한 인용
+   * ("법인세법 시\n행령 제88조"). 이 복원은 추정이므로 미발견 시 ✗가 아닌 ⚠다 —
+   * 어절 경계를 낱말 안쪽으로 오인하면 없는 법령명이 만들어질 수 있다 (Codex 6차 차단)
+   */
+  joinRestored?: boolean
 }
 
 const IP = INTERPUNCT_CHARS // 가운뎃점 5종 — 추출 정규식과 정규화가 같은 집합을 봐야 한다
@@ -103,8 +109,11 @@ const LAW_ARTICLE_RE = new RegExp(
 // 이 변형들이 현행 ✓를 받는다 (Codex 4차 중요). 세부 (Codex 5차 중요 — 양방향):
 //  · "전의"로 이어지는 표기("개정 전의 법령")도 표지다 — "전의 것"만 허용하면 놓친다
 //  · "전" 뒤에 한글이 이어지면("개정 전제로") 표지가 아니다
-//  · "전·후 비교"류 대조 표현은 연혁 인용이 아니다 — 구두점 뒤의 "후"를 배제
-const HISTORICAL_PAREN_RE = /(?:개정|폐지)\s*(?:되기\s*)?전의?(?:\s*것)?(?![가-힣])(?!\s*[·ㆍ/／\-~〜]\s*후)/
+//  · "전·후 비교"류 대조 표현은 연혁 인용이 아니다 — 구두점 뒤의 "후"를 배제.
+//    구두점만 배제하면 "개정 전 및 후", "개정 전, 후", "개정 전 또는 후"가 연혁으로
+//    오인돼 기준일 조회 경로로 새는다 (Codex 6차 개선) — 접속 표현도 함께 배제
+const HISTORICAL_PAREN_RE =
+  /(?:개정|폐지)\s*(?:되기\s*)?전의?(?:\s*것)?(?![가-힣])(?!\s*(?:[·ㆍ/／\-~〜,，]|및|또는)\s*후)/
 // 「…」 + 제N조 — 표준 표기. 이 결합 패턴이 없으면 「」 인용은 명칭 실존만 확인하고
 // 조문 검증을 우회한다 (Opus B2: 「법인세법」 제26조가 조문 확인 없이 통과)
 const QUOTED_ARTICLE_RE = new RegExp(`「([^」]{2,40})」\\s*(${ARTICLE_PART})`, "g")
@@ -292,7 +301,12 @@ const MD_STRUCT_LINE_RE = /^\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|\||>)/
  * 이름을 우선 쓰고 전체 이름을 uncut 재시도로 보존한다 (Codex 5차 중요 — 제목 오염이
  * 정상 인용을 ✗로 만드는 것 방지).
  */
-function joinWrappedLines(text: string): { text: string; joins: number[] } {
+function joinWrappedLines(text: string, tight = false): { text: string; joins: number[] } {
+  // tight: 이음새에 공백을 넣지 않는다 — 줄바꿈이 낱말 안쪽을 끊은 경우("법인세법 시\n행령")
+  // 공백을 넣으면 "시 행령"이 되어 인용이 통째로 추출되지 않는다 (Codex 6차 차단).
+  // 어절 경계인지 낱말 안쪽인지는 텍스트만으로 판별할 수 없으므로 두 해석을 모두
+  // 추출해 병합한다 (extractCitationsWithTotal)
+  const gap = tight ? "" : " "
   const lines = text.split("\n")
   const joins: number[] = []
   let out = ""
@@ -311,8 +325,8 @@ function joinWrappedLines(text: string): { text: string; joins: number[] } {
       !MD_STRUCT_LINE_RE.test(line)
     ) {
       out = out.slice(0, lastNl + 1) + prev.replace(/[ \t]+$/, "")
-      joins.push(out.length) // 삽입한 공백의 위치 — 이 좌표가 이름을 가로지르면 이음새다
-      out += ` ${line.replace(/^[ \t]+/, "")}`
+      joins.push(out.length) // 이은 위치 — 이 좌표가 이름을 가로지르면 이음새다
+      out += `${gap}${line.replace(/^[ \t]+/, "")}`
     } else {
       out += `\n${line}`
     }
@@ -326,13 +340,65 @@ const BARE_SUFFIX_TOKENS = new Set([
   "법", "법률", "시행령", "시행규칙", "규칙", "규정", "고시", "훈령", "예규", "지침", "기준", "통칙",
 ])
 
+/**
+ * 괄호 구간 목록. 「」+조문 경로는 LAW_ARTICLE_RE의 괄호 재탐색과 달리 텍스트를 통째로
+ * 훑으므로 자기가 괄호 안인지 모른다 — 그대로 두면 「소득세법」이 괄호 안에 있어도
+ * 선행사가 되어 뒤의 "같은 법"이 엉뚱한 법으로 해소된다 (Codex 6차 중요, 5차 수정의 미적용분)
+ */
+function parenRanges(text: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = []
+  const stack: number[] = []
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === "(" || ch === "（") stack.push(i)
+    else if (ch === ")" || ch === "）") {
+      const start = stack.pop()
+      if (start !== undefined) ranges.push([start, i])
+    }
+  }
+  return ranges
+}
+
 /** 절단 전 총 발견 건수 포함 — 16번째 이후 인용이 조용히 사라지지 않게 (Opus I4) */
 export function extractCitationsWithTotal(text: string): { citations: Citation[]; total: number } {
-  // CRLF·CR을 \n으로 정규화한 뒤 줄바꿈으로 감싸인 인용을 복원한다 — 정규화 없이는
-  // Windows 문서(\r\n)에서 잇기 조건이 전부 실패해 감싸인 인용이 0건으로 돌아간다
-  // (Codex 5차 차단). 이후 모든 패스·오프셋은 이 텍스트 기준
-  const joined = joinWrappedLines(text.replace(/\r\n?/g, "\n"))
-  text = joined.text
+  // CRLF·CR을 \n으로 정규화한다 — 정규화 없이는 Windows 문서(\r\n)에서 잇기 조건이
+  // 전부 실패해 감싸인 인용이 0건으로 돌아간다 (Codex 5차 차단)
+  const normalized = text.replace(/\r\n?/g, "\n")
+  const primary = extractPass(normalized, false)
+  // 줄 잇기가 실제로 일어났다면, 이음새가 낱말 안쪽일 가능성(tight)도 추출해 병합한다.
+  // "법인세법 시\n행령 제88조"는 공백 잇기로는 영영 추출되지 않아 훅이 "인용 없음"으로
+  // 통과시켰다 (Codex 6차 차단 — PDF·워드 붙여넣기에서 흔한 형태)
+  const merged = joinWrappedLines(normalized).joins.length > 0 ? mergeTightPass(primary, normalized) : primary
+  return { citations: merged.slice(0, MAX_CITATIONS), total: merged.length }
+}
+
+/**
+ * 낱말 안쪽 해석(tight) 패스의 결과 중 **공백 해석에서 못 잡은 인용만** 더한다.
+ *
+ * 두 해석은 대개 한쪽만 옳다. 어절 경계였다면 tight는 "…하는계약에 관한 법률" 같은
+ * 없는 이름을 만들고, 낱말 안쪽이었다면 공백 해석이 "시 행령"으로 인용을 통째로 놓친다.
+ * 그래서 (1) 같은 조문·종류이고 이름이 서로의 접미인 쌍은 공백 해석을 우선하고,
+ * (2) tight에서만 나온 인용은 joinRestored로 표시해 미발견 시 ✗ 대신 ⚠로 판정한다 —
+ * 추정으로 만든 이름에 "환각" 낙인을 찍지 않기 위해서다
+ */
+function mergeTightPass(primary: Citation[], normalized: string): Citation[] {
+  const tight = extractPass(normalized, true)
+  const out = [...primary]
+  for (const t of tight) {
+    const tName = compact(t.lawName)
+    const dup = primary.some((p) => {
+      if (p.kind !== t.kind || (p.article || "") !== (t.article || "")) return false
+      const pName = compact(p.lawName)
+      return pName === tName || pName.endsWith(tName) || tName.endsWith(pName)
+    })
+    if (!dup) out.push({ ...t, joinRestored: true })
+  }
+  return out
+}
+
+function extractPass(src: string, tight: boolean): Citation[] {
+  const joined = joinWrappedLines(src, tight)
+  const text = joined.text
   const joins = joined.joins
   const hits: Hit[] = []
   const articleEnds = new Set<number>() // 같은 조문 토큰의 이중 매치 방지 (명시 우선)
@@ -442,8 +508,11 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
   }
 
   // 3) 「…」 + 조문 (표준 표기 — 조문 검증 경로로)
+  const pranges = parenRanges(text)
+  const isInParen = (i: number): boolean => pranges.some(([s, e]) => i > s && i < e)
   for (const m of text.matchAll(QUOTED_ARTICLE_RE)) {
     const name = cleanLawName(m[1])
+    const inParen = isInParen(m.index!)
     quotedStarts.add(m.index!)
     const suffixName = nameForSuffixCheck(name)
     if (isAdminRuleName(suffixName)) {
@@ -461,14 +530,17 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
           ...(historical ? { historical: true } : {}),
         },
         // 「…에 관한 규칙」은 본법이 아니므로 "같은 법"의 선행사가 되면 안 된다.
-        // 대신 "같은 규칙"의 선행사가 된다. 「…규정」은 어느 쪽 선행사도 아니다
-        ...(isRuleLikeName(name)
-          ? isRuleAntecedentName(name)
-            ? { ruleAntecedent: name }
-            : isRegAntecedentName(name)
-              ? { regAntecedent: name }
-              : {}
-          : { antecedent: name.replace(/\s*시행(?:령|규칙)$/, "") }),
+        // 대신 "같은 규칙"의 선행사가 된다. 「…규정」은 어느 쪽 선행사도 아니다.
+        // 괄호 안 인용은 어느 조응의 선행사도 되지 않는다 (위 parenRanges 주석)
+        ...(inParen
+          ? {}
+          : isRuleLikeName(name)
+            ? isRuleAntecedentName(name)
+              ? { ruleAntecedent: name }
+              : isRegAntecedentName(name)
+                ? { regAntecedent: name }
+                : {}
+            : { antecedent: name.replace(/\s*시행(?:령|규칙)$/, "") }),
       })
     }
   }
@@ -490,13 +562,16 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
           kind: "법령",
           ...(historical ? { historical: true } : {}),
         },
-        ...(isRuleLikeName(name)
-          ? isRuleAntecedentName(name)
-            ? { ruleAntecedent: name }
-            : isRegAntecedentName(name)
-              ? { regAntecedent: name }
-              : {}
-          : { antecedent: name.replace(/\s*시행(?:령|규칙)$/, "") }),
+        // 괄호 안 인용은 선행사가 되지 않는다 (3)과 같은 이유)
+        ...(isInParen(m.index!)
+          ? {}
+          : isRuleLikeName(name)
+            ? isRuleAntecedentName(name)
+              ? { ruleAntecedent: name }
+              : isRegAntecedentName(name)
+                ? { regAntecedent: name }
+                : {}
+            : { antecedent: name.replace(/\s*시행(?:령|규칙)$/, "") }),
       })
     }
   }
@@ -542,11 +617,14 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
       // (SOFT_ADMIN_SUFFIX의 '기준·지침'과 같은 취급). 「」로 감싼 인용은 법령을
       // 의도한 것이 명확하므로 종전대로 ✗ 판정을 유지한다
       c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "법령조문", soft: true },
-      ...(isRuleAntecedentName(name)
-        ? { ruleAntecedent: name }
-        : isRegAntecedentName(name)
-          ? { regAntecedent: name }
-          : {}),
+      // 괄호 안 인용은 "같은 규칙"·"같은 규정"의 선행사도 되지 않는다 (3)과 같은 이유)
+      ...(isInParen(m.index!)
+        ? {}
+        : isRuleAntecedentName(name)
+          ? { ruleAntecedent: name }
+          : isRegAntecedentName(name)
+            ? { regAntecedent: name }
+            : {}),
     })
     articleEnds.add(end)
   }
@@ -620,11 +698,14 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
           o.kind === c.kind &&
           o.lawName === c.lawName &&
           (o.article || "") === (c.article || "") &&
+          // 연혁 여부가 다르면 서로 다른 인용이다 — "구 법인세법 제26조"가 뒤 문장의
+          // "법인세법 제26조"를 흡수해 현행 인용이 검증 대상에서 사라지던 것 (Codex 6차 중요)
+          !!o.historical === !!c.historical &&
           o.raw !== c.raw &&
           o.raw.includes(c.raw)
       )
   )
-  return { citations: absorbed.slice(0, MAX_CITATIONS), total: absorbed.length }
+  return absorbed
 }
 
 // ── 검증 ────────────────────────────────────────────────────────────────
@@ -785,6 +866,16 @@ async function verifyLawCitation(
         mark: "⚠",
         hold: true,
         line: `⚠ ${c.raw} — [사용 보류] ${dbNote}. 사내 규정·사규 등 법령이 아닌 문서일 수 있어 "없음"으로 단정하지 않습니다 — 법령 인용이라면 정식 명칭을 확인하세요 (그 전까지 사용 보류)`,
+      }
+    }
+    // 줄바꿈을 낱말 안쪽으로 보고 이어 붙여 복원한 이름은 추정이다 — 어절 경계를
+    // 오인했다면 없는 법령명이 만들어지므로 ✗(환각 의심)로 단정하지 않는다.
+    // 조문까지 확인되는 경로(법령 실존 + 조문 0건)는 이름이 정확히 맞은 경우라 ✗를 유지한다
+    if (c.joinRestored) {
+      return {
+        mark: "⚠",
+        hold: true,
+        line: `⚠ ${c.raw} — [사용 보류] 줄바꿈으로 끊긴 법령명을 이어 붙여 「${c.lawName}」로 해석했으나 ${dbNote}. 원문에서 법령명을 확인하세요`,
       }
     }
     // 미등재 약칭("조특법")에 대한 LIKE 0건은 법령 부존재의 증거가 아니라 별칭 사전의

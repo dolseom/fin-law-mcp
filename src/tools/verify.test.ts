@@ -939,3 +939,75 @@ describe("extractCitations — 연혁 괄호 '전의' 변형 (Codex 5차 중요)
     expect(cites[0].historical).toBeUndefined()
   })
 })
+
+/**
+ * Codex 6차 회귀 — 5차 수정(줄 잇기·괄호 조응·raw 흡수)이 연 반대 방향 구멍.
+ * 전부 프로브로 실측 재현한 뒤 고쳤다.
+ */
+describe("extractCitations — 낱말 안쪽 줄바꿈 복원 (Codex 6차 차단)", () => {
+  it("법령명이 낱말 중간에서 끊긴 인용을 복원한다 (PDF·워드 붙여넣기)", () => {
+    // 공백으로 이으면 "법인세법 시 행령"이 되어 추출 0건 → 훅이 "인용 없음"으로 통과했다
+    const { citations, total } = extractCitationsWithTotal("법인세법 시\n행령 제88조를 본다.")
+    expect(total).toBe(1)
+    expect(citations[0].lawName).toBe("법인세법 시행령")
+    expect(citations[0].article).toBe("제88조")
+    // 복원은 추정이므로 표시를 남긴다 — 미발견 시 ✗가 아니라 ⚠(사용 보류)로 판정된다
+    expect(citations[0].joinRestored).toBe(true)
+  })
+
+  it("어절 경계 줄바꿈은 종전대로 공백 해석이 이긴다 (없는 이름 생성 방지)", () => {
+    const { citations, total } = extractCitationsWithTotal(
+      "국가를 당사자로 하는\n계약에 관한 법률 제5조를 본다."
+    )
+    expect(total).toBe(1)
+    expect(citations[0].lawName).toBe("계약에 관한 법률")
+    expect(citations[0].joinRestored).toBeUndefined()
+  })
+
+  it("줄바꿈이 없으면 tight 패스를 돌리지 않는다 (기존 동작 보존)", () => {
+    const { citations, total } = extractCitationsWithTotal("법인세법 시행령 제88조를 본다.")
+    expect(total).toBe(1)
+    expect(citations[0].joinRestored).toBeUndefined()
+  })
+})
+
+describe("extractCitations — 괄호 안 「」 인용의 조응 오염 (Codex 6차 중요)", () => {
+  it("괄호 안 따옴표 인용은 '같은 법'의 선행사가 되지 않는다", () => {
+    // 5차에서 무따옴표 경로만 고쳐져 「」 경로에 같은 구멍이 남아 있었다 (절반 수정 9번째)
+    const cites = extractCitations("법인세법(「소득세법」 제12조) 제26조를 보고, 같은 법 제27조도 검토한다.")
+    const anaphor = cites.find((c) => c.raw.startsWith("같은 법"))
+    expect(anaphor?.lawName).toBe("법인세법")
+  })
+
+  it("괄호 안 「」 단독 인용도 선행사가 되지 않는다", () => {
+    const cites = extractCitations("법인세법(「소득세법」에 따른 소득) 제26조와 같은 법 제27조를 본다.")
+    const anaphor = cites.find((c) => c.raw.startsWith("같은 법"))
+    expect(anaphor?.lawName).toBe("법인세법")
+  })
+})
+
+describe("extractCitations — 연혁·현행 인용의 raw 흡수 (Codex 6차 중요)", () => {
+  it("'구 ○○법 제N조'가 같은 조문의 현행 인용을 흡수하지 않는다", () => {
+    const { citations, total } = extractCitationsWithTotal("구 법인세법 제26조를 본다. 법인세법 제26조도 본다.")
+    expect(total).toBe(2)
+    expect(citations.filter((c) => c.historical)).toHaveLength(1)
+    expect(citations.filter((c) => !c.historical)).toHaveLength(1)
+  })
+})
+
+describe("extractCitations — 연혁 괄호 접속 표현 (Codex 6차 개선)", () => {
+  it.each(["개정 전 및 후 비교", "개정 전, 후 비교", "개정 전 또는 후 비교"])(
+    "'%s'는 연혁 표지가 아니다",
+    (paren) => {
+      const cites = extractCitations(`법인세법(${paren}) 제26조를 본다.`)
+      expect(cites[0].historical).toBeUndefined()
+    }
+  )
+
+  it("진짜 연혁 인용은 그대로 연혁이다", () => {
+    const cites = extractCitations(
+      "구 법인세법(2018. 12. 24. 법률 제16008호로 개정되기 전의 것) 제26조를 본다."
+    )
+    expect(cites[0].historical).toBe(true)
+  })
+})

@@ -154,6 +154,13 @@ if (chunks.length > 1) {
     `  인용이 상한(${CHUNK_CITATION_LIMIT}건)을 넘어 ${chunks.length}개 구간으로 나눠 검증합니다.\n` +
       `  구간 경계에 걸친 조응 인용("같은 법")은 선행사를 잃어 ⚠로 나올 수 있습니다 — 그 경우 법령명을 명시하세요.`
   )
+  // 같은 인용이 여러 문단에 반복되면 문단별 추출 합(plannedTotal)이 전역 dedup 결과(total)보다
+  // 커서 판정 수가 "인용 N건"을 넘어 보인다 — 그 이유를 밝힌다 (Codex 6차 개선)
+  if (plannedTotal !== total) {
+    console.log(
+      `  여러 구간에 반복된 인용이 있어 검증 대상은 ${plannedTotal}건입니다 (중복 인용을 구간마다 판정 — 아래 ✓/✗/⚠ 합계 기준).`
+    )
+  }
 }
 
 const failLines = []
