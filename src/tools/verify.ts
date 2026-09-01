@@ -383,15 +383,29 @@ export function extractCitationsWithTotal(text: string): { citations: Citation[]
  */
 function mergeTightPass(primary: Citation[], normalized: string): Citation[] {
   const tight = extractPass(normalized, true)
-  const out = [...primary]
-  for (const t of tight) {
-    const tName = compact(t.lawName)
-    const dup = primary.some((p) => {
-      if (p.kind !== t.kind || (p.article || "") !== (t.article || "")) return false
-      const pName = compact(p.lawName)
-      return pName === tName || pName.endsWith(tName) || tName.endsWith(pName)
-    })
-    if (!dup) out.push({ ...t, joinRestored: true })
+  const sameCitation = (a: Citation, b: Citation): boolean => {
+    if (a.kind !== b.kind || (a.article || "") !== (b.article || "")) return false
+    const an = compact(a.lawName)
+    const bn = compact(b.lawName)
+    return an === bn || an.endsWith(bn) || bn.endsWith(an)
+  }
+  const tightOnly = tight.filter((t) => !primary.some((p) => sameCitation(p, t)))
+  // 낱말 안쪽 해석이 인용을 더 찾지 못했으면 어절 경계 해석이 맞다 — 그대로 둔다
+  if (tightOnly.length === 0) return primary
+
+  // 조응 인용("같은 법 제3조")은 **두 패스에서 서로 다른 법령으로 해소된다**.
+  // 공백 해석에서 "소득세법 시 행령 제2조"가 추출되지 않으면 선행사가 앞 문장의 다른
+  // 법으로 넘어가기 때문이다. 그대로 합치면 같은 raw가 두 건이 되어 인용 수가 부풀고,
+  // 두 법령이 모두 실존하면 **엉뚱한 법령에도 확신형 ✓**가 나간다 (Codex 7차 차단).
+  // tight가 새 인용을 찾았다는 것은 그 줄바꿈이 낱말 안쪽이었다는 증거이므로,
+  // 같은 raw에 대해서는 tight 해석을 채택한다 (복원 추정에 기대므로 joinRestored를 남긴다)
+  const out = primary.map((p) => {
+    const alt = tight.find((t) => t.raw === p.raw && compact(t.lawName) !== compact(p.lawName))
+    return alt ? { ...alt, joinRestored: true } : p
+  })
+  for (const t of tightOnly) {
+    if (out.some((o) => o.raw === t.raw && compact(o.lawName) === compact(t.lawName))) continue
+    out.push({ ...t, joinRestored: true })
   }
   return out
 }

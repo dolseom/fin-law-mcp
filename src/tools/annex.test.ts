@@ -252,6 +252,40 @@ describe("fin_annex — 행정규칙 폴백", () => {
     expect(text).toContain("503")
   })
 
+  /**
+   * Codex 7차 중요 — 별표 **내용**은 고정폭 텍스트 아트라 그 안에 태그 문자열이 그대로
+   * 들어올 수 있다. 그대로 split하면 가짜 별표와 **가짜 다운로드 링크**가 만들어진다.
+   */
+  it("별표 내용 CDATA 안의 태그 문자열을 별표로 오인하지 않는다", () => {
+    const poisoned = [
+      '<?xml version="1.0"?><AdmRulService>',
+      "<별표번호>0001</별표번호><별표가지번호>00</별표가지번호><별표구분>별표</별표구분>",
+      "<별표제목><![CDATA[진짜 별표]]></별표제목>",
+      "<별표서식파일링크>/LSW/flDownload.do?flSeq=1</별표서식파일링크>",
+      "<별표내용><![CDATA[표 안내: <별표번호>0009</별표번호><별표제목>가짜 별표</별표제목>",
+      "<별표서식파일링크>/LSW/flDownload.do?flSeq=999</별표서식파일링크> 로 표기함]]></별표내용>",
+      "</AdmRulService>",
+    ].join("")
+    const { entries } = parseAdminRuleAnnexes(poisoned, "1", "테스트규정")
+    expect(entries).toHaveLength(1)
+    expect(entries[0].name).toBe("진짜 별표")
+    expect(entries[0].fileLink).not.toContain("999")
+  })
+
+  it("이름은 맞는데 본문 조회 ID가 없으면 '0건'이 아니라 ⚠다", async () => {
+    const noSeq = ADMRUL_SEARCH.replace(
+      "<행정규칙일련번호>2100000277992</행정규칙일련번호>",
+      ""
+    )
+    const res = await handleFinAnnex(adminRuleClient({ searchAdminRule: async () => noSeq }), {
+      law: "조사사무처리규정",
+      kind: "3",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("⚠ 판정 불가")
+    expect(text).toContain("본문 조회 ID")
+  })
+
   it("접두 일치(다른 규칙)로는 별표를 보여주지 않는다", async () => {
     const other = ADMRUL_SEARCH.replace(
       "<행정규칙명>조사사무처리규정</행정규칙명>",

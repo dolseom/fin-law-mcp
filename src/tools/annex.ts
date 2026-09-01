@@ -118,7 +118,11 @@ export function parseAdminRuleAnnexes(
   }
   const entries: AnnexEntry[] = []
   const byKind: Record<string, number> = {}
-  for (const raw of xml.split("<별표번호>").slice(1)) {
+  // 별표 **내용**은 고정폭 텍스트 아트라 그 안에 "<별표번호>" 같은 문자열이 그대로 들어올 수
+  // 있다. 그대로 split하면 CDATA 속 문자열에서 **가짜 별표와 가짜 다운로드 링크**가 만들어진다
+  // (Codex 7차 중요, 실측 재현). 목록에 필요한 필드는 번호·구분·제목·링크뿐이므로 내용을 걷어낸다
+  const meta = xml.replace(/<별표내용>[\s\S]*?<\/별표내용>/g, "")
+  for (const raw of meta.split("<별표번호>").slice(1)) {
     const no = (/^([^<]*)</.exec(raw)?.[1] || "").trim()
     // 제목이 없으면 별표 블록이 아니다 (본문 텍스트에 태그명이 섞인 경우 방어)
     const name = pick(raw, "별표제목")
@@ -218,12 +222,14 @@ async function extractAnnexContent(
     entries.find((a) => a.no && codes.has(a.no)) ??
     (mainNo !== null ? entries.find((a) => titleMatchesAnnexNo(a.name, mainNo)) : undefined)
   if (!matched) {
-    const avail = entries.slice(0, 15).map((a) => formatAnnexNo(a.no) || a.name).join(", ")
+    // 라벨은 요청한 구분을 따른다 — 서식·별지 요청에 "사용 가능한 별표: 별표 1"이라고
+    // 답하면 사용자가 '서식 1'을 '별표 1'로 오인한다 (Codex 7차 개선)
+    const avail = entries.slice(0, 15).map((a) => formatAnnexNo(a.no, kindLabel) || a.name).join(", ")
     return {
       content: [
         {
           type: "text",
-          text: `[NOT_FOUND] "${selector}"에 해당하는 별표가 없습니다 (법령: ${law}).\n사용 가능한 별표: ${avail || "없음"}\n\n${SOURCE_FOOTER}`,
+          text: `[NOT_FOUND] "${selector}"에 해당하는 ${kindLabel}이(가) 없습니다 (법령: ${law}).\n사용 가능한 ${kindLabel}: ${avail || "없음"}\n\n${SOURCE_FOOTER}`,
         },
       ],
       isError: true,
@@ -319,6 +325,12 @@ export async function handleFinAnnex(
     if (entries.length === 0 && isAdminRuleLikeName(lawLookup)) {
       try {
         const match = await findAdminRule(apiClient, lawLookup)
+        // 이름은 정확히 맞는데 본문 조회 ID가 없으면 별표를 확인할 방법이 없다 —
+        // 그대로 "0건"으로 내보내면 실존 별표가 없는 것으로 읽힌다 (Codex 7차 중요.
+        // 조문 검증 경로는 같은 상황을 ⚠로 처리하는데 별표 경로에만 빠져 있었다)
+        if (match?.exact && !match.seq) {
+          adminRuleFailure = `행정규칙 「${match.name}」은 실존하나 본문 조회 ID(행정규칙일련번호)를 받지 못해 별표를 확인할 수 없습니다`
+        }
         // 접두 일치(더 긴 다른 규칙)로 남의 별표를 보여주지 않는다 — 정확 일치만
         if (match?.exact && match.seq) {
           const body = await apiClient.getAdminRule(match.seq)

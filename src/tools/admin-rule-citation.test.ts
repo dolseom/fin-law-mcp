@@ -1,7 +1,16 @@
 // 자체 패치 #4 테스트 — verify_citations 행정규칙 인용 검증
 import { describe, expect, it } from "vitest"
 import type { LawApiClient } from "../lib/api-client.js"
-import { isAdminRuleName, isAdminRuleLikeName, findAdminRule, stripRuleNameMeta, stripTrailingParen, tryVerifyAdminRuleCitation, verifyAdminRuleCitation } from "./admin-rule-citation.js"
+import {
+  isAdminRuleName,
+  isAdminRuleLikeName,
+  findAdminRule,
+  stripRuleNameMeta,
+  stripTrailingParen,
+  tryVerifyAdminRuleCitation,
+  verifyAdminRuleCitation,
+  checkAdminRuleArticle,
+} from "./admin-rule-citation.js"
 // fin-law-mcp: upstream verify-citations 대신 자체 verify.ts의 추출기로 연결
 // (상한 15은 추출기 내부 고정)
 import { extractCitations as parseCitations } from "./verify.js"
@@ -331,5 +340,50 @@ describe("발령일 괄호가 붙은 soft 접미사 인용 (Claude 리뷰 중요
       "가공전산처리고시(2026. 1. 1.)"
     )
     expect(line.startsWith("✗")).toBe(true)
+  })
+})
+
+/**
+ * 행정규칙 본문 조문 대조 (2026-09-01 신설, Codex 7차 중요 반영).
+ * 본문은 213~405KB로 커서 전송이 끊길 수 있다 — 잘린 응답을 앞부분만 파싱해 확정 판정을
+ * 내면 실존 조문이 ✗가 되거나 없는 조문이 ✓가 된다. 잘림·오류는 판정 불가(throw)여야 한다.
+ */
+describe("checkAdminRuleArticle — 본문 대조", () => {
+  const bodyClient = (xml: string): LawApiClient =>
+    ({ getAdminRule: async () => xml }) as unknown as LawApiClient
+
+  const FULL = [
+    '<?xml version="1.0"?><AdmRulService><행정규칙기본정보><조문형식여부>Y</조문형식여부></행정규칙기본정보>',
+    "<조문내용>제1장 총 칙</조문내용>",
+    "<조문내용>제1조(목적) 이 규정은 …</조문내용>",
+    "<조문내용>제5조의2(관할 조정) … 제99조에 따라 …</조문내용>",
+    "</AdmRulService>",
+  ].join("")
+
+  it("조문 표제로 시작하는 것만 센다 (본문 중간 참조는 조문이 아니다)", async () => {
+    const hit = await checkAdminRuleArticle(bodyClient(FULL), "1", "제5조의2")
+    expect(hit).toEqual({ status: "확인", total: 2 }) // 장 제목은 조문으로 세지 않는다
+    const miss = await checkAdminRuleArticle(bodyClient(FULL), "1", "제99조")
+    expect(miss).toEqual({ status: "없음", total: 2 })
+  })
+
+  it("중간에 끊긴 응답은 확정 판정을 내지 않는다 (판정 불가)", async () => {
+    const truncated = '<?xml version="1.0"?><AdmRulService><조문형식여부>Y</조문형식여부><조문내용>제5조의 2(제목) 본문'
+    await expect(checkAdminRuleArticle(bodyClient(truncated), "1", "제5조의2")).rejects.toThrow(/끊긴/)
+    // 잘림 지점 이전에 없는 조문도 "없음"으로 단정하면 안 된다
+    await expect(checkAdminRuleArticle(bodyClient(truncated), "1", "제99조")).rejects.toThrow(/끊긴/)
+  })
+
+  it("오류 루트 응답은 '조문 형식 아님'이 아니라 판정 불가다", async () => {
+    const err = '<?xml version="1.0"?><error><message>temporary</message></error>'
+    await expect(checkAdminRuleArticle(bodyClient(err), "1", "제23조")).rejects.toThrow(/예상 밖 응답/)
+  })
+
+  it("조문형식여부=N이면 조문 단위 판정을 하지 않는다", async () => {
+    const flat = [
+      '<?xml version="1.0"?><AdmRulService><조문형식여부>N</조문형식여부>',
+      "<조문내용>제1-1조 … 제10-2조 …</조문내용></AdmRulService>",
+    ].join("")
+    expect(await checkAdminRuleArticle(bodyClient(flat), "1", "제23조")).toEqual({ status: "형식아님" })
   })
 })

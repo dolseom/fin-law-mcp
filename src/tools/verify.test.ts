@@ -1049,6 +1049,25 @@ describe("extractCitations — 낱말 안쪽 줄바꿈 복원 (Codex 6차 차단
     expect(total).toBe(1)
     expect(citations[0].joinRestored).toBeUndefined()
   })
+
+  /**
+   * Codex 7차 차단 — 두 패스 병합의 반작용.
+   * 조응("같은 법")은 패스마다 다른 선행사로 해소된다. 공백 해석에서 감싸인 인용이
+   * 추출되지 않으면 선행사가 앞 문장의 다른 법으로 넘어가기 때문이다. 그대로 합치면
+   * 같은 raw가 두 건이 되어 인용 수가 부풀고, 두 법령이 모두 실존하면 **엉뚱한 법령에도
+   * 확신형 ✓**가 나간다 (프로브에서 4건 전부 ✓로 재현됐다).
+   */
+  it("조응 인용이 패스별로 다르게 해소돼도 한 건이다 (tight 해석 채택)", () => {
+    const { citations, total } = extractCitationsWithTotal(
+      "법인세법 제1조를 본다. 소득세법 시\n행령 제2조와 같은 법 제3조를 본다."
+    )
+    expect(total).toBe(3)
+    const anaphors = citations.filter((c) => c.raw.startsWith("같은 법"))
+    expect(anaphors).toHaveLength(1)
+    // 낱말 안쪽 해석이 인용을 더 찾았다 = 그 줄바꿈이 낱말 안쪽이었다는 증거
+    expect(anaphors[0].lawName).toBe("소득세법")
+    expect(anaphors[0].joinRestored).toBe(true)
+  })
 })
 
 describe("extractCitations — 괄호 안 「」 인용의 조응 오염 (Codex 6차 중요)", () => {

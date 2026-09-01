@@ -119,6 +119,11 @@ export class ResponseCache {
 export function isCacheableBody(text: string): boolean {
   if (!text || !text.trim()) return false
   if (/^\s*<!doctype\s+html|^\s*<html[\s>]/i.test(text)) return false
+  // 법제처는 200 + 정상 형식의 오류 본문도 돌려준다 (<error>…</error>,
+  // {"error":…}). 이것을 담으면 일시 장애가 TTL 동안 "0건"으로 고정된다 — 상위 가드가
+  // 잡기 전에 캐시에서 먼저 거른다 (Codex 7차 중요)
+  if (/^\s*(?:<\?xml[^>]*\?>\s*)?<\s*(?:error|Error|ERROR|fault|OpenAPI_ServiceResponse)[\s>]/.test(text)) return false
+  if (/^\s*\{\s*"(?:error|errorMessage|resultCode)"/.test(text)) return false
   return true
 }
 

@@ -395,7 +395,34 @@ export class LawApiClient {
         "별표 조회 - API가 HTML 페이지를 반환했습니다. 법제처 OPEN API 신청에 '별표·서식'이 포함되지 않았거나 일시 장애일 수 있습니다 (open.law.go.kr에서 신청 범위 확인)."
       )
     }
+    // 200 + 정상 형식의 오류 JSON({"error":…})이 파서에서 "별표 0건"으로 읽히던 자리
+    // (Codex 7차 중요) — 최상위 키를 확인해 확인 실패로 돌린다.
+    // 루트 키는 target에 따라 다르다 (licbyl→LicBylSearch, ordinbyl·admbyl→각자)
+    this.assertAnnexJsonRoot(text, target)
     return text
+  }
+
+  /** 별표 응답의 최상위 키 검증 — 오류 JSON이 "0건"으로 읽히는 것을 막는다 */
+  private assertAnnexJsonRoot(text: string, target: string): void {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      throw new Error(
+        `별표 조회 - 법제처 API 응답을 JSON으로 파싱하지 못했습니다 — "0건"이 아니라 확인 실패로 처리하세요.`
+      )
+    }
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error(`별표 조회 - 법제처 API가 예상 밖 응답을 반환했습니다 — "0건"이 아니라 확인 실패로 처리하세요.`)
+    }
+    const keys = Object.keys(parsed as Record<string, unknown>)
+    // 정상 응답의 루트 키는 목록 컨테이너다. 오류 응답은 error·errorMessage 등을 준다
+    if (keys.length === 0 || keys.some((k) => /^(?:error|errorMessage|fault)$/i.test(k))) {
+      throw new Error(
+        `별표 조회(${target}) - 법제처 API가 오류 응답(최상위 키: ${keys.slice(0, 3).join(", ") || "없음"})을 ` +
+          `반환했습니다 — "0건"이 아니라 확인 실패로 처리하세요.`
+      )
+    }
   }
 
   /**

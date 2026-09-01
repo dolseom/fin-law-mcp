@@ -117,6 +117,17 @@ export async function checkAdminRuleArticle(
 ): Promise<AdminArticleCheck> {
   const xml = await apiClient.getAdminRule(seq, apiKey, signal)
   if (!xml || !xml.trim()) throw new Error("행정규칙 본문이 빈 응답 — 조문 확인 불가")
+  // 응답이 끝까지 왔는지 먼저 본다 — 전송이 중간에 끊긴 XML은 앞부분만 파싱되어
+  // "조문 N개 중 없음(✗)"이나 "확인(✓)"이라는 **틀린 확정 판정**을 만든다 (Codex 7차 중요).
+  // 잘림은 판정 불가(⚠)여야 한다
+  const rootMatch = /<\s*([A-Za-z_][\w]*)[\s>]/.exec(xml)
+  const root = rootMatch?.[1]
+  if (root !== "AdmRulService") {
+    throw new Error(`행정규칙 본문이 예상 밖 응답(루트 ${root || "없음"}) — 조문 확인 불가`)
+  }
+  if (!/<\/\s*AdmRulService\s*>\s*$/.test(xml.trimEnd())) {
+    throw new Error("행정규칙 본문이 중간에 끊긴 응답(닫는 태그 없음) — 조문 확인 불가")
+  }
   const format = /<조문형식여부>\s*([YN])\s*<\/조문형식여부>/.exec(xml)?.[1]
   const bodies = xml.split("<조문내용>").slice(1)
   // 조문형식여부가 없거나 N이면 조문 단위 판정을 하지 않는다

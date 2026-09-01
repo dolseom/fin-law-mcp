@@ -60,6 +60,24 @@ describe("isCacheableBody — 장애 응답은 담지 않는다", () => {
       expect(isCacheableBody(body)).toBe(false)
     }
   )
+
+  /**
+   * Codex 7차 중요 — 법제처는 200 + **정상 형식의 오류 본문**도 준다. 이것을 담으면
+   * 일시 장애가 TTL 동안 "0건"으로 고정된다 (상위 파서가 항목 0개로 읽는다).
+   */
+  it.each([
+    '{"error":{"message":"temporary"}}',
+    '{"errorMessage":"일시 오류"}',
+    "<error><message>temporary</message></error>",
+    '<?xml version="1.0"?><error><code>SVC-001</code></error>',
+  ])("200 상태의 오류 본문도 담지 않는다 (%s)", (body) => {
+    expect(isCacheableBody(body)).toBe(false)
+  })
+
+  it("0건이 정상인 응답은 담는다 (오류와 구분)", () => {
+    expect(isCacheableBody('<?xml version="1.0"?><LawSearch><totalCnt>0</totalCnt></LawSearch>')).toBe(true)
+    expect(isCacheableBody('{"별표목록":[]}')).toBe(true)
+  })
 })
 
 describe("LawApiClient — 캐시 배선", () => {
