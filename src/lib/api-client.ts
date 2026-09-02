@@ -11,7 +11,6 @@ import { fetchWithRetry } from "./fetch-with-retry.js"
 // 영구 404가 사실상 없으므로 404를 재시도 대상에 포함한다.
 // 재시도 2회·콜당 timeout 3초 (PRD 04 운영 계약 — 콜 하나가 도구 deadline 6초를 다 먹지 않게)
 const DRF_RETRY = { retryOn: [404, 429, 503, 504], retries: 2, timeout: 3000 }
-import { requestContext } from "./session-state.js"
 import { getLawApiBaseUrl } from "./law-url-config.js"
 import { createTokenBucket, createDailyCap, createSemaphore, type TokenBucket, type DailyCap, type Semaphore } from "./rate-limit.js"
 import { createResponseCacheFromEnv, isCacheableBody, type ResponseCache, type ResponseCacheStats } from "./response-cache.js"
@@ -120,15 +119,16 @@ export class LawApiClient {
   /**
    * API 키 결정 순서:
    * 1. 요청별 override 키
-   * 2. 현재 요청 컨텍스트의 API 키 (HTTP stateless 모드)
-   * 3. 환경변수 LAW_OC
-   * 4. 생성자에서 받은 기본 키
+   * 2. 환경변수 LAW_OC
+   * 3. 생성자에서 받은 기본 키
+   *
+   * (upstream의 HTTP stateless 요청 컨텍스트 키 단계는 제거됨 — 이 서버는 stdio
+   *  전용이라 컨텍스트를 주입하는 호출부가 없어 항상 undefined였다)
    */
   private getApiKey(overrideKey?: string): string {
-    const ctxApiKey = requestContext.getStore()?.apiKey
     // KOREAN_LAW_API_KEY(기존 korean-law MCP의 변수) 폴백은 제거 — 문서 계약은
     // "LAW_OC만"이고, 다른 서버의 키를 조용히 빌려 쓰면 rate limit 공유가 숨는다 (Codex 리뷰)
-    const key = overrideKey || ctxApiKey || process.env.LAW_OC || this.defaultApiKey
+    const key = overrideKey || process.env.LAW_OC || this.defaultApiKey
     if (!key) {
       throw new Error("API 키가 필요합니다. 법제처(https://open.law.go.kr/LSO/openApi/guideResult.do)에서 발급받으세요.")
     }

@@ -30,6 +30,12 @@ jobs:
 
       - run: npm run typecheck
 
+      # 죽은 코드 게이트 — 미사용 파일·의존성이 다시 쌓이지 않게 한다.
+      # (upstream 잔재 8개 파일이 import 0건인 채로 남아 있던 이력)
+      # export 단위 검사는 knip.json의 exclude로 아직 게이트 밖이다 —
+      # 잔여 21건을 보려면 `npm run lint:dead:all`
+      - run: npm run lint:dead
+
       # 훅 회귀 테스트(test/verify-file-hook.test.ts)는 build/를 import해 서브프로세스로
       # 돈다 — build가 test보다 앞이어야 CI에서 skip되지 않는다
       - run: npm run build

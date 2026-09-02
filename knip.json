@@ -1,0 +1,34 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+
+  // 진입점: MCP 서버 본체 + 스크립트 + 테스트.
+  // 테스트를 진입점에 넣지 않으면 "테스트에서만 쓰는 export"가 전부 미사용으로 잡힌다.
+  "entry": [
+    "src/index.ts",
+    "src/**/*.test.ts",
+    "scripts/*.mjs",
+    "test/**/*.ts",
+    "test/fixtures/*.mjs"
+  ],
+
+  "project": [
+    "src/**/*.ts",
+    "scripts/**",
+    "test/**"
+  ],
+
+  // 같은 파일 안에서만 쓰이는 export는 미사용으로 보지 않는다.
+  // (테스트 가시성·문서 목적의 export가 많아 이것을 켜지 않으면 58건이 잡히고
+  //  그 대부분이 실제로는 파일 내부에서 쓰인다)
+  "ignoreExportsUsedInFile": true,
+
+  // ⚠ export 단위 검사는 CI 게이트에서 일단 제외한다.
+  // 이유: 도입 시점(A1)에 미사용 export 21건(export 19 + 타입 2)이 남아 있고,
+  // 전부 이 패키지의 담당 파일 밖(abolished-laws·errors·xml-parser·law-parser 등)이라
+  // 여기서 지울 수 없다. 게이트를 빨간불로 두면 CI가 신호가 아니라 잡음이 된다.
+  // 파일·의존성 단위 검사(A1이 실제로 청소한 범위)는 그대로 강제된다.
+  // 남은 export 목록은 `npm run lint:dead:all`로 언제든 볼 수 있다
+  // (이 exclude를 --include로 덮어쓰므로 21건이 나오고 종료 코드는 1이다 — 진단용).
+  // 그 21건이 정리되면 이 exclude를 지우는 것이 다음 단계다.
+  "exclude": ["exports", "nsExports", "types", "nsTypes"]
+}

@@ -1,61 +1,15 @@
 /**
- * 공통 Zod 스키마
+ * 응답 길이 제한 유틸
+ *
+ * 원래는 공통 Zod 스키마 모음이었으나, 날짜·페이지네이션 스키마는 각 도구가
+ * 자체 inputSchema로 정의하게 되면서 소비자가 사라졌다. 지금 남은 소비자는
+ * nts-body의 truncateResponse 하나뿐이다.
  */
-
-import { z } from "zod"
-
-/**
- * 날짜 스키마 (YYYYMMDD 형식)
- */
-export const dateSchema = z
-  .string()
-  .regex(/^\d{8}$/, "날짜 형식: YYYYMMDD (예: 20240101)")
-  .refine(
-    (val) => {
-      const year = parseInt(val.slice(0, 4), 10)
-      const month = parseInt(val.slice(4, 6), 10)
-      const day = parseInt(val.slice(6, 8), 10)
-
-      if (year < 1900 || year > 2100) return false
-      if (month < 1 || month > 12) return false
-      if (day < 1 || day > 31) return false
-
-      // 월별 일수 체크
-      const daysInMonth = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-      const isLeapYear = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
-      if (month === 2 && isLeapYear) {
-        return day <= 29
-      }
-      return day <= daysInMonth[month - 1]
-    },
-    { message: "유효하지 않은 날짜입니다." }
-  )
-
-/**
- * 선택적 날짜 스키마
- */
-export const optionalDateSchema = dateSchema.optional()
-
-/**
- * 페이지네이션 스키마
- */
-export const paginationSchema = z.object({
-  display: z.number().min(1).max(100).default(20).describe("결과 수 (기본:20, 최대:100)"),
-  page: z.number().min(1).default(1).describe("페이지 번호 (기본:1)"),
-})
 
 /**
  * 응답 크기 제한 (50KB)
  */
-export const MAX_RESPONSE_SIZE = 50000
-
-/**
- * 날짜 포맷 (YYYYMMDD → YYYY.MM.DD)
- */
-export function formatDateDot(dateStr: string): string {
-  if (!dateStr || dateStr.length < 8) return dateStr || "N/A"
-  return `${dateStr.substring(0, 4)}.${dateStr.substring(4, 6)}.${dateStr.substring(6, 8)}`
-}
+const MAX_RESPONSE_SIZE = 50000
 
 /**
  * truncateResponse 옵션
@@ -135,59 +89,4 @@ function _extractSummary(text: string, maxSize: number): string {
 
   const tail = `\n\n📋 요약 모드: 원문 ${text.length.toLocaleString()}자 중 핵심만 추출 (${collected.join("\n").length.toLocaleString()}자)`
   return collected.join("\n") + tail
-}
-
-/**
- * 체인 도구용 섹션별 truncation
- *
- * 형식이 "▶ 섹션제목\n내용" 패턴인 텍스트에서
- * 각 섹션을 개별적으로 길이 제한하여 전체 균형 유지.
- *
- * @param text - "▶ 제목\n내용\n\n▶ 제목\n내용" 형태
- * @param totalMax - 전체 최대 길이
- * @param sectionMax - 섹션당 최대 길이 (기본: totalMax / 섹션 수)
- */
-export function truncateSections(
-  text: string,
-  totalMax: number = MAX_RESPONSE_SIZE,
-  sectionMax?: number
-): string {
-  if (text.length <= totalMax) return text
-
-  // "▶ " 패턴으로 섹션 분리
-  const sectionPattern = /(?=▶\s)/g
-  const parts = text.split(sectionPattern)
-
-  // 첫 조각이 빈 문자열이거나 헤더 이전 텍스트인 경우 분리
-  let preamble = ""
-  let sections = parts
-  if (parts.length > 0 && !parts[0].startsWith("▶")) {
-    preamble = parts[0]
-    sections = parts.slice(1)
-  }
-
-  if (sections.length === 0) {
-    // 섹션 패턴이 없으면 일반 truncation
-    return truncateResponse(text, totalMax)
-  }
-
-  const perSection = sectionMax || Math.floor((totalMax - preamble.length - 100) / sections.length)
-
-  const truncatedSections = sections.map((sec) => {
-    if (sec.length <= perSection) return sec
-    const truncated = sec.slice(0, perSection)
-    // 마지막 완전한 줄에서 자르기
-    const lastNewline = truncated.lastIndexOf("\n")
-    const clean = lastNewline > 0 ? truncated.slice(0, lastNewline) : truncated
-    return clean + `\n   ⚠️ (이 섹션 ${sec.length.toLocaleString()}자 → ${perSection.toLocaleString()}자로 축약)`
-  })
-
-  let result = preamble + truncatedSections.join("\n\n")
-
-  // 전체 길이 재확인
-  if (result.length > totalMax) {
-    result = result.slice(0, totalMax) + `\n\n⚠️ 전체 응답이 ${totalMax.toLocaleString()}자로 잘렸습니다.`
-  }
-
-  return result
 }

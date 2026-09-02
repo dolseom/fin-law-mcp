@@ -10,6 +10,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
+    "lint:dead": "knip",
+    "lint:dead:all": "knip --include exports,nsExports,types,nsTypes",
     "test": "vitest run",
     "test:live": "vitest run --config vitest.live.config.ts",
     "prepack": "npm run build",
@@ -52,6 +54,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "knip": "^6.34.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }

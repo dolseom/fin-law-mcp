@@ -1,7 +1,6 @@
 import http from "node:http"
 import net from "node:net"
 import tls from "node:tls"
-import { getRequestSignal, requestCancelledError, requestContext, throwIfRequestCancelled } from "./session-state.js"
 
 const DEFAULT_TIMEOUT = 30000
 
@@ -70,8 +69,6 @@ export async function requestExternalHttps(
   if (!config) {
     throw new Error("LAW_EXTERNAL_HTTPS_PROXY is not configured")
   }
-  throwIfRequestCancelled()
-  requestContext.getStore()?.budget?.consumeUpstreamRequest()
 
   const targetUrl = new URL(url)
   if (targetUrl.protocol !== "https:") {
@@ -104,21 +101,10 @@ export async function requestExternalHttps(
       timeout,
     }, (response) => {
       const chunks: Buffer[] = []
-      let bodyBytes = 0
       response.on("data", (chunk) => {
-        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-        bodyBytes += bytes.byteLength
-        try {
-          const budget = requestContext.getStore()?.budget
-          budget?.ensureResponseBodySize(bodyBytes)
-          budget?.consumeUpstreamBody(bytes.byteLength)
-          chunks.push(bytes)
-        } catch (error) {
-          request.destroy(error instanceof Error ? error : new Error(String(error)))
-        }
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
       })
       response.on("end", () => {
-        cleanupAbort()
         resolve({
           ok: response.statusCode ? response.statusCode >= 200 && response.statusCode < 300 : false,
           status: response.statusCode || 0,
@@ -127,25 +113,16 @@ export async function requestExternalHttps(
         })
       })
       response.on("error", (error) => {
-        cleanupAbort()
         reject(error)
       })
     })
 
-    const signal = getRequestSignal()
-    const onAbort = () => request.destroy(requestCancelledError(signal?.reason))
-    const cleanupAbort = () => signal?.removeEventListener("abort", onAbort)
-    if (signal?.aborted) {
-      request.destroy(requestCancelledError(signal.reason))
-    } else {
-      signal?.addEventListener("abort", onAbort, { once: true })
-    }
-
+    // 취소는 요청 컨텍스트(AsyncLocalStorage)가 아니라 아래 timeout 경로가 담당한다.
+    // 컨텍스트를 주입하는 호출부가 없어 이전의 signal 배선은 항상 undefined였다.
     request.on("timeout", () => {
       request.destroy(new Error(`External HTTPS request timeout after ${timeout}ms`))
     })
     request.on("error", (error) => {
-      cleanupAbort()
       reject(error)
     })
     if (body) request.write(body)
