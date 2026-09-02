@@ -1,7 +1,24 @@
 /**
- * Simple in-memory cache for law data
- * 자주 조회되는 법령 데이터를 캐싱하여 API 호출 절약
+ * 파싱 결과 캐시 — 자주 조회되는 법령 데이터를 캐싱하여 API 호출·재파싱 절약.
+ *
+ * ⚠ 이 저장소에는 캐시가 **둘**이다. 규칙이 어긋나면 안 된다:
+ *  ① `response-cache.ts` — drfFetch 단일 관문의 **응답 본문** 캐시
+ *  ② 이 파일의 `lawCache` — law-search·abolished-laws의 **파싱 결과** 캐시
+ *
+ * 둘 다 `FIN_CACHE_TTL_SEC` 하나로 제어한다. 종전에는 ②가 env와 무관한 1시간 고정이라
+ *  · `FIN_CACHE_TTL_SEC=0`(장애 진단용 탈출구)이 ①만 끄고 ②는 그대로 살아 있었고
+ *  · README가 약속한 "신선도를 최대 TTL만큼 늦춘다"가 ②에서는 6배(10분 → 1시간) 틀렸다.
+ * 이제 env가 ②의 **상한**이다 — 호출부가 더 짧은 TTL을 요청하면 그쪽이 이긴다.
  */
+
+import { resolveCacheTtlMs } from "./response-cache.js"
+
+/** 호출부 기본 TTL — env가 더 짧으면 env가 이긴다 */
+export const DEFAULT_LAW_CACHE_TTL_MS = 60 * 60 * 1000
+
+// env 파싱은 response-cache.ts의 resolveCacheTtlMs 하나만 쓴다 — 두 계층이 같은 판정을
+// 공유해야 하고, 규칙을 두 곳에 쓰면 어긋난다 (cache.test.ts가 일치를 대조한다)
+export { resolveCacheTtlMs }
 
 interface CacheEntry<T> {
   data: T
@@ -21,6 +38,15 @@ export class SimpleCache {
   set<T>(key: string, data: T, ttl: number = 24 * 60 * 60 * 1000): void {
     // TTL default: 24 hours
 
+    const envTtl = resolveCacheTtlMs()
+    if (envTtl <= 0) {
+      // FIN_CACHE_TTL_SEC=0 — 완전 bypass. 이미 담긴 항목도 지운다(런타임 중 꺼도 즉시 듣도록)
+      this.cache.delete(key)
+      return
+    }
+    // env는 상한이다 — 호출부가 더 짧게 요청하면 그쪽을 쓴다
+    const effectiveTtl = Math.min(ttl, envTtl)
+
     // If cache is full, evict expired entries first, then oldest
     if (this.cache.size >= this.maxSize && !this.cache.has(key)) {
       this.evictOne()
@@ -31,7 +57,7 @@ export class SimpleCache {
     this.cache.set(key, {
       data,
       timestamp: Date.now(),
-      ttl
+      ttl: effectiveTtl
     })
   }
 
@@ -53,6 +79,7 @@ export class SimpleCache {
   }
 
   get<T>(key: string): T | null {
+    if (resolveCacheTtlMs() <= 0) return null // FIN_CACHE_TTL_SEC=0 — 항상 miss
     const entry = this.cache.get(key)
 
     if (!entry) {
@@ -74,6 +101,7 @@ export class SimpleCache {
   }
 
   has(key: string): boolean {
+    if (resolveCacheTtlMs() <= 0) return false // FIN_CACHE_TTL_SEC=0 — 항상 miss
     const entry = this.cache.get(key)
     if (!entry) return false
 

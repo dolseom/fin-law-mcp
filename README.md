@@ -75,7 +75,7 @@ npm install && npm run build
 | `FIN_NTS_BODY_TOP_N` | 예규 본문 자동 동봉 건수 (기본 2, 최대 5) |
 | `FIN_DRF_RATE_PER_MIN` / `FIN_DRF_DAILY_CAP` | 법제처 호출 한도 (기본 30/분, 1,500/일) |
 | `FIN_DRF_MAX_CONCURRENCY` | 동시 호출 상한 (기본 4) |
-| `FIN_CACHE_TTL_SEC` | 응답 캐시 TTL (기본 600초, `0`이면 비활성). 같은 조회의 반복 왕복을 프로세스 안에서 접는다 — 행정규칙 본문(213~405KB) 재조회가 1258ms → 9ms |
+| `FIN_CACHE_TTL_SEC` | 캐시 TTL (기본 600초, `0`이면 비활성). **응답 본문 캐시와 검색·폐지연혁 파싱 결과 캐시 두 계층을 함께 제어**하고 각 계층 자체 TTL의 상한이 된다 — `0`이면 둘 다 완전히 꺼진다. 같은 조회의 반복 왕복을 프로세스 안에서 접는다 (행정규칙 본문 213~405KB 재조회 1258ms → 9ms) |
 | `FIN_CACHE_MAX_ENTRIES` / `FIN_CACHE_MAX_MB` | 캐시 상한 (기본 200건 / 16MB). 오류·HTML 장애 응답은 담지 않는다 |
 | `LAW_API_PROTOCOL` / `LAW_RESPONSE_TYPE` | 폐쇄망 http 전환 / XML 장애 시 JSON 우회 |
 

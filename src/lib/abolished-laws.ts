@@ -10,7 +10,7 @@
  */
 
 import type { LawApiClient } from "./api-client.js"
-import { lawCache } from "./cache.js"
+import { lawCache, DEFAULT_LAW_CACHE_TTL_MS } from "./cache.js"
 import { extractTag } from "./xml-parser.js"
 import { normalizeAliasKey } from "./search-normalizer.js"
 
@@ -84,7 +84,8 @@ export async function findAbolishedLaws(
   try {
     const xml = await apiClient.searchLaw(lookup, apiKey, 50, "eflaw")
     const parsed = parseAbolishedLawsXml(xml, lookup)
-    lawCache.set(cacheKey, parsed, 60 * 60 * 1000)
+    // 정상 조회 후의 결과만 담는다 — 실패는 catch로 빠지므로 여기 도달하지 않는다
+    lawCache.set(cacheKey, parsed, DEFAULT_LAW_CACHE_TTL_MS)
     return parsed
   } catch {
     return []
@@ -181,6 +182,10 @@ export async function detectAbolishedAdminRule(
     throw new Error("요청 취소됨(도구 deadline) — 행정규칙 연혁 확인 전에 시간 상한 도달")
   }
   let result: string | null = null
+  // 폐지사유 본문 조회가 실패하면 안내문이 '반쪽'(폐지사유·후속 규정 없음)으로 나온다.
+  // 그 반쪽을 캐시하면 장애가 걷힌 뒤에도 TTL 동안 후속 규정 없이 답하게 된다 —
+  // 아래에서 캐시를 건너뛴다
+  let partial = false
   try {
     const xml = await apiClient.searchAdminRule({ query, nw: "2", apiKey, signal })
     const hits = parseAdmrulHistoryXml(xml)
@@ -202,7 +207,9 @@ export async function detectAbolishedAdminRule(
       if (!g.some((h) => isRelated(h.name, query))) continue
 
       if (latest.revisionType === "폐지") {
-        result = await buildAbolishedAdminRuleNote(apiClient, query, g, apiKey)
+        const built = await buildAbolishedAdminRuleNote(apiClient, query, g, apiKey)
+        result = built.note
+        partial = built.bodyLookupFailed
         break
       }
       // 현행이 살아있는데 현행 검색이 0건이었다면 제명변경(구명칭 검색) 케이스
@@ -220,7 +227,9 @@ export async function detectAbolishedAdminRule(
     // 실패는 캐시하지 않는다 (일시 장애를 한 시간 동안 굳히지 않기 위해)
     throw new Error(`행정규칙 연혁 조회 실패: ${e instanceof Error ? e.message : String(e)}`)
   }
-  lawCache.set(cacheKey, result || "", 60 * 60 * 1000)
+  // 정상 조회 후의 결과만 담는다 — "해당없음"("")은 담고, 반쪽 안내문은 담지 않는다.
+  // "정상 조회 후 0건"과 "조회 실패"의 구분이 이 저장소의 제1원칙이다
+  if (!partial) lawCache.set(cacheKey, result || "", DEFAULT_LAW_CACHE_TTL_MS)
   return result
 }
 
@@ -229,7 +238,7 @@ async function buildAbolishedAdminRuleNote(
   query: string,
   history: AdmRuleHistoryHit[],
   apiKey?: string
-): Promise<string> {
+): Promise<{ note: string; bodyLookupFailed: boolean }> {
   const latest = history[history.length - 1] // 폐지 레코드
   const prev = history.length >= 2 ? history[history.length - 2] : null
 
@@ -242,8 +251,11 @@ async function buildAbolishedAdminRuleNote(
     lines.push(`   - 폐지 직전 버전: 행정규칙일련번호 ${prev.seq} (발령 ${fmtDate(prev.promDate)}) — 폐지 전 본문이 필요하면 get_admin_rule(id="${prev.seq}")`)
   }
 
-  // 폐지 레코드 본문에서 폐지사유·후속 규정 추출 (실패해도 폐지 안내 자체는 유지)
+  // 폐지 레코드 본문에서 폐지사유·후속 규정 추출 (실패해도 폐지 안내 자체는 유지).
+  // ⚠ 조회 실패와 "조회했으나 후속 규정이 없음"을 같은 문장으로 쓰면 안 된다 —
+  // 전자는 아직 모르는 것이고 후자는 확인된 것이다 (3값 판정)
   let successors: string[] = []
+  let bodyLookupFailed = false
   try {
     const bodyXml = await apiClient.getAdminRule(latest.seq, apiKey)
     const reason = extractAbolitionReason(bodyXml)
@@ -251,14 +263,18 @@ async function buildAbolishedAdminRuleNote(
       lines.push("", "폐지사유(제개정이유):", ...reason.split("\n").map((l) => `   ${l}`))
       successors = extractSuccessorNames(reason, history.map((h) => h.name))
     }
-  } catch { /* 보조 정보 — 무시 */ }
+  } catch {
+    bodyLookupFailed = true
+  }
 
   lines.push("")
   if (successors.length > 0) {
     lines.push(`💡 후속(통합) 규정: ${successors.map((s) => `「${s}」`).join(", ")} — search_admin_rule("${successors[0]}")로 현행 규정을 조회해 그 기준으로 답변하세요.`)
+  } else if (bodyLookupFailed) {
+    lines.push(`⚠️ 폐지사유 본문 조회에 **실패**했습니다 — 후속 규정이 없다는 뜻이 아닙니다. get_admin_rule(id="${latest.seq}")로 직접 조회하거나 잠시 후 재시도하세요.`)
   } else {
     lines.push(`💡 후속 규정 자동 추출 실패 — 위 폐지사유를 근거로 후속·통합 규정을 확인하거나, 소관부처(${latest.orgName})의 제도 키워드로 search_admin_rule 재검색하세요.`)
   }
   lines.push("⚠️ 폐지된 행정규칙을 현행 기준으로 인용하지 마세요. 답변에는 폐지 사실과 후속 규정을 명시하세요.")
-  return lines.join("\n") + "\n"
+  return { note: lines.join("\n") + "\n", bodyLookupFailed }
 }

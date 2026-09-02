@@ -7,7 +7,7 @@
  */
 
 import type { LawApiClient } from "./api-client.js"
-import { lawCache } from "./cache.js"
+import { lawCache, DEFAULT_LAW_CACHE_TTL_MS } from "./cache.js"
 import { extractTag } from "./xml-parser.js"
 import { normalizeLawSearchText, resolveLawAlias } from "./search-normalizer.js"
 
@@ -238,8 +238,13 @@ export async function findLaws(
 
   // max만큼만 반환
   const final = results.slice(0, max)
-  if (final.length > 0) {
-    lawCache.set(cacheKey, final, 60 * 60 * 1000)
+  // 0건은 담지 않는다(네거티브 캐시 금지). 그리고 **부분 실패도 담지 않는다**:
+  // 사다리 앞 단계가 인프라 오류로 죽고 뒤 단계(부가키워드 제거·패턴 추출)가 답을 냈다면
+  // 그 답은 원본 쿼리의 정답이 아니라 **폴백의 답**이다. 담으면 법제처 일시 장애가
+  // 만든 차선책이 TTL 동안 고정되고, 장애가 걷혀도 원본 쿼리를 다시 타지 않는다
+  // (Codex 7차 "오류 응답이 캐시되어 0건으로 고정"과 같은 부류)
+  if (final.length > 0 && lastInfraError === undefined) {
+    lawCache.set(cacheKey, final, DEFAULT_LAW_CACHE_TTL_MS)
   }
 
   return final

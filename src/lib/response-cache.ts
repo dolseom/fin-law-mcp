@@ -127,13 +127,24 @@ export function isCacheableBody(text: string): boolean {
   return true
 }
 
+/**
+ * `FIN_CACHE_TTL_SEC`이 정하는 캐시 TTL(ms). 0이면 캐시 완전 비활성.
+ * 미지정 600초 / 숫자 아님·0·음수는 비활성.
+ *
+ * 이 저장소의 캐시 두 계층(응답 본문 캐시 = 이 파일, 파싱 결과 캐시 = `cache.ts`)이
+ * **같은 함수**로 on/off를 판정한다 — 규칙을 두 곳에 쓰면 어긋난다
+ */
+export function resolveCacheTtlMs(): number {
+  const ttlSec = process.env.FIN_CACHE_TTL_SEC === undefined ? 600 : Number(process.env.FIN_CACHE_TTL_SEC)
+  return Number.isFinite(ttlSec) && ttlSec > 0 ? ttlSec * 1000 : 0
+}
+
 /** 환경변수 기반 기본 캐시 — FIN_CACHE_TTL_SEC=0이면 비활성 */
 export function createResponseCacheFromEnv(): ResponseCache {
-  const ttlSec = process.env.FIN_CACHE_TTL_SEC === undefined ? 600 : Number(process.env.FIN_CACHE_TTL_SEC)
   const maxEntries = Number(process.env.FIN_CACHE_MAX_ENTRIES) || DEFAULT_MAX_ENTRIES
   const maxMb = Number(process.env.FIN_CACHE_MAX_MB) || 16
   return new ResponseCache({
-    ttlMs: Number.isFinite(ttlSec) && ttlSec > 0 ? ttlSec * 1000 : 0,
+    ttlMs: resolveCacheTtlMs(),
     maxEntries,
     maxBytes: maxMb * 1024 * 1024,
   })
