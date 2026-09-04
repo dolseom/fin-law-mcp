@@ -41,10 +41,17 @@ export const FIN_NTS_RULING_TOOL = {
   annotations: { readOnlyHint: true, idempotentHint: true },
 } as const
 
-function bodyEnabled(): boolean {
+/**
+ * 국세청 예규 **본문** 동봉 여부 — 기본 OFF.
+ * 비공식 경로(taxlaw.nts.go.kr)는 명시적 옵트인이다 (공개 배포 정책, Codex 리뷰 차단 3).
+ * 개인 사용자는 .env에 FIN_NTS_BODY_ENABLED=true 한 줄로 활성화한다.
+ *
+ * 같은 플래그가 tools/list 등록 여부도 결정한다 (index.ts) — OFF면 이 도구가 주는 것은
+ * 목록뿐이고, 그 목록은 fin_ruling_search(domains=["nts"])와 겹친다.
+ * 판정 규칙을 두 곳에 따로 쓰면 한쪽만 바뀌므로 이 함수 하나만 쓴다.
+ */
+export function isNtsBodyEnabled(): boolean {
   const v = (process.env.FIN_NTS_BODY_ENABLED || "").toLowerCase()
-  // 기본 OFF — 비공식 경로(taxlaw.nts.go.kr)는 명시적 옵트인 (공개 배포 정책, Codex 리뷰 차단 3).
-  // 개인 사용자는 .env에 FIN_NTS_BODY_ENABLED=true 한 줄로 활성화.
   return v === "true" || v === "1"
 }
 
@@ -114,7 +121,7 @@ export async function handleFinNtsRuling(
   const n = Math.min(top_n_bodies, items.length)
   if (n === 0) {
     text += `\n\n(본문 미동봉 — top_n_bodies=0)`
-  } else if (!bodyEnabled()) {
+  } else if (!isNtsBodyEnabled()) {
     text += `\n\n(본문 동봉 비활성 — 활성화하려면 .env에 FIN_NTS_BODY_ENABLED=true 설정. 비공식 경로라 옵트인입니다. 원문은 목록의 링크에서 확인)`
   } else {
     const targets = items.slice(0, n)

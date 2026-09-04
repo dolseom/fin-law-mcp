@@ -121,6 +121,45 @@ const INCOME_TAX_BRACKETS: ReadonlyArray<{ upTo: number; base: number; rate: num
  */
 const LOCAL_INCOME_TAX_RATIO = 0.1
 
+/**
+ * 소액 부징수 기준 — 소득세법 제86조제1호 · 확인 2026-09-04
+ * 제127조제1항 각 호의 소득(퇴직소득은 같은 항 제7호)에 대한 원천징수세액이 1천원 미만이면
+ * 징수하지 아니한다. 이자소득·일부 사업소득만 제외 대상이므로 퇴직소득에는 그대로 적용된다.
+ */
+const MINIMUM_WITHHOLDING = 1_000
+
+/**
+ * 국고금 끝수 계산 — 국고금 관리법 제47조 · 확인 2026-09-04
+ *   ① 국고금의 수입·지출에서 10원 미만의 끝수는 계산하지 아니하고, 전액이 10원 미만이면 그 전액을 계산하지 아니한다
+ *   ② 국세의 과세표준액을 산정할 때 1원 미만의 끝수가 있으면 이를 계산하지 아니한다
+ * 개인지방소득세도 같은 규정을 준용한다 (지방세기본법 제59조 — "국고금"을 "지방자치단체의 징수금"으로 본다).
+ *
+ * ⚠ 부동소수점 보정: 36,000,000 − 24,800,000.000000004 처럼 정수 경계 **바로 아래**로
+ * 계산된 값을 그대로 내림하면 1원이 사라진다. 단위의 정수배에 오차 범위로 붙어 있으면
+ * 그 정수배로 복원한 뒤 내림한다 (상대 허용오차 1e-9 — 1경 단위에서도 0.01원 미만).
+ */
+function truncateToUnit(amount: number, unit: number): number {
+  if (!Number.isFinite(amount)) return amount
+  const quotient = amount / unit
+  const nearest = Math.round(quotient)
+  if (Math.abs(quotient - nearest) < 1e-9 * Math.max(1, Math.abs(nearest))) return nearest * unit
+  return Math.floor(quotient) * unit
+}
+
+/** 국세 과세표준의 1원 미만 끝수 절사 — 국고금 관리법 §47② */
+export function truncateTaxBase(amount: number): number {
+  return truncateToUnit(amount, 1)
+}
+
+/**
+ * 징수·납부 세액의 10원 미만 끝수 절사 — 국고금 관리법 §47①
+ * (지방세는 지방세기본법 §59가 같은 조를 준용한다)
+ * 전액이 10원 미만이면 전액을 계산하지 않으므로 결과는 0이 된다.
+ */
+export function truncateCollectedTax(amount: number): number {
+  return truncateToUnit(amount, 10)
+}
+
 // 금액·기간 상한 — 개별 값이 각자 "유효"해도 곱셈(적수·환산급여)에서 부동소수점
 // overflow가 나면 ∞·NaN이 isError 없이 확신형 결과로 출력된다 (Codex 4차 중요:
 // principal 1e308 → "이자 시가: ∞원" + 익금산입 판정). 이 상한 안에서는 모든 산식의
@@ -182,17 +221,24 @@ export const FinCalcInputSchema = z.discriminatedUnion("calc_type", [
 
 export const FIN_CALC_TOOL = {
   name: "fin_calc",
+  // 도구 정의는 매 세션 모든 대화에 실린다 — 조문 번호는 응답 본문·오류 메시지가
+  // 모두 담고 있으므로 여기서는 도구 **선택**에 필요한 것만 남긴다.
+  // "일반 근로자 퇴직금 미지원"은 실제 오용 사례가 있어 남긴다 (시뮬레이션 지적).
   description:
-    "[재무·세무·회계 전용 — 법정 한도·세액 계산은 직접 계산하지 말고 이 도구를 사용] " +
-    "세법에 산식이 명문화된 항목을 결정형 코드로 계산한다 (계산 과정·근거 조문 동봉). " +
-    "지원: 임원퇴직금한도(법인세법 시행령 §44④2 — 법인세 손금 한도이며, 근로기준법·근퇴법상 " +
-    "일반 근로자 퇴직금 계산은 미지원), 기업업무추진비한도(법인세법 §25④), " +
-    "감가상각비 상각범위액(법인세법 시행령 §26 + 시행규칙 별표 4 상각률), " +
-    "가지급금인정이자(법인세법 시행령 §89③ + 시행규칙 §43②), " +
-    "퇴직소득세(소득세법 §48·§55 + 지방소득세).",
+    "[재무·세무·회계 전용 — 법정 한도·세액은 직접 계산하지 말고 이 도구를 사용] " +
+    "세법에 명문화된 산식을 결정형 코드로 계산한다 (계산 과정·근거 조문 동봉). " +
+    "지원: 임원퇴직금한도(법인세 손금 한도 — 일반 근로자 퇴직금은 미지원), " +
+    "기업업무추진비한도, 감가상각비 상각범위액, 가지급금인정이자, 퇴직소득세.",
   // properties(평면)와 oneOf(조건부 필수)를 함께 둔다 — 평면 목록만 보면 어떤 인자가
   // 어느 계산에 필수인지 알 수 없어 LLM이 필수 인자를 빠뜨린다. oneOf를 못 읽는
   // 클라이언트도 properties로 종전대로 동작한다 (Codex 리뷰)
+  //
+  // 속성 설명은 한 줄로 제한한다: 조문 근거·산식 차이·예시는 **핸들러 오류 메시지**가
+  // 담는다 (rate_type의 §89③ 본문/단서, short_period_basis의 §26⑧⑨ vs §28②).
+  // 금액 상한(1경·적수 3.66e20)도 JSON Schema에서 뺐다 — 17~21자리 숫자가 그대로
+  // 직렬화돼 스키마를 부풀리는데, LLM에게 주는 정보는 없고 zod가 한글 메시지로
+  // 거부한다 (회귀 테스트 "severance_pay 1e308도 거부된다"). 의미 있는 정의역
+  // (연수 0~100·월 1~12·내용연수 2~60·일수 0~36,600·이자율 0~100)은 그대로 둔다.
   inputSchema: {
     type: "object",
     properties: {
@@ -201,47 +247,43 @@ export const FIN_CALC_TOOL = {
         enum: ["임원퇴직금한도", "기업업무추진비한도", "감가상각비", "가지급금인정이자", "퇴직소득세"],
         description: "계산 유형",
       },
-      annual_salary: { type: "number", exclusiveMinimum: 0, maximum: 1e16, description: "[임원퇴직금한도·필수] 퇴직 직전 1년 총급여액 (원)" },
-      years: { type: "integer", minimum: 0, maximum: 100, description: "[임원퇴직금한도·필수] 근속 연수 (년)" },
-      months: { type: "integer", minimum: 0, maximum: 11, description: "[임원퇴직금한도] 1년 미만 잔여 개월 (기본 0)" },
-      revenue: { type: "number", minimum: 0, maximum: 1e16, description: "[기업업무추진비한도·필수] 일반 수입금액 (원)" },
-      related_party_revenue: { type: "number", minimum: 0, maximum: 1e16, description: "[기업업무추진비한도] 특수관계인 거래 수입금액 (원, 기본 0)" },
-      is_sme: { type: "boolean", description: "[기업업무추진비한도] 중소기업 여부 (기본 false)" },
-      business_months: { type: "integer", minimum: 1, maximum: 12, description: "[기업업무추진비한도] 사업연도 월수 (기본 12) / [감가상각비] 상각 대상 월수 (기본 12)" },
-      acquisition_cost: { type: "number", exclusiveMinimum: 0, maximum: 1e16, description: "[감가상각비·필수] 취득가액 (원)" },
-      useful_life: { type: "integer", minimum: 2, maximum: 60, description: "[감가상각비·필수] 내용연수 (년, 별표 4 수록 범위 2~60)" },
+      annual_salary: { type: "number", exclusiveMinimum: 0, description: "[임원퇴직금한도·필수] 직전 1년 총급여액(원)" },
+      years: { type: "integer", minimum: 0, maximum: 100, description: "[임원퇴직금한도·필수] 근속 연수(년)" },
+      months: { type: "integer", minimum: 0, maximum: 11, description: "[임원퇴직금한도] 잔여 개월(기본 0)" },
+      revenue: { type: "number", minimum: 0, description: "[기업업무추진비한도·필수] 일반 수입금액(원)" },
+      related_party_revenue: { type: "number", minimum: 0, description: "[기업업무추진비한도] 특수관계인 수입금액(원, 기본 0)" },
+      is_sme: { type: "boolean", description: "[기업업무추진비한도] 중소기업 여부(기본 false)" },
+      business_months: { type: "integer", minimum: 1, maximum: 12, description: "[기업업무추진비한도·감가상각비] 사업연도·상각 월수(기본 12)" },
+      acquisition_cost: { type: "number", exclusiveMinimum: 0, description: "[감가상각비·필수] 취득가액(원)" },
+      useful_life: { type: "integer", minimum: 2, maximum: 60, description: "[감가상각비·필수] 내용연수(년)" },
       method: { type: "string", enum: ["정액법", "정률법"], description: "[감가상각비·필수] 상각방법" },
-      remaining_value: { type: "number", minimum: 0, maximum: 1e16, description: "[감가상각비·정률법일 때 필수] 기초 미상각잔액 (원) = 취득가액 − 감가상각누계액" },
+      remaining_value: { type: "number", minimum: 0, description: "[감가상각비·정률법 필수] 기초 미상각잔액(원)" },
       short_period_basis: {
         type: "string",
         enum: ["기중취득", "사업연도변경의제", "사업연도1년미만"],
-        description:
-          "[감가상각비·business_months<12일 때 필수] 1년 미만 사유 — 기중취득·사업연도변경의제는 월할(§26⑧⑨), 사업연도1년미만은 환산내용연수 상각률(§28②)로 산식이 다름",
+        description: "[감가상각비·business_months<12 필수] 1년 미만 사유(사유별 산식 상이)",
       },
-      balance_days: { type: "number", minimum: 0, maximum: 3.66e20, description: "[가지급금인정이자] 가지급금 적수 (원×일) — principal·days 대신 직접 입력" },
-      principal: { type: "number", minimum: 0, maximum: 1e16, description: "[가지급금인정이자] 가지급금 잔액 (원) — days와 함께 입력" },
-      days: { type: "integer", minimum: 0, maximum: 36600, description: "[가지급금인정이자] 대여 일수 (일) — principal과 함께 입력" },
-      rate_type: { type: "string", enum: ["당좌대출이자율", "가중평균차입이자율"], description: "[가지급금인정이자·필수] 적용 이자율 종류. 원칙은 가중평균차입이자율(시행령 §89③ 본문), 당좌대출이자율은 단서의 예외 — 기본값 없음" },
-      weighted_average_rate: { type: "number", minimum: 0, maximum: 100, description: "[가지급금인정이자·가중평균차입이자율 선택 시 필수] 연 이자율을 %로 (예: 9 = 연 9%)" },
-      paid_interest: { type: "number", minimum: 0, maximum: 1e16, description: "[가지급금인정이자] 실제 수령한 약정이자 (원, 기본 0)" },
-      is_leap_year: { type: "boolean", description: "[가지급금인정이자] 윤년이면 true (366일로 나눔, 기본 false)" },
-      severance_pay: { type: "number", minimum: 0, maximum: 1e16, description: "[퇴직소득세·필수] 퇴직소득금액 (원) = 퇴직급여액 − 비과세 퇴직소득" },
-      service_years: { type: "number", exclusiveMinimum: 0, maximum: 100, description: "[퇴직소득세·필수] 근속연수 (년, 1년 미만은 1년으로 올림)" },
+      balance_days: { type: "number", minimum: 0, description: "[가지급금인정이자] 적수(원×일) — principal·days 대신" },
+      principal: { type: "number", minimum: 0, description: "[가지급금인정이자] 잔액(원) — days와 함께" },
+      days: { type: "integer", minimum: 0, maximum: 36600, description: "[가지급금인정이자] 대여 일수(일)" },
+      rate_type: { type: "string", enum: ["당좌대출이자율", "가중평균차입이자율"], description: "[가지급금인정이자·필수] 이자율 종류(기본값 없음)" },
+      weighted_average_rate: { type: "number", minimum: 0, maximum: 100, description: "[가지급금인정이자·가중평균 선택 시 필수] 연 이자율(%)" },
+      paid_interest: { type: "number", minimum: 0, description: "[가지급금인정이자] 수령 약정이자(원, 기본 0)" },
+      is_leap_year: { type: "boolean", description: "[가지급금인정이자] 윤년 여부(기본 false)" },
+      severance_pay: { type: "number", minimum: 0, description: "[퇴직소득세·필수] 퇴직소득금액(원, 비과세 제외)" },
+      service_years: { type: "number", exclusiveMinimum: 0, maximum: 100, description: "[퇴직소득세·필수] 근속연수(년)" },
     },
     required: ["calc_type"],
     oneOf: [
       {
-        title: "임원퇴직금한도",
         properties: { calc_type: { const: "임원퇴직금한도" } },
         required: ["calc_type", "annual_salary", "years"],
       },
       {
-        title: "기업업무추진비한도",
         properties: { calc_type: { const: "기업업무추진비한도" } },
         required: ["calc_type", "revenue"],
       },
       {
-        title: "감가상각비",
         properties: { calc_type: { const: "감가상각비" } },
         required: ["calc_type", "acquisition_cost", "useful_life", "method"],
         // 정률법은 미상각잔액이 없으면 계산 자체가 불가능하다 (정액법은 취득가액 기준이라 불필요)
@@ -251,7 +293,6 @@ export const FIN_CALC_TOOL = {
         ],
       },
       {
-        title: "가지급금인정이자",
         properties: { calc_type: { const: "가지급금인정이자" } },
         // rate_type은 런타임에서 필수인데 스키마에 없으면 LLM이 생략 가능하다고 읽고
         // 오류를 받는다 — 스키마와 실행 계약을 맞춘다 (Codex 2차 개선)
@@ -263,7 +304,6 @@ export const FIN_CALC_TOOL = {
         ],
       },
       {
-        title: "퇴직소득세",
         properties: { calc_type: { const: "퇴직소득세" } },
         required: ["calc_type", "severance_pay", "service_years"],
       },
@@ -273,6 +313,18 @@ export const FIN_CALC_TOOL = {
 } as const
 
 const won = (n: number): string => `${Math.floor(n).toLocaleString("ko-KR")}원`
+/**
+ * 절사 **전** 금액 표시 — 소수가 남아 있으면 두 자리까지 보여 준다.
+ * won()은 내림하므로 71,538,461.54원이 71,538,461원으로 찍히고, 그 값들로 쓴 뺄셈이
+ * 독자에게는 1원 틀린 식으로 보인다. 절사 근거를 적는 줄에서는 소수를 살려야 검산이 된다.
+ * 1e13 이상은 ×100이 배정밀도 안전정수를 넘겨 소수가 무의미해지므로 won()으로 되돌린다.
+ */
+const wonExact = (n: number): string => {
+  if (!Number.isFinite(n) || Number.isInteger(n) || Math.abs(n) >= 1e13) return won(n)
+  const rounded = Math.round(n * 100) / 100
+  if (Number.isInteger(rounded)) return won(rounded)
+  return `${rounded.toLocaleString("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}원`
+}
 /**
  * 이자율·상각률 표시 — 별표/조문 표기와 같은 소수 자리를 유지하되 꼬리 0은 지운다.
  * 소수점이 없을 때 꼬리 0을 지우면 40%가 4%가 되므로, 소수점이 있을 때만 자른다.
@@ -476,6 +528,13 @@ export function basicIncomeTax(taxBase: number): { tax: number; rate: number } {
  * ② 근속연수공제 (퇴직소득금액에 미달하면 퇴직소득금액이 공제액 — §48②)
  * ③ 환산급여 = (퇴직소득금액 − 근속연수공제) ÷ 근속연수 × 12
  * ④ 환산급여공제 → ⑤ 과세표준 → ⑥ 환산산출세액(기본세율) → ⑦ ÷12 × 근속연수
+ *
+ * 끝수 처리는 조문이 정한 두 지점에만 적용한다 (국고금 관리법 §47 · 지방세기본법 §59):
+ *   · 과세표준 → 1원 미만 절사 (§47②)
+ *   · 소득세·개인지방소득세 산출세액 → 10원 미만 절사 (§47①)
+ * 환산급여·환산급여공제·환산산출세액의 단계별 절사는 **조문 근거가 없어** 적용하지 않는다.
+ * 개인지방소득세는 절사 전 소득세를 기준으로 계산한다 — 지방세법 §92④가 과세표준에서
+ * 독립적으로 산출하도록 정하므로, 절사된 소득세에 10%를 곱하면 이중 절사가 된다.
  */
 export function calcRetirementIncomeTax(severancePay: number, rawServiceYears: number) {
   const serviceYears = Math.ceil(rawServiceYears)
@@ -487,11 +546,14 @@ export function calcRetirementIncomeTax(severancePay: number, rawServiceYears: n
 
   const convertedPay = ((severancePay - yearsDeduction) / serviceYears) * 12
   const payDeduction = convertedPayDeduction(convertedPay)
-  const taxBase = Math.max(convertedPay - payDeduction, 0)
+  const untruncatedTaxBase = Math.max(convertedPay - payDeduction, 0)
+  const taxBase = truncateTaxBase(untruncatedTaxBase)
 
   const { tax: convertedTax, rate: appliedRate } = basicIncomeTax(taxBase)
-  const incomeTax = (convertedTax / 12) * serviceYears
-  const localTax = incomeTax * LOCAL_INCOME_TAX_RATIO
+  const untruncatedIncomeTax = (convertedTax / 12) * serviceYears
+  const untruncatedLocalTax = untruncatedIncomeTax * LOCAL_INCOME_TAX_RATIO
+  const incomeTax = truncateCollectedTax(untruncatedIncomeTax)
+  const localTax = truncateCollectedTax(untruncatedLocalTax)
 
   return {
     serviceYears,
@@ -500,12 +562,17 @@ export function calcRetirementIncomeTax(severancePay: number, rawServiceYears: n
     deductionCapped,
     convertedPay,
     payDeduction,
+    untruncatedTaxBase,
     taxBase,
     appliedRate,
     convertedTax,
+    untruncatedIncomeTax,
     incomeTax,
+    untruncatedLocalTax,
     localTax,
     total: incomeTax + localTax,
+    // 소득세법 §86①1 — 원천징수세액이 1천원 미만이면 징수하지 않는다 (세액 0은 해당 없음)
+    belowMinimumWithholding: incomeTax > 0 && incomeTax < MINIMUM_WITHHOLDING,
   }
 }
 
@@ -907,14 +974,15 @@ export async function handleFinCalc(
   const r = calcRetirementIncomeTax(input.severance_pay, input.service_years)
   const roundedUp = r.serviceYears !== input.service_years
   const text = [
-    `[산식 기준: ${BASIS_RETIREMENT_TAX}] 퇴직소득세 — **추정치** (원 단위 절사·반올림 미구현)`,
+    `[산식 기준: ${BASIS_RETIREMENT_TAX}] 퇴직소득세`,
     ``,
-    // 단계별 절사·반올림 규칙을 구현하지 않았으므로 "산출세액"이라 단정하지 않는다.
-    // 원천징수 신고액으로 그대로 옮겨 적으면 실제 징수액과 어긋날 수 있다 (Codex 리뷰 개선 2)
-    `산출세액(소득세) 추정: ${won(r.incomeTax)}`,
-    `개인지방소득세 추정: ${won(r.localTax)}`,
-    `합계 추정: ${won(r.total)}`,
-    `※ 각 단계를 실수로 계산한 값입니다 — 원천징수 신고액은 국세청 「퇴직소득 원천징수영수증」 서식의 단계별 절사 규칙을 따라 확정하세요`,
+    `산출세액(소득세): ${won(r.incomeTax)}`,
+    `개인지방소득세: ${won(r.localTax)}`,
+    `합계: ${won(r.total)}`,
+    `※ 끝수 계산 반영 — 과세표준은 1원 미만, 산출세액은 10원 미만을 절사했습니다 (국고금 관리법 §47②·§47① · 지방세는 지방세기본법 §59가 준용)`,
+    ...(r.belowMinimumWithholding
+      ? [`※ 원천징수세액이 1천원 미만이므로 소득세는 징수하지 않습니다 (소액 부징수 — 소득세법 §86①1)`]
+      : []),
     ``,
     `계산 과정:`,
     `  ① 퇴직소득금액 = ${won(input.severance_pay)}`,
@@ -922,15 +990,19 @@ export async function handleFinCalc(
     r.deductionCapped
       ? `  ③ 근속연수공제 = ${won(r.yearsDeduction)} — 산식상 ${won(r.rawDeduction)}이나 퇴직소득금액에 미달해 퇴직소득금액이 공제액 (§48②)`
       : `  ③ 근속연수공제 = ${won(r.yearsDeduction)} (§48①1 표)`,
-    `  ④ 환산급여 = (${won(input.severance_pay)} − ${won(r.yearsDeduction)}) ÷ ${r.serviceYears}년 × 12 = ${won(r.convertedPay)}`,
-    `  ⑤ 환산급여공제 = ${won(r.payDeduction)} (§48①2 표)`,
-    `  ⑥ 퇴직소득 과세표준 = ${won(r.convertedPay)} − ${won(r.payDeduction)} = ${won(r.taxBase)}`,
-    `  ⑦ 환산산출세액 = ${won(r.taxBase)} × 기본세율(적용구간 ${pct(r.appliedRate, 0)}) = ${won(r.convertedTax)} (§55①)`,
-    `  ⑧ 산출세액 = ${won(r.convertedTax)} ÷ 12 × ${r.serviceYears}년 = ${won(r.incomeTax)} (§55②2)`,
-    `  ⑨ 개인지방소득세 = ${won(r.incomeTax)} × 10% = ${won(r.localTax)} (지방세법 §92①④)`,
+    `  ④ 환산급여 = (${won(input.severance_pay)} − ${won(r.yearsDeduction)}) ÷ ${r.serviceYears}년 × 12 = ${wonExact(r.convertedPay)}`,
+    `  ⑤ 환산급여공제 = ${wonExact(r.payDeduction)} (§48①2 표)`,
+    `  ⑥ 퇴직소득 과세표준 = ${wonExact(r.convertedPay)} − ${wonExact(r.payDeduction)} = ${won(r.taxBase)}` +
+      (r.taxBase !== r.untruncatedTaxBase ? ` (산식상 ${wonExact(r.untruncatedTaxBase)} — 1원 미만 절사, 국고금 관리법 §47②)` : ``),
+    `  ⑦ 환산산출세액 = ${won(r.taxBase)} × 기본세율(적용구간 ${pct(r.appliedRate, 0)}) = ${wonExact(r.convertedTax)} (§55①)`,
+    `  ⑧ 산출세액 = ${wonExact(r.convertedTax)} ÷ 12 × ${r.serviceYears}년 = ${won(r.incomeTax)} (§55②2)` +
+      (r.incomeTax !== r.untruncatedIncomeTax ? ` — 산식상 ${wonExact(r.untruncatedIncomeTax)}에서 10원 미만 절사 (국고금 관리법 §47①)` : ``),
+    `  ⑨ 개인지방소득세 = ${wonExact(r.untruncatedIncomeTax)}(절사 전 소득세) × 10% = ${won(r.localTax)} (지방세법 §92①④)` +
+      (r.localTax !== r.untruncatedLocalTax ? ` — 산식상 ${wonExact(r.untruncatedLocalTax)}에서 10원 미만 절사 (지방세기본법 §59)` : ``),
     ``,
     `근거: 소득세법 제48조(퇴직소득공제 — 근속연수공제표·환산급여공제표), 제55조제1항·제2항(세율·산출세액)`,
     `      근속연수 계산: 소득세법 시행령 제105조 / 개인지방소득세: 지방세법 제92조제1항·제4항`,
+    `      끝수 계산: 국고금 관리법 제47조제1항·제2항 / 지방세기본법 제59조(같은 조 준용)`,
     ``,
     `⚠ 주의:`,
     `  · 입력한 severance_pay는 비과세 퇴직소득(소득세법 §12)을 뺀 퇴직소득금액이어야 한다 — 퇴직급여 총액을 그대로 넣으면 과대계산된다`,
@@ -938,7 +1010,8 @@ export async function handleFinCalc(
     `  · 임원 퇴직소득 한도(소득세법 §22③) 초과분은 근로소득으로 과세된다 — 이 계산은 한도 내 금액 전제`,
     `  · 퇴직연금(IRP) 이전분은 과세이연되어 원천징수하지 않는다 (소득세법 §146②) — 미반영`,
     `  · 개인지방소득세는 표준세율 기준이며, 지자체가 조례로 ±50% 범위에서 가감할 수 있다 (지방세법 §92②)`,
-    `  · 원 단위 미만 처리 방식 차이로 실제 원천징수액과 소액 차이가 날 수 있다`,
+    `  · 절사는 조문이 정한 두 지점(과세표준 1원 미만·산출세액 10원 미만)에만 적용했다 — 환산급여·환산산출세액의 단계별 절사는 조문 근거가 없어 적용하지 않았으므로, 국세청 원천징수 프로그램이 중간 단계도 절사하면 최종 세액이 10원 단위로 달라질 수 있다`,
+    `  · 국고금 관리법 §47①의 절사 대상은 실제 징수·납부액이다 — 세액공제·기납부세액이 있으면 그 차감 후 금액을 기준으로 다시 절사한다`,
     `  · 세율·공제표 개정 여부는 fin_article("소득세법","제48조")·fin_article("소득세법","제55조")로 교차 확인 가능`,
     ``,
     SOURCE_FOOTER,

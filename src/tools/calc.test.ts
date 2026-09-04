@@ -13,6 +13,8 @@ import {
   serviceYearsDeduction,
   convertedPayDeduction,
   basicIncomeTax,
+  truncateTaxBase,
+  truncateCollectedTax,
   handleFinCalc,
   FIN_CALC_TOOL,
 } from "./calc.js"
@@ -354,6 +356,72 @@ describe("퇴직소득세 (소득세법 §48·§55 + 지방세법 §92)", () => 
   })
 })
 
+describe("끝수 계산 (국고금 관리법 §47 · 지방세기본법 §59)", () => {
+  it("징수세액은 10원 미만을 절사한다 — 9원·10원·11원 경계 (§47①)", () => {
+    expect(truncateCollectedTax(1_120_009)).toBe(1_120_000)
+    expect(truncateCollectedTax(1_120_010)).toBe(1_120_010)
+    expect(truncateCollectedTax(1_120_011)).toBe(1_120_010)
+  })
+
+  it("전액이 10원 미만이면 전액을 계산하지 않는다 (§47① 후단)", () => {
+    expect(truncateCollectedTax(9)).toBe(0)
+    expect(truncateCollectedTax(0.99)).toBe(0)
+    expect(truncateCollectedTax(0)).toBe(0)
+    expect(truncateCollectedTax(10)).toBe(10)
+  })
+
+  it("과세표준은 1원 미만을 절사한다 (§47②)", () => {
+    expect(truncateTaxBase(25_492_307.69)).toBe(25_492_307)
+    expect(truncateTaxBase(0.4)).toBe(0)
+    expect(truncateTaxBase(96)).toBe(96)
+  })
+
+  it("정수 경계 바로 아래로 계산된 부동소수점 값은 1원을 잃지 않는다", () => {
+    // 372,000,000 − 176,900,000.000000004 처럼 곱셈 오차로 경계 아래에 놓인 값.
+    // 보정이 없으면 195,100,000이 195,099,999가 된다.
+    expect(truncateTaxBase(195_100_000 - 4e-9)).toBe(195_100_000)
+    expect(truncateCollectedTax(1_120_000 - 4e-9)).toBe(1_120_000)
+    // 보정은 진짜 끝수를 삼키지 않는다
+    expect(truncateTaxBase(195_099_999.5)).toBe(195_099_999)
+    expect(truncateCollectedTax(1_120_009.5)).toBe(1_120_000)
+  })
+
+  it("나누어떨어지지 않는 근속연수는 두 절사를 모두 탄다 — 근속 13년·1억원", () => {
+    const r = calcRetirementIncomeTax(100_000_000, 13)
+    // 환산급여 (1억−2,250만)/13×12 = 71,538,461.538…  → 과세표준에 소수가 남는다
+    expect(r.untruncatedTaxBase).toBeCloseTo(25_492_307.6923, 3)
+    expect(r.taxBase).toBe(25_492_307) // §47② 1원 미만 절사
+    expect(r.untruncatedIncomeTax).toBeCloseTo(2_777_499.8875, 3)
+    expect(r.incomeTax).toBe(2_777_490) // §47① 10원 미만 절사
+    expect(r.localTax).toBe(277_740)
+    expect(r.total).toBe(3_055_230)
+  })
+
+  it("개인지방소득세는 절사 전 소득세를 기준으로 계산한다 — 이중 절사 방지", () => {
+    const r = calcRetirementIncomeTax(100_000_000, 13)
+    // 절사된 소득세(2,777,490)에 10%를 곱하면 277,749 → 277,740으로 같아 보이지만,
+    // 지방세법 §92④는 과세표준에서 독립적으로 산출하도록 정한다.
+    expect(r.untruncatedLocalTax).toBeCloseTo(r.untruncatedIncomeTax * 0.1, 6)
+    expect(r.localTax).toBe(truncateCollectedTax(r.untruncatedIncomeTax * 0.1))
+  })
+
+  it("원천징수세액 1천원 미만은 소액 부징수 표시가 붙는다 (소득세법 §86①1)", () => {
+    const r = calcRetirementIncomeTax(8_337_500, 5)
+    expect(r.taxBase).toBe(4_000)
+    expect(r.incomeTax).toBe(100)
+    expect(r.belowMinimumWithholding).toBe(true)
+    // 세액이 0이면 부징수 표시 대상이 아니다
+    expect(calcRetirementIncomeTax(3_000_000, 5).belowMinimumWithholding).toBe(false)
+  })
+
+  it("국세청 공식 계산사례는 절사 도입 후에도 그대로다 — 회귀 방어", () => {
+    const r = calcRetirementIncomeTax(100_000_000, 20)
+    expect(r.taxBase).toBe(11_200_000)
+    expect(r.incomeTax).toBe(1_120_000)
+    expect(r.localTax).toBe(112_000)
+  })
+})
+
 describe("handleFinCalc 계약", () => {
   it("계산 과정·근거 조문·산식 기준일·주의를 동봉한다", async () => {
     const res = await handleFinCalc(null, { calc_type: "임원퇴직금한도", annual_salary: 120_000_000, years: 5 })
@@ -508,6 +576,30 @@ describe("handleFinCalc 계약", () => {
     expect(t).toContain("지방세법 제92조")
   })
 
+  it("퇴직소득세는 '추정치'가 아니라 끝수 계산 근거를 밝힌다", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "퇴직소득세",
+      severance_pay: 100_000_000,
+      service_years: 13, // 나누어떨어지지 않아 두 절사가 모두 걸린다
+    })
+    const t = res.content[0].text
+    expect(t).not.toMatch(/추정/)
+    expect(t).toContain("국고금 관리법 제47조제1항·제2항")
+    expect(t).toContain("지방세기본법 제59조")
+    expect(t).toContain("2,777,490원") // 10원 미만 절사된 산출세액
+    expect(t).toContain("277,740원") // 개인지방소득세
+    // 절사 전 값은 소수까지 보여 줘야 독자가 검산할 수 있다 (won()은 내림해서 식이 틀려 보인다)
+    expect(t).toContain("2,777,499.89원")
+    expect(t).toContain("71,538,461.54원")
+  })
+
+  it("원천징수세액 1천원 미만이면 소액 부징수를 고지한다 (소득세법 §86①1)", async () => {
+    const small = await handleFinCalc(null, { calc_type: "퇴직소득세", severance_pay: 8_337_500, service_years: 5 })
+    expect(small.content[0].text).toContain("소액 부징수")
+    const big = await handleFinCalc(null, { calc_type: "퇴직소득세", severance_pay: 100_000_000, service_years: 20 })
+    expect(big.content[0].text).not.toContain("소액 부징수")
+  })
+
   it("모든 계산 유형이 산식 기준일·근거·출처를 동봉한다", async () => {
     const inputs = [
       { calc_type: "임원퇴직금한도", annual_salary: 120_000_000, years: 5 },
@@ -615,6 +707,56 @@ describe("입력 스키마 — 조건부 필수 (Codex 리뷰: oneOf)", () => {
     for (const type of (FIN_CALC_TOOL.inputSchema as any).properties.calc_type.enum) {
       expect(t, `${type}가 안내에 없음`).toContain(type)
     }
+  })
+
+  // 도구 정의는 매 세션 모든 대화에 실린다 — 설명이 다시 길어지면 여기서 걸린다.
+  // 상한은 축약 시점 실측값(inputSchema 2,909 / 전체 3,190)에 여유를 둔 값이다.
+  it("도구 정의가 다시 부풀지 않는다 — 세션 토큰 회귀 방어", () => {
+    const schemaLen = JSON.stringify(FIN_CALC_TOOL.inputSchema).length
+    const wholeLen = JSON.stringify(FIN_CALC_TOOL).length
+    expect(schemaLen, `inputSchema ${schemaLen}자`).toBeLessThanOrEqual(3_000)
+    expect(wholeLen, `도구 정의 전체 ${wholeLen}자`).toBeLessThanOrEqual(3_300)
+  })
+
+  it("속성 설명은 한 줄이고 조문 인용은 담지 않는다 (근거는 오류 메시지·응답 본문에)", () => {
+    const props = (FIN_CALC_TOOL.inputSchema as any).properties as Record<string, { description?: string }>
+    for (const [k, v] of Object.entries(props)) {
+      const d = v.description ?? ""
+      expect(d, `${k} 설명에 줄바꿈`).not.toMatch(/\n/)
+      // 50자: short_period_basis만 조건부 필수 사유를 밝히느라 49자다. 그 조건은
+      // 정률법에서 -22.8% 오답을 만든 차단 사례라 property 이름을 줄이지 않는다.
+      expect(d.length, `${k} 설명이 ${d.length}자`).toBeLessThanOrEqual(50)
+      expect(d, `${k} 설명에 조문 인용`).not.toMatch(/§|시행령|시행규칙|별표/)
+    }
+  })
+
+  it("스키마에서 뺀 조문 근거를 오류 메시지가 대신 담는다", async () => {
+    // rate_type — 원칙(§89③ 본문)과 예외(단서)의 구분이 오류 메시지에 남아야 한다
+    const noRate = await handleFinCalc(null, { calc_type: "가지급금인정이자", balance_days: 36_500_000_000 })
+    expect(noRate.isError).toBe(true)
+    expect(noRate.content[0].text).toContain("§89③")
+    expect(noRate.content[0].text).toContain("가중평균차입이자율")
+
+    // short_period_basis — 사유별로 산식이 다르다는 근거(§26⑧⑨ vs §28②)
+    const noBasis = await handleFinCalc(null, {
+      calc_type: "감가상각비",
+      acquisition_cost: 100_000_000,
+      useful_life: 5,
+      method: "정액법",
+      business_months: 6,
+    })
+    expect(noBasis.isError).toBe(true)
+    expect(noBasis.content[0].text).toContain("§26⑨")
+    expect(noBasis.content[0].text).toContain("§28②")
+  })
+
+  it("스키마에서 뺀 금액 상한을 런타임이 계속 거부한다", async () => {
+    // JSON Schema의 maximum(1경)은 뺐지만 zod는 그대로 한글 메시지로 거부해야 한다
+    const props = (FIN_CALC_TOOL.inputSchema as any).properties
+    expect(props.severance_pay.maximum).toBeUndefined()
+    const res = await handleFinCalc(null, { calc_type: "퇴직소득세", severance_pay: 1e17, service_years: 5 })
+    expect(res.isError).toBe(true)
+    expect(res.content[0].text).toContain("1경")
   })
 })
 

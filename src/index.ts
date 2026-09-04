@@ -16,7 +16,7 @@ import { LawApiClient } from "./lib/api-client.js"
 import { FIN_ARTICLE_TOOL, handleFinArticle } from "./tools/article.js"
 import { FIN_LAW_SEARCH_TOOL, handleFinLawSearch } from "./tools/law-search.js"
 import { FIN_RULING_SEARCH_TOOL, handleFinRulingSearch } from "./tools/ruling-search.js"
-import { FIN_NTS_RULING_TOOL, handleFinNtsRuling } from "./tools/nts-ruling.js"
+import { FIN_NTS_RULING_TOOL, handleFinNtsRuling, isNtsBodyEnabled } from "./tools/nts-ruling.js"
 import { FIN_ANNEX_TOOL, handleFinAnnex } from "./tools/annex.js"
 import { FIN_VERIFY_TOOL, handleFinVerify } from "./tools/verify.js"
 import { FIN_CALC_TOOL, handleFinCalc } from "./tools/calc.js"
@@ -40,12 +40,26 @@ const server = new Server(
 
 const apiClient = new LawApiClient({ apiKey: process.env.LAW_OC || "" })
 
+/**
+ * fin_nts_ruling 조건부 등록 — FIN_NTS_BODY_ENABLED=true일 때만 tools/list에 실린다.
+ *
+ * OFF(공개 기본)면 이 도구가 주는 것은 예규 **목록**뿐이고, 그것은
+ * fin_ruling_search(domains=["nts"])가 이미 준다. 겹치는 도구를 하나 더 실으면
+ * 매 세션 도구 정의 토큰만 늘고 LLM의 선택지만 흐려진다.
+ *
+ * 부팅 시 한 번만 읽는다 — tools/list 요청마다 다시 읽으면 같은 세션에서 목록이
+ * 흔들릴 수 있다. 호출 경로(HANDLERS)에서는 빼지 않는다: 목록을 캐시해 둔
+ * 클라이언트나 도구 이름을 직접 지정한 스크립트가 "알 수 없는 도구"로 깨지지 않게,
+ * OFF에서도 종전대로 목록만 돌려준다.
+ */
+const NTS_RULING_LISTED = isNtsBodyEnabled()
+
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     FIN_ARTICLE_TOOL,
     FIN_LAW_SEARCH_TOOL,
     FIN_RULING_SEARCH_TOOL,
-    FIN_NTS_RULING_TOOL,
+    ...(NTS_RULING_LISTED ? [FIN_NTS_RULING_TOOL] : []),
     FIN_ANNEX_TOOL,
     FIN_VERIFY_TOOL,
     FIN_CALC_TOOL,
