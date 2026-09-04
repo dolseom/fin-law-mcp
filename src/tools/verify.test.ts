@@ -1110,3 +1110,53 @@ describe("extractCitations — 연혁 괄호 접속 표현 (Codex 6차 개선)",
     expect(cites[0].historical).toBe(true)
   })
 })
+
+/**
+ * 퍼즈 차단 회귀 — 조응이 **자기보다 뒤에 나오는 법령**을 선행사로 삼던 결함.
+ *
+ * LAW_ARTICLE_RE의 이름부가 지연 매칭이라 "동 시행령 제8조 및 부가가치세법"을 통째로
+ * 캡처하는데, hit.idx가 컷 이전 매치 시작점이라 그 명시 인용이 정렬에서 앞선 조응보다
+ * 먼저 놓여 lastLawName을 선점했다. 실 API에서 「부가가치세법 시행령」 제8조로 확신형 ✓가
+ * 나갔고, **어순만 바꾼 대조군과 출력이 완전히 같아** 사용자가 오류를 알아챌 단서가 없었다.
+ *
+ * "같은 법"류는 조응 자체가 '법'으로 끝나 정규식이 그 자리를 먼저 소비하므로 이 경로를
+ * 타지 않는다 — 그래서 여섯 라운드의 회귀 사례에 한 번도 걸리지 않았다.
+ * 아래 두 어순을 **함께** 박는다: 한쪽만 두면 수정이 반대 방향을 깨뜨려도 통과한다.
+ */
+describe("extractCitations — 조응 선행사 역전 (퍼즈 차단)", () => {
+  it("조응이 앞 문장의 법령으로 해소된다 — 뒤따르는 법령에 흡수되지 않는다", () => {
+    const cites = extractCitations("법인세법 제26조를 적용한다. 동 시행령 제8조 및 부가가치세법 제32조를 본다.")
+    const anaphor = cites.find((c) => c.raw.includes("동 시행령"))
+    expect(anaphor!.lawName).toBe("법인세법 시행령") // 부가가치세법 시행령이면 회귀
+    expect(cites.find((c) => c.raw.startsWith("부가가치세법"))!.lawName).toBe("부가가치세법")
+  })
+
+  it("어순을 뒤집으면 선행사도 뒤집힌다 (대조군 — 두 어순이 구별되어야 한다)", () => {
+    const cites = extractCitations("법인세법 제26조를 적용한다. 부가가치세법 제32조 및 동 시행령 제8조를 본다.")
+    const anaphor = cites.find((c) => c.raw.includes("동 시행령"))
+    expect(anaphor!.lawName).toBe("부가가치세법 시행령")
+  })
+
+  it("'같은 영'도 앞 문장의 법령으로 해소된다", () => {
+    const cites = extractCitations("법인세법 제26조를 적용한다. 같은 영 제8조 및 부가가치세법 제32조를 본다.")
+    expect(cites.find((c) => c.raw.includes("같은 영"))!.lawName).toBe("법인세법 시행령")
+  })
+
+  it("'동 시행규칙'도 앞 문장의 법령으로 해소된다", () => {
+    const cites = extractCitations("법인세법 제26조를 적용한다. 동 시행규칙 제15조 및 부가가치세법 제32조를 본다.")
+    expect(cites.find((c) => c.raw.includes("동 시행규칙"))!.lawName).toBe("법인세법 시행규칙")
+  })
+
+  it("'같은 규정'은 뒤따르는 규정에 흡수되지 않는다", () => {
+    const cites = extractCitations(
+      "「외국환거래규정」 제23조를 적용한다. 같은 규정 제9조 및 국세청 조사사무처리규정 제41조를 본다."
+    )
+    expect(cites.find((c) => c.raw.includes("같은 규정"))!.lawName).toBe("외국환거래규정")
+  })
+
+  it("선행 문맥 컷이 있어도 raw와 좌표 기준이 어긋나지 않는다 ('구' 연혁 표지 유지)", () => {
+    const cites = extractCitations("구 법인세법 제26조를 적용한다. 같은 법 제3조를 본다.")
+    expect(cites[0].historical).toBe(true)
+    expect(cites[0].raw).toBe("구 법인세법 제26조")
+  })
+})

@@ -460,8 +460,20 @@ function extractPass(src: string, tight: boolean): Citation[] {
     }
     // "…(법률 제N호로 개정되기 전의 것)" — 괄호 내용 자체가 연혁 표지다 (구 접두 없이도)
     if (paren && HISTORICAL_PAREN_RE.test(paren)) historical = true
+    // 정렬 좌표는 **문맥 컷 이후의 진짜 인용 시작 위치**여야 한다.
+    // LAW_ARTICLE_RE의 이름부는 지연 매칭이라 "법"으로 끝나지 않는 조응(동 시행령·같은 영·
+    // 동 시행규칙·같은 규칙·같은 규정·동 규정) 뒤에 다른 법령이 오면
+    // "동 시행령 제8조 및 부가가치세법"을 통째로 캡처한다. 이름은 어절 컷으로 정리되지만
+    // idx를 매치 시작점으로 두면 그 명시 인용이 텍스트 순 정렬에서 **앞선 조응보다 먼저**
+    // 놓여 lastLawName을 선점하고, 조응이 **자기보다 뒤에 나오는 법령**으로 해소된다.
+    // "법인세법 제26조를 적용한다. 동 시행령 제8조 및 부가가치세법 제32조를 본다."의
+    // "동 시행령 제8조"가 「부가가치세법 시행령」으로 확신형 ✓를 받던 자리 (퍼즈 차단).
+    // "같은 법"류는 조응 자체가 '법'으로 끝나 정규식이 그 자리를 먼저 소비하므로 이 경로를
+    // 타지 않았고, 그래서 여섯 라운드의 회귀 사례에 한 번도 걸리지 않았다.
+    // raw가 이미 kept로 재구성되므로 좌표도 같은 기준을 쓴다 (end·괄호 오프셋은 m.index 기준 유지)
+    const idx = offset + m.index! + (kept > 0 ? kept : 0)
     hits.push({
-      idx: offset + m.index!,
+      idx,
       c: {
         raw,
         lawName: suffixNorm ? `${base} ${suffixNorm}` : base,
