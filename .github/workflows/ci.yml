@@ -24,9 +24,11 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
 
-      # OCR 스택(transformers·onnxruntime·sharp)은 kordoc의 optionalDependencies이고
-      # fin_annex는 OCR을 쓰지 않는다 — CI에서는 받지 않아 설치 시간과 취약점 표면을 줄인다
-      - run: npm ci --omit=optional
+      # ⚠ `--omit=optional`을 쓰면 안 된다 — typescript 7은 컴파일러 본체를 플랫폼별
+      # optionalDependencies로 배포해서 typecheck·build가 "Unable to resolve
+      # @typescript/typescript-win32-x64"류로 죽는다 (2026-09-04 실측). kordoc의 OCR
+      # 스택(~530MB)을 걷어내는 것은 설치 후 `npm prune --omit=optional`로만 가능하다.
+      - run: npm ci
 
       - run: npm run typecheck
 
