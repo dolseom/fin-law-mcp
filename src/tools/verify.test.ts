@@ -1160,3 +1160,46 @@ describe("extractCitations — 조응 선행사 역전 (퍼즈 차단)", () => {
     expect(cites[0].raw).toBe("구 법인세법 제26조")
   })
 })
+
+/**
+ * 퍼즈 차단 회귀 — 행정규칙명이 앞 인용을 통째로 삼키던 결함.
+ *
+ * ADMIN_ARTICLE_RE의 이름부는 30자까지 왼쪽으로 뻗는데, 앞 인용의 조문 토큰에 조사가 붙은
+ * 형태("제12조의2와")를 어절 컷이 하나도 잡지 못했다 — CUT_REF_RE는 조문 토큰 뒤에 [.,]만
+ * 허용했고 CUT_ENDING_RE에는 와/과가 없다. 결과로 없는 이름이 만들어지고 **진짜 규정 인용은
+ * 검증 대상에서 사라졌다**. 실 API에서 흡수된 앞부분이 실존 법령명이면(「소득세법」)
+ * 뒤 인용의 조문 번호가 앞 법령에 붙어 확신형 ✓까지 나갔다.
+ */
+describe("extractCitations — 행정규칙명의 앞 인용 흡수 (퍼즈 차단)", () => {
+  it("조사가 붙은 조문 토큰이 두 인용을 가르는 경계가 된다", () => {
+    const cites = extractCitations("소득세법 시행령 제12조의2와 국세청 조사사무처리규정 제41조를 참조한다.")
+    expect(cites).toHaveLength(2)
+    expect(cites.map((c) => c.lawName)).toEqual(["소득세법 시행령", "국세청 조사사무처리규정"])
+    expect(cites.some((c) => /제\d+조/.test(c.lawName))).toBe(false) // 이름에 조문이 남으면 회귀
+  })
+
+  it("변형② — 흡수된 앞부분이 법령명이 아닌 경우도 갈린다", () => {
+    const cites = extractCitations("「외국환거래규정」 제23조와 국세청 조사사무처리규정 제41조를 본다.")
+    expect(cites).toHaveLength(2)
+    expect(cites.map((c) => c.lawName)).toEqual(["외국환거래규정", "국세청 조사사무처리규정"])
+  })
+
+  it("조응 뒤에 규정이 와도 가른다", () => {
+    const cites = extractCitations(
+      "주식회사 등의 외부감사에 관한 법률 시행령 제5조 및 같은 법 제3조와 국세청 조사사무처리규정 제41조를 참조한다."
+    )
+    expect(cites.map((c) => c.lawName)).toContain("국세청 조사사무처리규정")
+    expect(cites.some((c) => /제\d+조/.test(c.lawName))).toBe(false)
+  })
+
+  it("조사 없는 종전 형태도 그대로 갈린다 (기존 회귀 유지)", () => {
+    const cites = extractCitations("「법인세법」 제26조 및 지방세법 제1조를 본다.")
+    expect(cites.map((c) => c.lawName)).toEqual(["법인세법", "지방세법"])
+  })
+
+  it("법령명 안의 가지번호는 컷되지 않는다 (과잉 컷 방어)", () => {
+    const cites = extractCitations("고용보험 및 산업재해보상보험의 보험료징수 등에 관한 법률 제16조의2를 본다.")
+    expect(cites[0].lawName).toBe("고용보험 및 산업재해보상보험의 보험료징수 등에 관한 법률")
+    expect(cites[0].article).toBe("제16조의2")
+  })
+})
