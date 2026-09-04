@@ -1203,3 +1203,37 @@ describe("extractCitations — 행정규칙명의 앞 인용 흡수 (퍼즈 차�
     expect(cites[0].article).toBe("제16조의2")
   })
 })
+
+/**
+ * 퍼즈 차단 4단계 — 행정규칙 경로의 raw·좌표 재구성.
+ *
+ * 83번을 고친 뒤에도 lawName만 갈리고 **raw는 흡수 구간을 그대로 보여 주었다**
+ * ("⚠ 소득세법 시행령 제12조의2와 국세청 조사사무처리규정 제41조"). 판정은 옳지만
+ * 어느 구간이 검증됐는지 알 수 없어, 사용자가 앞 인용이 문제인 것으로 읽는다.
+ * 법령 경로에는 있던 kept 기반 재구성이 행정규칙 경로에만 빠져 있던 자리다.
+ */
+describe("extractCitations — 행정규칙 경로 raw·좌표 재구성 (퍼즈 4단계)", () => {
+  it("raw가 앞 인용을 포함하지 않는다", () => {
+    const cites = extractCitations("소득세법 시행령 제12조의2와 국세청 조사사무처리규정 제41조를 참조한다.")
+    const admin = cites.find((c) => c.lawName === "국세청 조사사무처리규정")
+    expect(admin!.raw).toBe("국세청 조사사무처리규정 제41조")
+  })
+
+  it("접속사도 raw에 남지 않는다", () => {
+    const cites = extractCitations("법인세법 제26조 및 국세청 조사사무처리규정 제41조를 본다.")
+    const admin = cites.find((c) => c.lawName === "국세청 조사사무처리규정")
+    expect(admin!.raw).toBe("국세청 조사사무처리규정 제41조")
+  })
+
+  it("컷이 없으면 raw는 종전 그대로다", () => {
+    const cites = extractCitations("국세청 조사사무처리규정 제41조를 본다.")
+    expect(cites[0].raw).toBe("국세청 조사사무처리규정 제41조")
+  })
+
+  it("괄호 안 규정은 조응 선행사가 되지 않는다 (좌표 기준 이동의 반대 방향)", () => {
+    const cites = extractCitations(
+      "「외국환거래규정」 제23조를 본다. 사내 절차는 (당사 취업규칙 제12조) 참조. 같은 규정 제9조를 본다."
+    )
+    expect(cites.find((c) => c.raw.includes("같은 규정"))!.lawName).toBe("외국환거래규정")
+  })
+})

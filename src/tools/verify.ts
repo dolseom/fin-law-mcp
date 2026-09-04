@@ -630,10 +630,18 @@ function extractPass(src: string, tight: boolean): Citation[] {
     // ("법인세법 시행규칙 제15조"는 1번이 처리한다 — 여기서 또 잡으면 행정규칙으로
     //  판정되어 부령 조문이 "명칭만 확인"으로 강등된다)
     if (articleEnds.has(end)) continue
+    // raw·좌표를 어절 컷 이후 기준으로 재구성한다 — 법령 경로(1번)에는 있는데 여기만 빠져
+    // 있었다. 이름부가 30자까지 왼쪽으로 뻗으므로, 앞 인용이나 접속사를 문맥으로 잘라낸 뒤에도
+    // raw는 "소득세법 시행령 제12조의2와 국세청 조사사무처리규정 제41조" 전체를 그대로 보여
+    // 어느 구간이 검증됐는지 알 수 없었다 (판정은 옳고 표시만 두 인용에 걸쳐 있던 자리).
+    // 좌표도 같은 기준으로 옮긴다 — raw와 idx의 기준이 어긋나 있던 것이 조응 선행사 역전의 원인이었다
+    const adminKept = m[1].lastIndexOf(name.split(" ")[0])
+    const adminRaw = (adminKept > 0 ? m[0].slice(adminKept) : m[0]).trim()
+    const adminIdx = m.index! + (adminKept > 0 ? adminKept : 0)
     const suffixName = nameForSuffixCheck(name)
     if (isAdminRuleName(suffixName)) {
       // 고시·훈령류: 행정규칙 전용 경로 (명칭 실존만 검증)
-      hits.push({ idx: m.index!, c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "행정규칙" } })
+      hits.push({ idx: adminIdx, c: { raw: adminRaw, lawName: name, article: normArticle(m[2]), kind: "행정규칙" } })
       articleEnds.add(end)
       continue
     }
@@ -642,16 +650,18 @@ function extractPass(src: string, tight: boolean): Citation[] {
     // 시행규칙은 isAdminRuleLikeName이 걸러 1번 경로에 맡긴다
     if (!isAdminRuleLikeName(suffixName)) continue
     hits.push({
-      idx: m.index!,
+      idx: adminIdx,
       // 따옴표 없는 규정·규칙은 사내 문서일 수 있다 — "당사 취업규칙 제12조",
       // "내부 회계처리 규칙 제3조"는 정당한 인용인데 법령 DB에는 당연히 없다.
       // 이런 이름에 ✗("환각 의심")를 찍으면 실무자의 정상 문서를 거짓말로 낙인찍는다.
       // 미발견 시 ⚠로 강등한다 — 조용히 통과시키지도, 없다고 단정하지도 않는다
       // (SOFT_ADMIN_SUFFIX의 '기준·지침'과 같은 취급). 「」로 감싼 인용은 법령을
       // 의도한 것이 명확하므로 종전대로 ✗ 판정을 유지한다
-      c: { raw: m[0].trim(), lawName: name, article: normArticle(m[2]), kind: "법령조문", soft: true },
-      // 괄호 안 인용은 "같은 규칙"·"같은 규정"의 선행사도 되지 않는다 (3)과 같은 이유)
-      ...(isInParen(m.index!)
+      c: { raw: adminRaw, lawName: name, article: normArticle(m[2]), kind: "법령조문", soft: true },
+      // 괄호 안 인용은 "같은 규칙"·"같은 규정"의 선행사도 되지 않는다 (3)과 같은 이유).
+      // 컷 이후 좌표로 본다 — 매치가 괄호 앞에서 시작하고 이름은 괄호 안인 경우
+      // ("…제5조 및 (당사 취업규칙 제12조)") m.index로는 괄호 밖으로 읽혀 선행사가 된다
+      ...(isInParen(adminIdx)
         ? {}
         : isRuleAntecedentName(name)
           ? { ruleAntecedent: name }
