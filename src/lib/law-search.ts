@@ -34,13 +34,29 @@ const INTERPUNCT_RE = new RegExp(`[${INTERPUNCT_CHARS}]`, "g")
 // 후보 법령명과 법제처 공식 법령명의 느슨한 일치 — 공백·가운뎃점 무시 + 접두/약칭 허용.
 // findLaws가 관련도 정렬은 해도 매칭이 전혀 다른 법령일 수 있어 최종 방어선으로 사용.
 // (verify-citations에서 쓰던 것을 lib로 승격 — applicable_law/impact_map 가드 공용)
+/**
+ * 세 번째 절("질의가 정식명으로 시작하면 일치")의 꼬리 거부 조건.
+ *
+ * 접두 일치만으로 받으면 **앞 인용을 흡수해 오염된 이름이 그 앞 법령으로 확정되고,
+ * 뒤 인용의 조문 번호가 앞 법령에 붙어 확신형 ✓가 나간다** (퍼즈 차단, 실 API 실측:
+ * "소득세법 시행령 제12조의2와 국세청 조사사무처리규정" → 「소득세법」 제41조 ✓).
+ * 남은 꼬리에 조문 토큰이나 **또 다른** 법령·행정규칙 접미사가 있으면 그건 표기 흔들림이
+ * 아니라 다른 문서를 가리키는 조각이 붙은 것이므로 거부한다.
+ *
+ * 정상 인용에서 이 꼬리는 비어 있거나 표기 흔들림뿐이다 — 종류 접미사(시행령·시행규칙)는
+ * 애초에 lawTierOf가 따로 보고 걸러 주므로 여기까지 오지 않는다.
+ */
+const LOOSE_TAIL_REJECT_RE = /제\d+조(?:의\d+)?|법률|법|령|규칙|규정|고시|훈령|예규|지침/
+
 export function looseMatchLawName(target: string, official: string): boolean {
   const normalize = (s: string) => s.replace(/\s+/g, "").replace(INTERPUNCT_RE, "")
   const targetNorm = normalize(target)
   const officialNorm = normalize(official)
-  return officialNorm === targetNorm
-    || officialNorm.startsWith(targetNorm)
-    || targetNorm.startsWith(officialNorm.replace(/(법률|법)$/, "법"))
+  if (officialNorm === targetNorm) return true
+  if (officialNorm.startsWith(targetNorm)) return true
+  const officialPrefix = officialNorm.replace(/(법률|법)$/, "법")
+  if (!targetNorm.startsWith(officialPrefix)) return false
+  return !LOOSE_TAIL_REJECT_RE.test(targetNorm.slice(officialPrefix.length))
 }
 
 /** 법령 종류(본법/시행령/시행규칙) — 이름 끝 접미사로 판별 */

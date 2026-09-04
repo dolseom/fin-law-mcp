@@ -134,3 +134,50 @@ describe("findLaws — 약칭+접미사 확장 사다리 (Opus 재검증 개선,
     expect(laws[0].lawName).toBe("근로자퇴직급여 보장법 시행령")
   })
 })
+
+/**
+ * 퍼즈 차단 회귀 — looseMatchLawName 세 번째 절("질의가 정식명으로 시작하면 일치")이
+ * **오염된 이름 전부에 확신형 ✓를 내주는 공용 통로**였다.
+ *
+ * 추출 단계에서 앞 인용을 흡수한 이름("소득세법 시행령 제12조의2와 국세청 조사사무처리규정")이
+ * findLaws 3차 사다리에서 「소득세법」을 뽑아 오고, 3절이 접두 일치만 보고 통과시켜
+ * **뒤 인용의 조문 번호가 앞 법령에 붙은 채 ✓**가 나갔다 (실 API 실측).
+ * 추출 쪽(CUT_REF_RE)만 고치면 증상만 막히므로 판정 관문도 함께 좁힌다.
+ *
+ * 실측으로 확인한 것: 3절은 **질의가 공식명보다 긴 경우에만** 판정을 가른다.
+ * "…에 관한 법" ↔ "…에 관한 법률" 같은 정상 흔들림은 2절(공식명이 질의로 시작)이 이미 받는다.
+ */
+describe("looseMatchLawName 3절 — 오염된 이름 거부 (퍼즈 차단)", () => {
+  it("조문 토큰이 남은 이름은 접두가 맞아도 거부한다", () => {
+    expect(resolvedLawMatches("법인세법 제26조", "법인세법")).toBe(false)
+    expect(resolvedLawMatches("소득세법 시행령 제12조의2와 국세청 조사사무처리규정", "소득세법")).toBe(false)
+  })
+
+  it("다른 법령·행정규칙 접미사가 남은 이름도 거부한다", () => {
+    expect(resolvedLawMatches("법인세법 제26조 및 지방세법", "법인세법")).toBe(false)
+    expect(resolvedLawMatches("부가가치세법 시행령 제8조와 외국환거래규정", "부가가치세법")).toBe(false)
+  })
+
+  it("정상 인용은 그대로 통과한다 (반대 방향 방어)", () => {
+    expect(resolvedLawMatches("법인세법", "법인세법")).toBe(true)
+    expect(resolvedLawMatches("법인세법시행령", "법인세법 시행령")).toBe(true)
+    expect(resolvedLawMatches("법인세", "법인세법")).toBe(true) // 2절
+    expect(resolvedLawMatches("외감법", "주식회사 등의 외부감사에 관한 법률")).toBe(true) // 별칭
+    expect(resolvedLawMatches("근퇴법 시행령", "근로자퇴직급여 보장법 시행령")).toBe(true) // 약칭+접미사
+  })
+
+  it("'…법률'↔'…법' 흔들림은 2절이 받으므로 3절 강화의 영향을 받지 않는다", () => {
+    expect(resolvedLawMatches("국가를 당사자로 하는 계약에 관한 법", "국가를 당사자로 하는 계약에 관한 법률")).toBe(true)
+    expect(resolvedLawMatches("주식회사 등의 외부감사에 관한 법", "주식회사 등의 외부감사에 관한 법률")).toBe(true)
+  })
+
+  it("조사가 붙은 꼬리는 거부 대상이 아니다", () => {
+    expect(resolvedLawMatches("소득세법상", "소득세법")).toBe(true)
+    expect(resolvedLawMatches("법인세법의", "법인세법")).toBe(true)
+  })
+
+  it("별표 소속 대조(sameLawFamily)는 영향받지 않는다", () => {
+    expect(sameLawFamily("법인세법", "법인세법 시행규칙")).toBe(true)
+    expect(sameLawFamily("법인세법", "소득세법 시행규칙")).toBe(false)
+  })
+})

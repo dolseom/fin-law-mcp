@@ -387,3 +387,41 @@ describe("checkAdminRuleArticle — 본문 대조", () => {
     expect(await checkAdminRuleArticle(bodyClient(flat), "1", "제23조")).toEqual({ status: "형식아님" })
   })
 })
+
+/**
+ * 퍼즈 차단 3단계 회귀 — looseMatchLawName 3절 강화가 **행정규칙 후보 필터**(197행)에
+ * 미치는 영향. 이 저장소는 판정 함수를 고치고 소비자를 안 본 실패가 아홉 번 있었다.
+ *
+ * 3절은 "질의가 공식명으로 시작하고 더 긴" 경우에만 판정을 가르므로, 여기서 영향받는 것은
+ * 질의가 DB의 규칙명보다 긴 경우뿐이다. 종류 접미사(시행세칙)는 살리고, 다른 문서를
+ * 가리키는 접미사(지침·규정·고시)는 후보에서 뺀다.
+ */
+const RULE_ONLY_XML =
+  '<?xml version="1.0"?><AdmRulSearch><totalCnt>1</totalCnt><admrul>' +
+  "<행정규칙명>조사사무처리규정</행정규칙명><행정규칙종류>훈령</행정규칙종류>" +
+  "<소관부처명>국세청</소관부처명><발령일자>20260101</발령일자></admrul></AdmRulSearch>"
+
+describe("findAdminRule — 3절 강화의 소비자 영향 (퍼즈 차단 3단계)", () => {
+  it("접두 후보(2절)는 그대로 살아 있다 — 강화는 3절만 건드렸다", async () => {
+    const m = await findAdminRule(xmlStub(PREFIX_ONLY_XML), "국세청 사무처리규정")
+    expect(m!.exact).toBe(false)
+    expect(m!.name).toBe("국세청 사무처리규정 시행세칙")
+  })
+
+  it("질의가 '…시행세칙'이면 상위 규정이 근접 후보로 남는다 (꼬리 거부 대상 아님)", async () => {
+    const m = await findAdminRule(xmlStub(RULE_ONLY_XML), "조사사무처리규정 시행세칙")
+    expect(m).not.toBeNull()
+    expect(m!.exact).toBe(false)
+    expect(m!.name).toBe("조사사무처리규정")
+  })
+
+  it("질의 꼬리가 별개 문서 접미사('지침')면 근접 후보로 삼지 않는다", async () => {
+    const m = await findAdminRule(xmlStub(RULE_ONLY_XML), "조사사무처리규정 운영지침")
+    expect(m).toBeNull() // 근접 후보 문구를 잃는 대신 엉뚱한 규칙에 기대지 않는다
+  })
+
+  it("정확 일치는 영향받지 않는다", async () => {
+    const m = await findAdminRule(xmlStub(RULE_ONLY_XML), "조사사무처리규정")
+    expect(m!.exact).toBe(true)
+  })
+})
