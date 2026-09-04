@@ -7,14 +7,14 @@ AI가 세무 답변의 '해설'을 하는 시대에, 이 서버는 그 해설이
 > 이 서버는 그 세트를 알고 묶어서 답합니다. 조문 하나를 물으면 위임 시행령 본문과
 > 관련 예규까지 **1회 호출**로 옵니다 (범용 MCP 기준 5~6회 호출 분량).
 
-## 도구 (8개)
+## 도구 (기본 7개 · `FIN_NTS_BODY_ENABLED=true`면 8개)
 
 | 도구 | 하는 일 |
 |------|------|
 | `fin_article` | 조문 + 위임 시행령·시행규칙 **본문** + 관련 예규 + 별표 + **시행예정 개정 경고**를 1회 응답으로 |
 | `fin_law_search` | 법령 검색 → 재무 관련도순 재정렬 (부분매칭 함정 방어 · 폐지/연혁/시행예정 표시 · 주제어→법령 힌트) |
 | `fin_ruling_search` | 국세청 예규 + 조세심판원 + 법제처 해석례 + 법원 판례(전 심급)를 한 번에, **최신순** + 전거 서열 표기 |
-| `fin_nts_ruling` | 국세청 예규 검색 + 상위 건 **본문 전문** 자동 동봉 (문서번호·회신일자 포함) |
+| `fin_nts_ruling` | 국세청 예규 검색 + 상위 건 **본문 전문** 자동 동봉 (문서번호·회신일자 포함). **`FIN_NTS_BODY_ENABLED=true`일 때만 등록** — 기본(off)에서는 목록이 `fin_ruling_search(domains=["nts"])`와 겹쳐 노출하지 않습니다 |
 | `fin_annex` | 별표·서식 목록 + 다운로드 링크. `annex_no` 지정 시 **표 내용을 구조 그대로 추출** (감가상각 내용연수표·세율표). 법령뿐 아니라 **고시·훈령의 별표·별지서식**도 (국세청 훈령의 별지 서식 등) |
 | `fin_verify` | 초안의 법령·조문·고시 인용을 실존 검증 — **✓있음/✗없음/⚠판정불가 3값**. 조문 형식으로 제공되는 행정규칙은 **조문 존재까지** 대조 |
 | `fin_calc` | 법정 산식 결정형 계산 (임원퇴직금 한도·기업업무추진비 한도·감가상각비·가지급금 인정이자·퇴직소득세) — LLM 산수 배제, 계산 과정·근거 조문 동봉 |
@@ -28,6 +28,7 @@ AI가 세무 답변의 '해설'을 하는 시대에, 이 서버는 그 해설이
 - 법령 계열은 기준일 시점 **시행본**을 찾아 그 버전의 조문을 반환합니다. 해당일에 시행본이 없으면
   직전 개정본을 쓰되 응답 헤더에 명시하고, 확정하지 못하면 추측 대신 `BASIS_DATE_UNRESOLVED`로 알립니다.
 - `fin_ruling_search`는 시행일이 아니라 **회신·의결·선고일** 기준으로 거르고, 제외한 건수를 표기합니다.
+- **신구조문 대비**는 같은 조문에 `fin_article`을 두 번 호출해서 봅니다 — 개정 전 시점을 `basis_date`로 한 번(예: `basis_date: "2022-12-31"`), 현행을 `basis_date` 없이 한 번. 두 응답의 조문 본문과 시행일자를 비교하면 됩니다.
 
 ## 신뢰 원칙 (이 서버의 존재 이유)
 
@@ -51,6 +52,16 @@ AI가 세무 답변의 '해설'을 하는 시대에, 이 서버는 그 해설이
 git clone <repo> && cd fin-law-mcp
 npm install && npm run build
 ```
+
+**(선택) 설치 용량 줄이기** — 빌드가 끝난 뒤 별표 추출에 쓰는 `kordoc`의 OCR 옵션 스택(onnxruntime·transformers·sharp)을 걷어냅니다. `fin_annex`는 OCR을 쓰지 않아 별표 표 추출은 그대로 동작합니다 (실측 905MB → 70MB).
+
+```bash
+npm prune --omit=optional
+```
+
+- 다시 빌드하려면 `npm install`을 한 번 더 실행하세요. prune은 TypeScript 컴파일러 바이너리도 함께 지웁니다.
+- ⚠ **처음부터 `npm install --omit=optional`로 건너뛰면 빌드가 깨집니다.** TypeScript 7은 컴파일러 본체를 플랫폼별 `optionalDependencies`(`@typescript/typescript-<플랫폼>`)로 배포해서 `tsc`까지 함께 빠지기 때문입니다.
+- `npm audit`은 설치된 트리가 아니라 `package-lock.json`을 읽습니다. prune 후에도 OCR 스택 경유 취약점(sharp→libvips 등)이 같은 건수로 계속 보고됩니다 — 줄지 않는 것이 정상입니다.
 
 1. [법제처 OPEN API](https://open.law.go.kr/LSO/openApi/guideResult.do) 키 발급 (무료 — 가입 이메일 @ 앞부분이 키)
 2. `.env` 파일 생성: `LAW_OC=발급받은키`
@@ -78,6 +89,8 @@ npm install && npm run build
 | `FIN_CACHE_TTL_SEC` | 캐시 TTL (기본 600초, `0`이면 비활성). **응답 본문 캐시와 검색·폐지연혁 파싱 결과 캐시 두 계층을 함께 제어**하고 각 계층 자체 TTL의 상한이 된다 — `0`이면 둘 다 완전히 꺼진다. 같은 조회의 반복 왕복을 프로세스 안에서 접는다 (행정규칙 본문 213~405KB 재조회 1258ms → 9ms) |
 | `FIN_CACHE_MAX_ENTRIES` / `FIN_CACHE_MAX_MB` | 캐시 상한 (기본 200건 / 16MB). 오류·HTML 장애 응답은 담지 않는다 |
 | `LAW_API_PROTOCOL` / `LAW_RESPONSE_TYPE` | 폐쇄망 http 전환 / XML 장애 시 JSON 우회 |
+| `LAW_EXTERNAL_HTTPS_PROXY` | 사내 프록시 경유 (`http://호스트:포트`, 인증은 `http://사용자:암호@호스트:포트`). ⚠ **적용 범위는 국세청 예규 본문 조회(`taxlaw.nts.go.kr`) 한 곳뿐입니다** — 법제처 경로(조문·검색·해석례·별표 파일 다운로드)는 프록시를 타지 않고 직접 나갑니다. 아웃바운드가 프록시로만 열린 망에서는 그쪽이 먼저 실패합니다. **경로 통일은 v0.2 예정** |
+| `LAW_EXTERNAL_TLS_REJECT_UNAUTHORIZED` | `0`이면 위 프록시 구간의 TLS 검증을 끕니다 (진단용 임시 우회). `NODE_ENV=production`에서는 무시하고 항상 검증합니다 |
 
 ## 알아둘 것
 
@@ -94,7 +107,10 @@ npm install && npm run build
 ```bash
 npm run typecheck   # 타입 검사 (src + test 전체)
 npm test            # 회귀 테스트 (fixture 기반 — 실 API 불필요, CI 상시)
-npm run test:live   # 골든셋 라이브 (실 법제처 API 호출 — LAW_OC 필요, 수동)
+npm run test:live   # 라이브 (실 법제처 API 호출 — LAW_OC 필요, 수동)
+                    #   · 골든셋 회귀
+                    #   · fin_calc 상수 대조 — 세율표·공제표·상각률·이자율·한도를
+                    #     조문 원문과 대조한다 (세법 개정으로 상수가 낡으면 실패)
 
 node scripts/gate20.mjs           # 인용 검증 게이트 (정상 인용 20문장 → 전부 ✓)
 node scripts/verify-file.mjs 검토서.md   # 문서 하나의 인용을 통째로 검증
@@ -103,11 +119,14 @@ node scripts/verify-file.mjs 검토서.md   # 문서 하나의 인용을 통째�
 - [docs/BENCHMARK.md](./docs/BENCHMARK.md) — 검증 게이트 정의 · 오검증 회귀 사례 81건 · 실측 결과
 - [docs/HOOKS.md](./docs/HOOKS.md) — 검토서(.md) 저장 시 인용을 자동 검증하는 Claude Code 훅 설정
 
-## 로드맵
+## 로드맵 (v0.2)
 
-- 별표 사전 파싱 JSON (내용연수표·세율표를 기계가 읽는 형태로)
-- 기준일 세션 고정 (행위시법 — "2023년 거래 검토 중"이면 전 도구가 2023년 법으로)
-- 검토서용 인용 패키지 자동 생성 · 신구조문 대비 · 로컬 인덱스(SQLite FTS5)
+- **`fin_article`의 행정규칙 조문 본문 반환** — 지금은 고시·훈령의 조문 *존재*까지만 대조합니다(`fin_verify`). 조문 형식으로 오는 규칙은 본문도 그대로 줄 수 있습니다.
+- **`fin_verify` 인용 추출기 재구조화 + 퍼즈 테스트** — 정규화(CRLF·줄바꿈·낱말 안 줄바꿈) / 후보 추출 / 해소(조응·괄호·연혁) 3단 분리. 무작위 줄바꿈·괄호 변형으로 추출 개수와 해소 결과를 검사합니다.
+- **봉인 평가셋 20문항 1회 실행** — 왕복 수·문서번호 표기율·노이즈 건수를 공개 수치로.
+
+> 계획 없음(검토 후 폐기): 별표 사전 파싱 JSON · 기준일 세션 고정 · 검토서용 인용 패키지 · 로컬 인덱스(SQLite FTS5).
+> 별표는 `fin_annex`가 런타임에 추출하고, 기준일은 호출마다 명시하는 편이 "헤더는 기준일, 본문은 현행" 류의 조용한 오류를 막습니다.
 
 ## 라이선스·출처
 
