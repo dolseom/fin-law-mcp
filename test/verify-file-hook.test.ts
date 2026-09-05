@@ -160,6 +160,64 @@ describe.skipIf(!hasBuild)("verify-file 훅 — CRLF 문서 (Codex 5차 차단)"
   }, 30_000)
 })
 
+/**
+ * Codex 8차 차단 회귀 — 추출 0건의 두 갈래.
+ *
+ * 마크다운 목록 표시 + 줄바꿈으로 법령명이 갈라지면("- 국가를 당사자로 하는 계약에 관한"
+ * + 줄바꿈 + "법률 제7조") 추출이 0건이 된다 (같은 문장이 목록 표시 없이는 1건 — 실측).
+ * 훅은 total===0을 "법령 인용이 없습니다 + exit 0"으로만 처리했으므로, 실제 인용이 있는
+ * 검토서가 검증 성공으로 통과했다 — 확정적 거짓 성공이다.
+ * 추출기의 이음새 결함(퍼즈 EXCLUSIONS mdlist+softwrap)은 v0.2 대상이고, 여기서
+ * 박제하는 것은 **훅의 종료 규칙**이다: 표기 흔적이 있으면 "없음"이라고 말하지 않는다.
+ */
+describe.skipIf(!hasBuild)("verify-file 훅 — 추출 0건 거짓 성공 (Codex 8차 차단)", () => {
+  const MDLIST_SOFTWRAP = "- 국가를 당사자로 하는 계약에 관한\n법률 제7조에 따른다.\n"
+
+  it("표기 흔적이 있는데 추출 0건이면 통과가 아니다 — WARN_EXIT + ⚠ 보고", () => {
+    const r = runHook(MDLIST_SOFTWRAP)
+    expect(r.stdout).not.toContain("법령 인용이 없습니다") // 거짓 성공 문구가 남으면 회귀
+    expect(r.stdout).not.toContain("인용 검증 통과")
+    expect(r.stderr).toContain("인용 표기 흔적은 있으나 추출 0건")
+    expect(r.stderr.split("\n")[0]).toContain("⚠") // 첫 줄이 요지 (비차단 코드에서 이 줄만 보인다)
+    expect(r.status).toBe(1)
+  }, 30_000)
+
+  it("WARN_EXIT 규칙을 그대로 따른다 (2면 2, FAIL_EXIT=0이면 0)", () => {
+    expect(runHook(MDLIST_SOFTWRAP, { env: { FIN_VERIFY_WARN_EXIT: "2" } }).status).toBe(2)
+    const lenient = runHook(MDLIST_SOFTWRAP, { env: { FIN_VERIFY_FAIL_EXIT: "0" } })
+    expect(lenient.status).toBe(0)
+    expect(lenient.stderr).toContain("추출 0건") // 코드만 0, 보고는 그대로
+  }, 30_000)
+
+  it("인용 표기가 전혀 없는 문서는 종전대로 통과한다 (exit 0)", () => {
+    const r = runHook("이번 분기 실적은 전년 대비 개선되었습니다.\n")
+    expect(r.stdout).toContain("법령 인용이 없습니다")
+    expect(r.stderr).not.toContain("추출 0건")
+    expect(r.status).toBe(0)
+  }, 30_000)
+
+  // 흔적을 넓게 잡으면 평문이 매번 ⚠를 문다 — "규정·규칙·고시·훈령·통칙"은 낱말
+  // 단독으로는 흔적이 아니다. 조문 번호·겹낫표·강한 접미(법률·시행령·시행규칙)만 흔적이다
+  it.each([
+    ["사내 규정에 따라 처리했습니다.\n", "낱말 '규정'"],
+    ["매월 규칙적으로 결산 절차를 점검한다.\n", "낱말 '규칙'"],
+    ["대외 고시 자료를 정리했습니다.\n", "낱말 '고시'"],
+  ])("법령 인용이 없는 평문은 흔적이 아니다 (%s → exit 0)", (doc) => {
+    const r = runHook(doc)
+    expect(r.stdout).toContain("법령 인용이 없습니다")
+    expect(r.stderr).not.toContain("인용 표기 흔적은 있으나")
+    expect(r.status).toBe(0)
+  }, 30_000)
+
+  it("추출이 되는 문서는 이 분기를 타지 않는다 (정상 검증 경로 유지)", () => {
+    // 같은 문장에서 목록 표시만 뺀 형태 — 1건으로 추출돼 판정 라인까지 간다
+    const r = runHook("국가를 당사자로 하는 계약에 관한\n법률 제7조에 따른다.\n")
+    expect(r.stdout).toContain("인용 1건")
+    expect(r.stderr).not.toContain("인용 표기 흔적은 있으나")
+    expect(r.stdout).toMatch(/✓\d+ \/ ✗\d+ \/ ⚠\d+/) // 요약 집계까지 도달
+  }, 30_000)
+})
+
 describe.skipIf(!hasBuild)("verify-file 훅 — 청크 집계 기준 (Codex 5차 개선)", () => {
   it("문단 간 중복 인용이 상한 절단 미검증을 가리지 않는다", () => {
     // 문단1: 한 문단에 16건 (상한 15 초과 → 1건 절단) / 문단2: 문단1과 중복 1건.

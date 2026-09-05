@@ -17,8 +17,8 @@
  *                          hook error로 표시. FAIL_EXIT=0이면 기본 0). Claude에게 전문 전달은 2
  *   FIN_VERIFY_BASIS_DATE  기준일 YYYY-MM-DD (생략 시 현행)
  *
- * 종료 코드: 0 = 통과(전 인용 ✓) / FAIL_EXIT(기본 1) = ✗ 있음
- *           / WARN_EXIT(기본 1) = 사용 보류·미검증 잔여·판정 불가(⚠·⌛)
+ * 종료 코드: 0 = 통과(전 인용 ✓, 또는 인용 표기 자체가 없는 문서) / FAIL_EXIT(기본 1) = ✗ 있음
+ *           / WARN_EXIT(기본 1) = 사용 보류·미검증 잔여·판정 불가(⚠·⌛)·추출 0건인데 표기 흔적 있음
  *           / 혼합이면 해당 코드의 최댓값 / 3 = 실행 불가(키·파일 오류)
  * ⚠는 "없음"이 아니라 "확인 못 함"이다 — 그래서 ✗(FAIL_EXIT)와 분리하되, 종료 코드 0으로
  * 삼키지도 않는다 (0의 stderr는 디버그 로그에만 남아 아무에게도 닿지 않는다 — Codex 4차 차단).
@@ -54,6 +54,13 @@ const CHUNK_INTERVAL_MS = Number(process.env.FIN_VERIFY_INTERVAL_MS) || 3_000
  * ⌛(폐지·연혁 추정)도 판정 라인이다 — 빼면 judged가 미달해 "상한 초과로 잘림"이라는
  * 사실과 다른 사유가 출력된다 (Claude 리뷰 개선 9) */
 const VERDICT_LINE = /^[✓✗⚠⌛]\s/
+/** 추출 0건이 "인용 없음"인지 "추출 실패"인지 가르는 흔적. 셋 중 하나면 흔적으로 본다:
+ *  ① 조문 번호  ② 겹낫표로 감싼 규범명  ③ 강한 접미(법률·시행령·시행규칙)
+ * "규정·규칙·고시·훈령·통칙"은 낱말 단독으로는 흔적이 아니다 — "사내 규정에 따라",
+ * "규칙적으로" 같은 평문이 매번 ⚠를 물었다 (실측). 겹낫표 안(②)이면 규범명으로 인정한다.
+ * \b는 쓰지 않는다 — JS의 \w는 [A-Za-z0-9_]라 한글 뒤에서는 경계가 서지 않아
+ * /법률\b/가 "법률 제7조"에도 매치되지 않는다 (실측) */
+const CITATION_TRACE = /제\s*\d+\s*조|「[^」]*(?:규정|규칙|고시|훈령|통칙|법|령)」|법률|시행령|시행규칙/
 
 /** 훅은 stdin으로 JSON을 준다 — 인자와 stdin 양쪽을 받는다 */
 async function resolveTargetPath() {
@@ -106,6 +113,19 @@ const { handleFinVerify, extractCitationsWithTotal } = await import(
 const text = readFileSync(target, "utf8")
 const { total } = extractCitationsWithTotal(text)
 if (total === 0) {
+  // 추출 0건은 "인용이 없다"와 "추출이 실패했다"의 두 가지다 — 둘을 같이 exit 0으로
+  // 보내면 뒤쪽이 확정적 거짓 성공이 된다 (Codex 8차 차단: "- 국가를 당사자로 하는
+  // 계약에 관한\n법률 제7조" 처럼 마크다운 목록 + 줄바꿈으로 법령명이 갈라지면 추출
+  // 0건인데, 같은 문장이 목록 표시 없이는 1건으로 추출된다 — 실측). 추출기의 이음새
+  // 결함 자체는 v0.2 재구조화 대상이라, 여기서는 훅의 종료 규칙만 안전한 쪽으로 둔다.
+  // 표기 흔적이 있으면 "없음"이라고 말하지 않는다 — ⚠와 같은 취급(WARN_EXIT)이다
+  if (CITATION_TRACE.test(text)) {
+    console.log(`[인용 검증] ${target} — 추출 0건 (인용 표기 흔적 있음)`)
+    console.error(
+      `⚠ 인용 표기 흔적은 있으나 추출 0건 — 줄바꿈·목록으로 법령명이 갈라졌을 수 있습니다. 한 줄로 이어 쓰거나 원문을 직접 확인하세요`
+    )
+    process.exit(WARN_EXIT)
+  }
   console.log(`[인용 검증] ${target} — 법령 인용이 없습니다 (검증 대상 0건)`)
   process.exit(0)
 }

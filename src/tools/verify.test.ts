@@ -1237,3 +1237,92 @@ describe("extractCitations — 행정규칙 경로 raw·좌표 재구성 (퍼즈
     expect(cites.find((c) => c.raw.includes("같은 규정"))!.lawName).toBe("외국환거래규정")
   })
 })
+
+/**
+ * 검증 범위 고지 — ✓의 뜻을 헤더에 못박는다.
+ *
+ * fin_verify는 조문 **번호의 실존**만 확인하는데, 실무자는 ✓5/✗0/⚠0을 보고 초안 내용이
+ * 맞다고 읽는다 (실측: 항 번호와 조문 취지가 틀린 초안도 ✓5/✗0/⚠0). 판정 라인마다 있는
+ * "검증범위: 조문 실존 확인"은 눈에 들어오지 않아, 헤더 둘째 줄에 고정한다.
+ */
+describe("verify — 검증 범위 고지 (✓의 뜻)", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const NOTICE =
+    "※ ✓는 법령·조문 번호가 법제처에 실존한다는 뜻입니다. 항·호·내용의 옳고 그름은 검증하지 않습니다 — 내용 확인은 fin_article로 본문을 대조하세요"
+
+  const CURRENT_LAW_XML =
+    '<?xml version="1.0"?><LawSearch><totalCnt>1</totalCnt><law id="1">' +
+    "<법령명한글>법인세법</법령명한글><법령ID>1563</법령ID>" +
+    "<법령일련번호>280349</법령일련번호><법령구분명>법률</법령구분명>" +
+    "<현행연혁코드>현행</현행연혁코드><시행일자>20260701</시행일자></law></LawSearch>"
+  const ARTICLE_JSON =
+    '{"법령":{"조문":{"조문단위":[{"조문여부":"조문","조문번호":"26","조문제목":"손금불산입"}]}}}'
+
+  const stubOk = () =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input)
+        if (url.includes("lawService.do")) return new Response(ARTICLE_JSON, { status: 200 })
+        if (url.includes("target=admrul")) return new Response(ADMRUL_EMPTY_XML, { status: 200 })
+        return new Response(CURRENT_LAW_XML, { status: 200 })
+      })
+    )
+
+  it("✓가 있으면 헤더 바로 아래 둘째 줄에 고지가 붙는다", async () => {
+    stubOk()
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "법인세법 제26조에 따른다.",
+    })
+    const lines = res.content[0].text.split("\n")
+    expect(lines[0]).toContain("✓1")
+    expect(lines[1]).toBe(NOTICE) // 헤더 첫 줄 바로 아래 — 행 단위 표기는 눈에 안 들어온다
+  })
+
+  it("✓가 0건이면 고지를 생략한다 (✗·⚠만 있을 때는 오해할 ✓가 없다)", async () => {
+    stubFetchByUrl([]) // 전 경로 0건 → ✗
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "가상자산투기억제법 제3조를 검토한다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("✓0")
+    expect(text).not.toContain(NOTICE)
+  })
+
+  it("추출된 인용 0건 응답에는 넣지 않는다", async () => {
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "이번 분기 실적은 전년 대비 개선되었습니다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("추출된 인용 0건")
+    expect(text).not.toContain(NOTICE)
+  })
+
+  /**
+   * 고지 줄이 판정 라인으로 잘못 집계되면 훅의 ✓/✗ 수와 judged가 어긋나 "미검증 잔여"라는
+   * 사실과 다른 사유가 나온다. 파서 계약(verify-file.mjs VERDICT_LINE, gate20.mjs 카운트)을
+   * 여기에 박제해 둔다 — 고지 문안을 마크로 시작하게 바꾸면 이 테스트가 먼저 깨진다.
+   */
+  it("고지 줄은 판정 라인·요약 카운트 파서에 걸리지 않는다", async () => {
+    stubOk()
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "법인세법 제26조에 따른다.",
+    })
+    const text = res.content[0].text
+    const VERDICT_LINE = /^[✓✗⚠⌛]\s/ // scripts/verify-file.mjs와 동일
+    const verdicts = text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => VERDICT_LINE.test(l))
+    expect(verdicts).toHaveLength(1) // 고지가 세어지면 2가 된다
+    expect(verdicts[0]).not.toBe(NOTICE)
+
+    const counts = text.match(/✓(\d+)\s*\/\s*✗(\d+)\s*\/\s*⚠(\d+)/) // scripts/gate20.mjs와 동일
+    expect(counts).not.toBeNull()
+    expect(counts![1]).toBe("1") // 고지 줄이 먼저 걸리면 여기서 어긋난다
+
+    // gate20.mjs의 판정 라인 필터(^[✓✗⚠]\s)도 마찬가지
+    expect(text.split("\n").filter((l) => /^[✓✗⚠]\s/.test(l))).toHaveLength(1)
+  })
+})

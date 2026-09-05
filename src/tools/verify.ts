@@ -1099,6 +1099,12 @@ export async function handleFinVerify(
       ? `전체 ${total}건 중 ${citations.length}건 검증 (상한 ${MAX_CITATIONS}건 — 나머지 ${total - citations.length}건은 텍스트를 나눠 재검증하세요)`
       : `${citations.length}건`
   let out = `[기준: ${basis_date || "현행"}] 인용 검증 — ${coverage}: ✓${counts["✓"]} / ✗${counts["✗"]} / ⚠${counts["⚠"]}\n`
+  // 검증 범위 고지 — ✓의 뜻을 헤더 두 번째 줄에 못박는다. 행 단위의 "검증범위: 조문 실존
+  // 확인"은 눈에 들어오지 않아, 항 번호와 취지가 틀린 초안도 ✓5/✗0/⚠0으로 읽혔다(실측).
+  // ✓가 0건이면 오해할 여지가 없으니 생략한다. 마크(✓✗⚠⌛)로 시작하지 않으므로
+  // 판정 라인 파서(scripts/verify-file.mjs VERDICT_LINE, scripts/gate20.mjs)에 걸리지 않는다
+  if (counts["✓"] > 0)
+    out += `※ ✓는 법령·조문 번호가 법제처에 실존한다는 뜻입니다. 항·호·내용의 옳고 그름은 검증하지 않습니다 — 내용 확인은 fin_article로 본문을 대조하세요\n`
   if (counts["✗"] > 0) out += `⚠️ ✗ 항목은 초안에서 제거·수정 전까지 사용 금지\n`
   // 미확인 약칭은 ⚠(없음 단정 아님)이지만 환각일 수도 있다 — 조용히 통과시키지 않는다
   if (results.some((r) => r.hold)) out += `⚠️ 미확인 약칭 인용 있음 — 정식 명칭으로 재검증 전까지 해당 인용 사용 보류\n`
