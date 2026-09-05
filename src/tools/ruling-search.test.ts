@@ -272,21 +272,92 @@ describe("fin_ruling_search — 축약 사다리 단계 확장", () => {
     expect(r.isError).toBe(true)
   })
 
-  it("어절이 더 많아도 도메인당 4회에서 멈춘다 (법제처 분당 30회 · 4곳 병렬)", async () => {
+  /**
+   * 5어절 이상 창 축약 (Codex 제품 검토 2026-09-05 [높음]).
+   * 종전 양끝 교대는 한 번에 한 어절씩만 깎아 6어절 질의가 "중간정산 손금 산입"에서 끝났다 —
+   * 예산 4회 안에 핵심어("퇴직금 중간정산")에 한 번도 못 닿았다.
+   */
+  it("6어절: 원문 → 양끝 제거 → 핵심 2어절 창 → 핵심 1어절 (예산 4회)", async () => {
     const { client, tried } = tracingClient(() => EMPTY_PREC_XML)
     await handleFinRulingSearch(client, {
       query: "퇴직금 중간정산 손금 산입 요건 여부",
       domains: ["precedent"],
     })
     expect(tried).toHaveLength(4)
-    // ⚠ 양끝 교대는 한 번에 한 어절씩만 깎으므로 6어절 질의는 예산 안에서 3어절까지만 내려간다.
-    //   1어절에 닿는 것은 4어절 이하 질의뿐 (상한을 올리면 분당 30회 한도에 걸린다)
     expect(tried).toEqual([
       "퇴직금 중간정산 손금 산입 요건 여부",
-      "퇴직금 중간정산 손금 산입 요건",
       "중간정산 손금 산입 요건",
-      "중간정산 손금 산입",
+      "퇴직금 중간정산",
+      "중간정산",
     ])
+  })
+
+  it("5어절: 쟁점 접미(손금·여부)를 뺀 앞쪽 2어절 창으로 내려간다", async () => {
+    const { client, tried } = tracingClient(() => EMPTY_PREC_XML)
+    await handleFinRulingSearch(client, {
+      query: "임직원 경조사비 복리후생비 손금 여부",
+      domains: ["precedent"],
+    })
+    expect(tried).toEqual([
+      "임직원 경조사비 복리후생비 손금 여부",
+      "경조사비 복리후생비 손금",
+      "임직원 경조사비",
+      "경조사비",
+    ])
+  })
+
+  it("7어절도 4회 안에 1어절까지 내려간다", async () => {
+    const { client, tried } = tracingClient(() => EMPTY_PREC_XML)
+    await handleFinRulingSearch(client, {
+      query: "임직원 퇴직금 중간정산 손금 산입 요건 여부",
+      domains: ["precedent"],
+    })
+    expect(tried).toEqual([
+      "임직원 퇴직금 중간정산 손금 산입 요건 여부",
+      "퇴직금 중간정산 손금 산입 요건",
+      "임직원 퇴직금",
+      "퇴직금",
+    ])
+  })
+
+  /**
+   * 종착점은 창의 **마지막** 어절이다. 법제처는 display=10을 가나다순으로 돌려주므로
+   * 넓은 어절("퇴직금")로 끝내면 관련 문서가 10건 창 밖으로 밀려 0건처럼 보인다.
+   */
+  it("핵심 1어절 단계에서 결과가 나오면 그 단계에서 멈춘다", async () => {
+    const { client, tried } = tracingClient((q) =>
+      q === "중간정산" ? HIT_PREC_XML : EMPTY_PREC_XML
+    )
+    const r = await handleFinRulingSearch(client, {
+      query: "퇴직금 중간정산 손금 산입 요건 여부",
+      domains: ["precedent"],
+    })
+    expect(tried).toHaveLength(4)
+    expect(r.content[0].text).toContain(`검색어 축약 3단: "중간정산"`)
+  })
+
+  it("쟁점 접미만으로 이뤄진 5어절은 접미 제거를 건너뛰고 원 어절로 창을 잡는다", async () => {
+    const { client, tried } = tracingClient(() => EMPTY_PREC_XML)
+    await handleFinRulingSearch(client, {
+      query: "손금 산입 요건 여부 해당",
+      domains: ["precedent"],
+    })
+    // core가 비면 창을 못 만든다 — 원 어절 앞쪽 2개로 되돌린다 (0건 위장 금지)
+    expect(tried).toEqual([
+      "손금 산입 요건 여부 해당",
+      "산입 요건 여부",
+      "손금 산입",
+      "산입",
+    ])
+  })
+
+  it("핵심 어절이 1개뿐이면 창과 종착점이 같아 사다리가 3단이 된다", async () => {
+    const { client, tried } = tracingClient(() => EMPTY_PREC_XML)
+    await handleFinRulingSearch(client, {
+      query: "퇴직금 손금 산입 요건 여부",
+      domains: ["precedent"],
+    })
+    expect(tried).toEqual(["퇴직금 손금 산입 요건 여부", "손금 산입 요건", "퇴직금"])
   })
 
   it("4곳 병렬에서도 도메인당 상한이 유지된다 (총 16회)", async () => {
@@ -355,5 +426,233 @@ describe("fin_ruling_search — 축약 사다리 단계 확장", () => {
     })
     expect(tried).toEqual(["임직원 경조사비 손금"])
     expect(r.content[0].text).toContain("모두 기준일 이후")
+  })
+})
+
+/**
+ * 원문 링크 (Codex 제품 검토 2026-09-05 [높음]).
+ * 내부적으로 link를 갖고 있으면서 출력에는 번호·일자·제목만 실어 실무자가 원문을 열 수 없었다.
+ */
+const NTS_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<CgmExpc><totalCnt>1</totalCnt>
+  <cgmExpc id="1"><안건명>무주택 임원 퇴직금 중간정산 가능 여부</안건명><안건번호>법인세과-352</안건번호><해석일자>20130716</해석일자><법령해석상세링크>https://taxlaw.nts.go.kr/qt/USEQTA002P.do?ntstDcmId=010000000000515153</법령해석상세링크></cgmExpc>
+</CgmExpc>`
+
+/** ntstDcmId가 없는 목록 링크 — 상세 URL을 조립할 수 없는 경우 */
+const NTS_NO_ID_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<CgmExpc><totalCnt>1</totalCnt>
+  <cgmExpc id="1"><안건명>예규 제목</안건명><안건번호>법인세과-999</안건번호><해석일자>20200101</해석일자><법령해석상세링크>https://taxlaw.nts.go.kr/qt/USEQTA001M.do</법령해석상세링크></cgmExpc>
+</CgmExpc>`
+
+/**
+ * 법제처 DRF 상세링크 — 상대경로 + **인증키(OC) 동반**(2026-09-05 실측) + XML이라 &가 &amp;로 온다.
+ * 이 링크는 출력에 싣지 않고 ID만 뽑아 공개 열람 URL로 바꾼다.
+ */
+const PREC_DRF_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<PrecSearch><totalCnt>1</totalCnt>
+  <prec><판례일련번호>228547</판례일련번호><사건번호>2019두12345</사건번호><사건명>퇴직금 중간정산</사건명><선고일자>20190301</선고일자><법원명>대법원</법원명><판례상세링크>/DRF/lawService.do?OC=mysecretkey&amp;target=prec&amp;ID=228547&amp;type=HTML</판례상세링크></prec>
+</PrecSearch>`
+
+/** 실측 형태 그대로 — OC=OC_SENTINEL_TEST 이 링크에 실려 온다 */
+const PREC_OC_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<PrecSearch><totalCnt>1</totalCnt>
+  <prec><판례일련번호>613989</판례일련번호><사건번호>2019두99</사건번호><사건명>키 노출 회귀</사건명><선고일자>20190301</선고일자><법원명>대법원</법원명><판례상세링크>/DRF/lawService.do?OC=OC_SENTINEL_TEST&amp;target=prec&amp;ID=613989&amp;type=HTML</판례상세링크></prec>
+</PrecSearch>`
+
+const EXPC_DRF_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<Expc><totalCnt>1</totalCnt>
+  <expc><법령해석례일련번호>343221</법령해석례일련번호><안건명>경조사비 해석례</안건명><안건번호>24-0001</안건번호><회신일자>20240101</회신일자><법령해석례상세링크>/DRF/lawService.do?OC=OC_SENTINEL_TEST&amp;target=expc&amp;ID=343221&amp;type=HTML</법령해석례상세링크></expc>
+</Expc>`
+
+const DECC_DRF_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<Decc><totalCnt>1</totalCnt>
+  <decc><특별행정심판재결례일련번호>213580</특별행정심판재결례일련번호><사건명>재결례 제목</사건명><청구번호>조심2024서1</청구번호><의결일자>20240101</의결일자><행정심판재결례상세링크>/DRF/lawService.do?OC=OC_SENTINEL_TEST&amp;target=ttSpecialDecc&amp;ID=213580&amp;type=HTML</행정심판재결례상세링크></decc>
+</Decc>`
+
+/** 상세링크가 비어 온 경우 — ID를 못 뽑으므로 사유를 적어야 한다 */
+const PREC_NO_LINK_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<PrecSearch><totalCnt>1</totalCnt>
+  <prec><판례일련번호>1</판례일련번호><사건번호>2019두1</사건번호><사건명>링크없음</사건명><선고일자>20190301</선고일자><법원명>대법원</법원명><판례상세링크></판례상세링크></prec>
+</PrecSearch>`
+
+function xmlClient(xml: string): LawApiClient {
+  return { fetchApi: async () => xml } as unknown as LawApiClient
+}
+
+describe("fin_ruling_search — 원문 링크", () => {
+  it("국세청 예규는 ntstDcmId로 상세 URL을 조립한다 (fin_nts_ruling 본문 경로와 같은 형식)", async () => {
+    const r = await handleFinRulingSearch(xmlClient(NTS_XML), {
+      query: "퇴직금",
+      domains: ["nts"],
+    })
+    expect(r.content[0].text).toContain(
+      "법인세과-352 (20130716) 무주택 임원 퇴직금 중간정산 가능 여부 · https://taxlaw.nts.go.kr/qt/USEQTA002P.do?ntstDcmId=010000000000515153"
+    )
+  })
+
+  it("ntstDcmId를 못 뽑으면 원 링크를 그대로 싣는다 (링크 자체를 버리지 않는다)", async () => {
+    const r = await handleFinRulingSearch(xmlClient(NTS_NO_ID_XML), {
+      query: "퇴직금",
+      domains: ["nts"],
+    })
+    expect(r.content[0].text).toContain("· https://taxlaw.nts.go.kr/qt/USEQTA001M.do")
+  })
+
+  it("법제처 판례는 상세링크의 ID로 공개 열람 URL(precInfoP)을 조립한다", async () => {
+    const r = await handleFinRulingSearch(xmlClient(PREC_DRF_XML), {
+      query: "퇴직금",
+      domains: ["precedent"],
+    })
+    const text = r.content[0].text
+    expect(text).toContain("· https://www.law.go.kr/LSW/precInfoP.do?precSeq=228547")
+    // DRF 링크는 어떤 형태로도 나가지 않는다 (마스킹해 실으면 열리지 않는 링크가 남는다)
+    expect(text).not.toContain("lawService.do")
+    expect(text).not.toContain("&amp;")
+  })
+
+  it("해석례는 expcInfoP, 조세심판원 재결례는 specialDeccInfoP로 조립한다", async () => {
+    const expc = await handleFinRulingSearch(xmlClient(EXPC_DRF_XML), {
+      query: "퇴직금",
+      domains: ["interpretation"],
+    })
+    expect(expc.content[0].text).toContain(
+      "· https://www.law.go.kr/LSW/expcInfoP.do?expcSeq=343221"
+    )
+    const decc = await handleFinRulingSearch(xmlClient(DECC_DRF_XML), {
+      query: "퇴직금",
+      domains: ["tax_tribunal"],
+    })
+    expect(decc.content[0].text).toContain(
+      "· https://www.law.go.kr/LSW/specialDeccInfoP.do?deccSeq=213580"
+    )
+  })
+
+  /**
+   * 인증키 유출 회귀 — 법제처 상세링크는 `?OC=<키>&target=…&ID=…` 형태로 키가 실려 온다
+   * (2026-09-05 실측). 어떤 경로로도 출력에 `OC=`가 남으면 안 된다.
+   */
+  it("상세링크에 실려 온 인증키(OC)는 출력에 한 글자도 나가지 않는다", async () => {
+    const r = await handleFinRulingSearch(xmlClient(PREC_OC_XML), {
+      query: "퇴직금",
+      domains: ["precedent"],
+    })
+    const text = r.content[0].text
+    expect(text).not.toContain("OC_SENTINEL_TEST")
+    expect(text).not.toContain("OC=")
+    // 키를 지우느라 링크를 잃지는 않는다
+    expect(text).toContain("https://www.law.go.kr/LSW/precInfoP.do?precSeq=613989")
+  })
+
+  it("ID를 못 뽑으면 링크 대신 사유를 적는다 (조용히 비우지 않는다)", async () => {
+    const r = await handleFinRulingSearch(xmlClient(PREC_NO_LINK_XML), {
+      query: "퇴직금",
+      domains: ["precedent"],
+    })
+    const line = r.content[0].text
+      .split("\n")
+      .find((l) => l.includes("링크없음"))
+    expect(line).toBe("  · 2019두1 (20190301) 링크없음 [대법원] · 링크 없음(ID 미확인)")
+  })
+})
+
+/**
+ * 예산 4,000자 — 링크가 붙어 길어진 만큼 뒤에서 통짜로 잘리면 마지막 도메인이 통째로 사라진다
+ * (조용한 절단). 예산을 넘으면 표시 건수를 줄이되 줄인 사실을 건수로 고지한다.
+ */
+/** 4개 도메인 전부가 count건씩 돌려주는 스텁 — 링크는 실제 DRF 상세링크 길이에 맞춘다 */
+function fullClient(count: number, titleLen: number): LawApiClient {
+  const title = (n: number) => `${"가".repeat(titleLen)}${n}`
+  const drf = (target: string, n: number) =>
+    `/DRF/lawService.do?OC=k&amp;target=${target}&amp;ID=99999${n}&amp;type=HTML`
+  const rows = (make: (n: number) => string) =>
+    Array.from({ length: count }, (_, i) => make(i + 1)).join("")
+  const byTarget: Record<string, string> = {
+    ntsCgmExpc: `<CgmExpc><totalCnt>${count}</totalCnt>${rows(
+      (n) =>
+        `<cgmExpc id="${n}"><안건명>${title(n)}</안건명><안건번호>법인세과-${n}</안건번호><해석일자>2024010${n}</해석일자><법령해석상세링크>https://taxlaw.nts.go.kr/qt/USEQTA002P.do?ntstDcmId=01000000000051515${n}</법령해석상세링크></cgmExpc>`
+    )}</CgmExpc>`,
+    ttSpecialDecc: `<Decc><totalCnt>${count}</totalCnt>${rows(
+      (n) =>
+        `<decc><특별행정심판재결례일련번호>${n}</특별행정심판재결례일련번호><사건명>${title(n)}</사건명><청구번호>조심2024서${n}</청구번호><의결일자>2024010${n}</의결일자><행정심판재결례상세링크>${drf("ttSpecialDecc", n)}</행정심판재결례상세링크></decc>`
+    )}</Decc>`,
+    expc: `<Expc><totalCnt>${count}</totalCnt>${rows(
+      (n) =>
+        `<expc><법령해석례일련번호>${n}</법령해석례일련번호><안건명>${title(n)}</안건명><안건번호>24-0${n}</안건번호><회신일자>2024010${n}</회신일자><법령해석례상세링크>${drf("expc", n)}</법령해석례상세링크></expc>`
+    )}</Expc>`,
+    prec: `<PrecSearch><totalCnt>${count}</totalCnt>${rows(
+      (n) =>
+        `<prec><판례일련번호>${n}</판례일련번호><사건번호>2024두${n}</사건번호><사건명>${title(n)}</사건명><선고일자>2024010${n}</선고일자><법원명>대법원</법원명><판례상세링크>${drf("prec", n)}</판례상세링크></prec>`
+    )}</PrecSearch>`,
+  }
+  return {
+    fetchApi: async (p: { target?: string }) => byTarget[p.target ?? ""] ?? "",
+  } as unknown as LawApiClient
+}
+
+describe("fin_ruling_search — 링크 포함 예산 계산", () => {
+  it("4곳 × 5건 + 링크가 예산 안에 들어가고 모든 항목에 링크가 붙는다", async () => {
+    const r = await handleFinRulingSearch(fullClient(5, 25), { query: "퇴직금 중간정산" })
+    const text = r.content[0].text
+    expect(text.length).toBeLessThanOrEqual(4000)
+    expect(text).not.toContain("예산 4,000자 초과로 절단")
+    const itemLines = text.split("\n").filter((l) => l.startsWith("  · "))
+    expect(itemLines).toHaveLength(20)
+    expect(itemLines.every((l) => l.includes("https://"))).toBe(true)
+    // 도메인별 링크 형식이 각각 붙는다
+    expect(text).toContain("https://taxlaw.nts.go.kr/qt/USEQTA002P.do?ntstDcmId=")
+    expect(text).toContain("https://www.law.go.kr/LSW/precInfoP.do?precSeq=")
+    expect(text).toContain("https://www.law.go.kr/LSW/expcInfoP.do?expcSeq=")
+    expect(text).toContain("https://www.law.go.kr/LSW/specialDeccInfoP.do?deccSeq=")
+    expect(text).not.toContain("OC=")
+  })
+
+  it("항목이 길어 예산을 넘으면 절단하지 않고 표시 건수를 줄이며 건수를 고지한다", async () => {
+    const r = await handleFinRulingSearch(fullClient(5, 90), { query: "퇴직금 중간정산" })
+    const text = r.content[0].text
+    expect(text.length).toBeLessThanOrEqual(4000)
+    expect(text).not.toContain("예산 4,000자 초과로 절단")
+    const itemLines = text.split("\n").filter((l) => l.startsWith("  · "))
+    expect(itemLines.length).toBeLessThan(20)
+    expect(itemLines.length).toBeGreaterThan(0)
+    // 줄인 사실을 조용히 넘기지 않는다 — 4곳 모두 건수를 고지한다
+    expect(text.match(/검색 5건 중 최신 \d건 표시/g)).toHaveLength(4)
+    // 남은 항목에는 링크가 그대로 붙어 있다
+    expect(itemLines.every((l) => l.includes("https://"))).toBe(true)
+  })
+})
+
+describe("fin_ruling_search — 전체 실패 헤더", () => {
+  it("성공한 도메인이 하나도 없으면 '전체 실패'로 쓴다 (부분 성공 아님)", async () => {
+    const client = {
+      fetchApi: async () => {
+        throw new Error("503 서비스 점검")
+      },
+    } as unknown as LawApiClient
+    const r = await handleFinRulingSearch(client, { query: "퇴직금" })
+    const text = r.content[0].text
+    expect(text).toContain("전체 실패")
+    expect(text).not.toContain("부분 성공")
+    expect(r.isError).toBe(true)
+  })
+
+  it("일부만 실패하면 종전대로 '부분 성공'", async () => {
+    const client = {
+      fetchApi: async (p: { target?: string }) => {
+        if (p.target === "prec") throw new Error("503 서비스 점검")
+        return "<Decc><totalCnt>0</totalCnt></Decc>"
+      },
+    } as unknown as LawApiClient
+    const r = await handleFinRulingSearch(client, { query: "퇴직금" })
+    const text = r.content[0].text
+    expect(text).toContain("부분 성공")
+    expect(text).not.toContain("전체 실패")
+    expect(r.isError).toBeUndefined()
+  })
+
+  it("전부 성공하면 '전체 성공'", async () => {
+    const r = await handleFinRulingSearch(xmlClient("<Decc><totalCnt>0</totalCnt></Decc>"), {
+      query: "퇴직금",
+    })
+    expect(r.content[0].text).toContain("전체 성공")
   })
 })

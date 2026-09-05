@@ -25,6 +25,8 @@ import {
   RULING_STOPWORDS,
   SOURCE_FOOTER,
 } from "../lib/fin-common.js"
+import { maskSensitiveUrl } from "../lib/fetch-with-retry.js"
+import { getLawSiteBaseUrl } from "../lib/law-url-config.js"
 
 const DOMAINS = ["nts", "tax_tribunal", "interpretation", "precedent"] as const
 type Domain = (typeof DOMAINS)[number]
@@ -104,39 +106,140 @@ function normDate(raw: string): string {
  */
 const LADDER_MAX_CALLS = 4
 
+/** 도메인당 표시 상한 (초과분은 조용히 버리지 않고 건수를 고지한다) */
+const MAX_ITEMS_PER_DOMAIN = 5
+
+/** 응답 문자 예산 — 항목 줄에 링크가 붙으므로 표시 건수를 이 예산에 맞춰 줄인다 */
+const TEXT_BUDGET = 4000
+
 /**
- * ruling-search 전용 축약 사다리 — 양끝을 번갈아 깎아 1어절까지 내려간다.
+ * 실무 질의의 쟁점 접미 — 5어절 이상 질의에서 핵심어 창을 고를 때만 제외하는 어절.
  *
- * 원문 → 꼬리 1어절 제거 → 머리 1어절 제거 → 꼬리 제거 → 머리 제거 …
+ * 실무자 자연어는 [주체][주제어][쟁점 접미] 순으로 쌓인다. "퇴직금 중간정산 손금 산입 요건 여부"의
+ * 뒤 4어절은 쟁점을 묻는 말이지 검색 키가 아니다 — 법제처·국세청 제목 색인에는 이 어절들이 흔해
+ * 어느 예규에나 걸리므로 변별력이 사실상 없다.
+ *
+ * ⚠ 원문 검색어(사다리 1순위)와 4어절 이하 사다리에서는 절대 제외하지 않는다.
+ *   "퇴직급여 충당금 손금"처럼 짧은 질의에서는 "손금"이 유일한 쟁점 키다.
+ *   붙임 표기("손금불산입")는 어절 단위 비교라 이 목록에 걸리지 않는다.
+ * ⚠ 공용 fin-common에 두지 않는다 — article·law-search의 사다리는 법령·행정규칙 **명칭**을
+ *   다루므로 이 목록이 해가 된다 (「…에 관한 처리 기준」 같은 공식 명칭이 깎인다).
+ */
+const RULING_GENERIC_TAIL = new Set([
+  "손금",
+  "산입",
+  "요건",
+  "여부",
+  "해당",
+  "가능",
+  "처리",
+  "방법",
+  "기준",
+])
+
+/**
+ * ruling-search 전용 축약 사다리 — 어절 수에 따라 두 가지 방식을 쓴다.
+ *
+ * **4어절 이하: 양끝 교대 축약** (종전 그대로)
+ *   원문 → 꼬리 1어절 제거 → 머리 1어절 제거 → 꼬리 제거 …
  *   "임직원 경조사비 복리후생비 손금" → "임직원 경조사비 복리후생비" → "경조사비 복리후생비" → "경조사비"
  *
- * 공용 ladderQueries는 앞토막만 잘라(3→2→1어절) 마지막에 첫 어절만 남긴다. 실무자 자연어는
- * [주체][주제어][쟁점 동사성 명사] 순이라 정보가 가운데 몰려 있어, 앞토막 축약은 주제어를
- * 먼저 버린다("임직원 경조사비 복리후생비 손금"의 종착점이 "경조사비"가 아니라 "임직원").
- * 꼬리를 먼저 깎는 이유는 "손금·여부·해당" 류 쟁점어가 꼬리에 오기 때문.
+ * **5어절 이상: 창 축약** (2026-09-05 Codex 제품 검토 — 한 어절씩 깎으면 예산 4회 안에 핵심어에 못 닿는다)
+ *   원문 → 양끝 1어절씩 제거(n−2어절) → 핵심 2어절 창 → 핵심 1어절
+ *   "퇴직금 중간정산 손금 산입 요건 여부"
+ *     → "중간정산 손금 산입 요건" → "퇴직금 중간정산" → "중간정산"
+ *   핵심 창은 RULING_GENERIC_TAIL을 뺀 어절의 앞쪽 2개, 종착점은 그 창의 **마지막** 어절이다.
+ *   창의 첫 어절이 아니라 마지막을 남기는 이유:
+ *   ① 법제처 검색은 display=10을 가나다순으로 돌려주므로, 넓은 어절("퇴직금")은 관련 문서가
+ *      10건 창 밖으로 밀려 오히려 0건처럼 보인다 — 마지막 단계일수록 변별력이 높아야 한다.
+ *   ② 4어절 이하 교대 축약의 종착점("임직원 경조사비 복리후생비 손금" → "경조사비")과 같은 답이
+ *      나온다. 두 경로의 종착점이 어긋나지 않는다.
  *
+ * 공용 ladderQueries는 앞토막만 잘라(3→2→1어절) 마지막에 첫 어절만 남긴다. 실무자 자연어는
+ * 정보가 가운데 몰려 있어 앞토막 축약은 주제어를 먼저 버린다.
  * 공용 함수를 고치면 article·law-search·nts-ruling까지 함께 바뀌므로 순서 생성만 국소화하고,
  * 전처리(불용어 제거)는 공용 목록 RULING_STOPWORDS를 그대로 참조한다 (목록 복제 금지).
- * ⚠ 예산 4회 안에서 1어절에 닿는 것은 4어절 이하 질의뿐이다. 5어절 이상은 상한에 먼저 걸린다.
  */
 function buildLadder(query: string): string[] {
   const normalized = query.replace(/\s+/g, " ").trim()
   const toks = query.split(/\s+/).filter((t) => t && !RULING_STOPWORDS.has(t))
+  const n = toks.length
   // 원문을 반드시 1순위로 — 불용어("및"·"관한")가 공식 명칭의 일부인 경우가 있다
   const qs: string[] = [normalized]
-  let lo = 0
-  let hi = toks.length
-  let dropTail = true
-  while (hi - lo > 1) {
-    if (dropTail) hi--
-    else lo++
-    dropTail = !dropTail
-    qs.push(toks.slice(lo, hi).join(" "))
+  if (n >= 5) {
+    // ① 양끝 1어절씩 제거 — 주체와 마지막 쟁점어를 한 번에 턴다
+    qs.push(toks.slice(1, n - 1).join(" "))
+    // ② 쟁점 접미를 뺀 핵심 어절의 앞쪽 2개 창. 접미를 다 빼면 남는 게 없는 질의
+    //    ("손금 산입 요건 여부 해당")도 있으므로 그때만 원 어절로 되돌린다
+    const core = toks.filter((t) => !RULING_GENERIC_TAIL.has(t))
+    const coreWindow = (core.length > 0 ? core : toks).slice(0, 2)
+    qs.push(coreWindow.join(" "))
+    // ③ 창의 마지막 1어절 (창이 1어절이면 ②와 같아져 중복 제거로 사다리가 3단이 된다)
+    qs.push(coreWindow[coreWindow.length - 1])
+  } else {
+    let lo = 0
+    let hi = n
+    let dropTail = true
+    while (hi - lo > 1) {
+      if (dropTail) hi--
+      else lo++
+      dropTail = !dropTail
+      qs.push(toks.slice(lo, hi).join(" "))
+    }
+    // 2어절 질의는 축약 후보가 양끝 두 어절뿐이고 예산(4회)이 남는다 — 나머지 한쪽도 시도한다.
+    // 3·4어절은 교대 축약만으로 주제어에 닿으므로 추가하지 않는다 (호출 예산 보존)
+    if (n === 2) qs.push(toks[1])
   }
-  // 2어절 질의는 축약 후보가 양끝 두 어절뿐이고 예산(4회)이 남는다 — 나머지 한쪽도 시도한다.
-  // 3어절 이상은 교대 축약만으로 주제어에 닿으므로 추가하지 않는다 (호출 예산 보존)
-  if (toks.length === 2) qs.push(toks[1])
   return [...new Set(qs.filter(Boolean))].slice(0, LADDER_MAX_CALLS)
+}
+
+/** 국세청 예규 상세 화면 — nts-body.ts가 본문을 받아오는 URL과 같은 형식 */
+const NTS_DETAIL_URL_PREFIX = "https://taxlaw.nts.go.kr/qt/USEQTA002P.do?ntstDcmId="
+
+/**
+ * 법제처 공개 열람 URL — 상세링크의 `ID=` 값으로 조립한다 (2026-09-05 curl 실측, 3종 모두 200).
+ * - precInfoP: 판례 본문이 그대로 실려 온다 (precSeq=613989 → 34KB)
+ * - expcInfoP: 해석례 제목까지 확인 (expcSeq=343221)
+ * - specialDeccInfoP: 제목("특별행정심판재결례")만 확인 — 추정: 본문 JS 로딩이라 셸만 받아진다
+ */
+const LAW_VIEWER_QUERY: Record<Exclude<Domain, "nts">, string> = {
+  precedent: "precInfoP.do?precSeq=",
+  interpretation: "expcInfoP.do?expcSeq=",
+  tax_tribunal: "specialDeccInfoP.do?deccSeq=",
+}
+
+/**
+ * 결과 항목에 실을 원문 링크. 조립할 수 없으면 빈 문자열 — 호출부가 "링크 없음(ID 미확인)"으로 적는다.
+ *
+ * - 국세청 예규: 상세링크가 이미 taxlaw 절대 URL이다. ntstDcmId가 있으면 fin_nts_ruling이 본문을
+ *   받아오는 주소와 같은 형식으로 정규화하고, 없으면 받은 절대 URL을 그대로 쓴다.
+ * - 법제처 3종(재결례·해석례·판례): 상세링크는 `/DRF/lawService.do?OC=<키>&target=…&ID=…` 형태로
+ *   **인증키가 실려 온다** (2026-09-05 실측 확인). 이 링크는 어떤 형태로도 출력에 싣지 않는다 —
+ *   마스킹해서 실으면 키는 막히지만 열리지 않는 링크가 남는다. `ID=` 값만 뽑아 공개 열람 URL로 바꾼다.
+ *
+ * ⚠ 마지막 방어로 maskSensitiveUrl을 한 번 더 통과시킨다. 조립 경로가 바뀌어도 인증키가 출력에
+ *   섞이는 일만은 없어야 한다 (회귀 테스트: 출력에 `OC=` 부재).
+ */
+function detailUrl(item: UnifiedItem): string {
+  if (item.domain === "nts") {
+    if (item.docId) return `${NTS_DETAIL_URL_PREFIX}${item.docId}`
+    return item.link.startsWith("http") ? maskSensitiveUrl(unescapeXmlAmp(item.link)) : ""
+  }
+  if (!item.link) return ""
+  // &amp;를 먼저 되돌려야 `&ID=`가 파라미터 경계로 잡힌다
+  const id = (unescapeXmlAmp(item.link).match(/[?&]ID=(\d+)/i) || [])[1]
+  if (!id) return ""
+  return maskSensitiveUrl(`${getLawSiteBaseUrl()}/LSW/${LAW_VIEWER_QUERY[item.domain]}${id}`)
+}
+
+/**
+ * XML 본문의 `&amp;`를 `&`로 되돌린다.
+ * 상세링크는 쿼리 파라미터가 여러 개라 XML 규격상 `&`가 `&amp;`로 실려 온다. 되돌리지 않으면
+ * `ID=` 앞이 `;`가 되어 파라미터 경계로 잡히지 않고, 절대 URL을 그대로 쓰는 경로에서는
+ * `amp;target`이라는 없는 파라미터가 생긴다. 이미 `&`로 온 응답에는 아무 영향이 없다.
+ */
+function unescapeXmlAmp(url: string): string {
+  return url.replace(/&amp;/g, "&")
 }
 
 /**
@@ -240,16 +343,16 @@ async function searchDomain(
             return keep
           })
         }
-        // 표시 상한(5건)을 넘긴 분량은 조용히 버리지 않고 건수를 넘긴다
+        // 표시 상한을 넘긴 분량은 조용히 버리지 않고 건수를 넘긴다
         return {
           status: "성공",
           text: "",
-          items: filtered.slice(0, 5),
+          items: filtered.slice(0, MAX_ITEMS_PER_DOMAIN),
           usedQuery: q,
           ladder: queries,
           ladderStep: step,
           excludedByBasis,
-          truncated: Math.max(filtered.length - 5, 0),
+          truncated: Math.max(filtered.length - MAX_ITEMS_PER_DOMAIN, 0),
         }
       }
     }
@@ -289,77 +392,111 @@ export async function handleFinRulingSearch(
   const okDomains = results.filter(({ r }) => r.status === "성공")
   const totalHits = okDomains.reduce((n, { r }) => n + (r.items?.length || 0), 0)
 
+  // 전 도메인 실패는 "부분 성공"이 아니다 — 성공한 도메인이 하나도 없는데 부분 성공으로 쓰면
+  // 호출측이 나머지 도메인은 조회됐고 결과만 없었다고 읽는다 (Codex 제품 검토 2026-09-05)
+  const failedList = failedDomains
+    .map(({ domain, r }) => `${DOMAIN_LABEL[domain]}(${r.reason})`)
+    .join(", ")
   const overall =
     failedDomains.length === 0
       ? "전체 성공"
-      : `부분 성공 — 실패: ${failedDomains.map(({ domain, r }) => `${DOMAIN_LABEL[domain]}(${r.reason})`).join(", ")}`
+      : okDomains.length === 0
+        ? `전체 실패 — 실패: ${failedList}`
+        : `부분 성공 — 실패: ${failedList}`
 
-  let text = basis_date
-    ? `[기준일: ${basis_date}까지] 통합 해석·결정례 검색 — "${query}" · ${overall}\n※ 회신·의결·선고일이 기준일 이후인 자료는 제외했습니다 (일자 미상은 남김)\n`
-    : `[기준: 현행] 통합 해석·결정례 검색 — "${query}" · ${overall}\n`
+  /**
+   * 도메인당 표시 건수(cap)를 받아 본문을 조립한다.
+   *
+   * 항목 줄마다 원문 링크가 붙어 4곳 × 5건이면 예산 4,000자에 근접한다. 뒤에서 통짜로 잘리면
+   * 마지막 도메인이 통째로 사라지므로(조용한 절단), 예산을 넘을 때는 cap을 낮춰 **건수 고지와 함께**
+   * 줄인다 — 아래 호출부에서 cap을 5→1로 내리며 예산 안에 드는 첫 결과를 쓴다.
+   */
+  const buildText = (cap: number): string => {
+    let text = basis_date
+      ? `[기준일: ${basis_date}까지] 통합 해석·결정례 검색 — "${query}" · ${overall}\n※ 회신·의결·선고일이 기준일 이후인 자료는 제외했습니다 (일자 미상은 남김)\n`
+      : `[기준: 현행] 통합 해석·결정례 검색 — "${query}" · ${overall}\n`
 
-  for (const { domain, r } of okDomains) {
-    const label = DOMAIN_LABEL[domain]
-    const items = r.items || []
-    // 몇 단 축약했는지 밝힌다 — 2단 이상이면 원 질문과 검색어가 크게 달라져 결과 해석이 바뀐다
-    const step = r.ladderStep ?? 0
-    const ladderNote =
-      r.usedQuery && r.usedQuery !== query
-        ? step >= 2
-          ? ` (검색어 축약 ${step}단: "${r.usedQuery}")`
-          : ` (검색어 축약: "${r.usedQuery}")`
-        : ""
-    const basisNote = r.excludedByBasis ? ` · 기준일 이후 ${r.excludedByBasis}건 제외` : ""
-    if (items.length === 0) {
-      // 기준일 때문에 비었으면 "자료 없음"과 구분해 표기한다 (조용한 실패 금지)
-      if (r.excludedByBasis) {
-        text += `\n■ ${label} — 0건${ladderNote} (검색된 ${r.excludedByBasis}건이 모두 기준일 이후 — 기준일 이전 자료는 검색 상위에 없을 수 있음)\n`
+    for (const { domain, r } of okDomains) {
+      const label = DOMAIN_LABEL[domain]
+      const items = r.items || []
+      // 몇 단 축약했는지 밝힌다 — 2단 이상이면 원 질문과 검색어가 크게 달라져 결과 해석이 바뀐다
+      const step = r.ladderStep ?? 0
+      const ladderNote =
+        r.usedQuery && r.usedQuery !== query
+          ? step >= 2
+            ? ` (검색어 축약 ${step}단: "${r.usedQuery}")`
+            : ` (검색어 축약: "${r.usedQuery}")`
+          : ""
+      const basisNote = r.excludedByBasis ? ` · 기준일 이후 ${r.excludedByBasis}건 제외` : ""
+      if (items.length === 0) {
+        // 기준일 때문에 비었으면 "자료 없음"과 구분해 표기한다 (조용한 실패 금지)
+        if (r.excludedByBasis) {
+          text += `\n■ ${label} — 0건${ladderNote} (검색된 ${r.excludedByBasis}건이 모두 기준일 이후 — 기준일 이전 자료는 검색 상위에 없을 수 있음)\n`
+          continue
+        }
+        // 축약 사다리를 끝까지 내려가고도 0건임을 도메인마다 표시한다.
+        // 사다리 검색어 자체는 도메인 전체가 동일하므로 아래에서 한 번만 나열한다 (중복 제거)
+        const ladder = r.ladder || []
+        const zeroNote =
+          ladder.length > 1
+            ? ` (축약 ${ladder.length}단계 전부 0건 — 정상 조회 결과 없음)`
+            : ` (정상 조회 결과 없음)`
+        text += `\n■ ${label} — 0건${zeroNote}\n`
         continue
       }
-      // 축약 사다리를 끝까지 내려가고도 0건임을 도메인마다 표시한다.
-      // 사다리 검색어 자체는 도메인 전체가 동일하므로 아래에서 한 번만 나열한다 (중복 제거)
-      const ladder = r.ladder || []
-      const zeroNote =
-        ladder.length > 1
-          ? ` (축약 ${ladder.length}단계 전부 0건 — 정상 조회 결과 없음)`
-          : ` (정상 조회 결과 없음)`
-      text += `\n■ ${label} — 0건${zeroNote}\n`
-      continue
+      // 예산 때문에 줄인 분량도 API가 더 준 분량과 똑같이 건수로 고지한다
+      const shown = items.slice(0, cap)
+      const hidden = items.length - shown.length + (r.truncated ?? 0)
+      const truncNote = hidden ? ` · 검색 ${shown.length + hidden}건 중 최신 ${shown.length}건 표시` : ""
+      text += `\n■ ${label} [${DOMAIN_AUTHORITY[domain]}] — 최신순 ${shown.length}건${truncNote}${ladderNote}${basisNote}\n`
+      text +=
+        shown
+          .map((i) => {
+            // 원문 링크를 항목마다 붙인다 — 없으면 실무자가 내용을 확인할 경로가 없다.
+            // 조립 못 한 경우도 조용히 비우지 않고 사유를 적는다 (링크가 원래 없는 자료로 오독 방지)
+            const url = detailUrl(i)
+            const linkNote = url ? ` · ${url}` : " · 링크 없음(ID 미확인)"
+            return `  · ${i.docNo || "(번호없음)"} (${i.dateDisplay}) ${i.title}${linkNote}`
+          })
+          .join("\n") + "\n"
     }
-    const truncNote = r.truncated ? ` · 검색 ${items.length + r.truncated}건 중 최신 ${items.length}건 표시` : ""
-    text += `\n■ ${label} [${DOMAIN_AUTHORITY[domain]}] — 최신순 ${items.length}건${truncNote}${ladderNote}${basisNote}\n`
-    text += items.map((i) => `  · ${i.docNo || "(번호없음)"} (${i.dateDisplay}) ${i.title}`).join("\n") + "\n"
-  }
-  for (const { domain, r } of failedDomains) {
-    text += `\n■ ${DOMAIN_LABEL[domain]} — ⚠ 조회 실패: ${r.reason} ("없음"이 아니라 확인 불가)\n`
+    for (const { domain, r } of failedDomains) {
+      text += `\n■ ${DOMAIN_LABEL[domain]} — ⚠ 조회 실패: ${r.reason} ("없음"이 아니라 확인 불가)\n`
+    }
+
+    // 축약 사다리를 끝까지 내려가고도 0건인 도메인이 있으면 실제로 시도한 검색어를 한 줄로 밝힌다.
+    // 사다리는 질의어만으로 정해지므로 도메인마다 같다 — 도메인 줄마다 반복하지 않고 여기서 한 번만.
+    // 이걸 안 밝히면 실무자가 "그런 해석이 없다"로 단정한다 (실제로는 검색어를 바꿔야 하는 상황)
+    const exhausted = okDomains.find(
+      ({ r }) => (r.items?.length ?? 0) === 0 && !r.excludedByBasis && (r.ladder?.length ?? 0) > 1
+    )
+    if (exhausted) {
+      const ladder = exhausted.r.ladder || []
+      // 다른 도메인은 결과가 있을 수 있으므로 "0건인 도메인은"으로 한정한다
+      text += `\n※ 0건인 도메인은 축약 사다리 ${ladder.map((q) => `"${q}"`).join(" → ")} ${ladder.length}단계를 모두 시도한 결과입니다 — 자료가 없다는 뜻이 아니라 검색어를 바꿔야 한다는 뜻입니다 (다른 실무 용어로 재검색)`
+    }
+
+    if (totalHits > 0) {
+      text += `\n※ 예규 본문: fin_nts_ruling · 조문 근거: fin_article`
+    }
+    // 커버 범위를 매번 밝힌다 — 이 4곳이 "전부"가 아님을 모르면 0건을 "그런 해석 없음"으로
+    // 단정하게 된다 (법제처 해석·결정례 도메인은 18곳, 여기선 재무 실무 1순위 4곳만 검색)
+    const covered = domains.map((d) => DOMAIN_LABEL[d]).join(" · ")
+    text += `\n※ 검색 범위: ${covered} (${domains.length}곳). 법제처 해석·결정례 도메인 전체(18곳) 중 재무 실무 1순위만 검색하므로, 0건이 "해석 없음"을 뜻하지 않습니다`
+    text += `\n${AUTHORITY_FOOTER}`
+    text += `\n\n${SOURCE_FOOTER}`
+    return text
   }
 
-  // 축약 사다리를 끝까지 내려가고도 0건인 도메인이 있으면 실제로 시도한 검색어를 한 줄로 밝힌다.
-  // 사다리는 질의어만으로 정해지므로 도메인마다 같다 — 도메인 줄마다 반복하지 않고 여기서 한 번만.
-  // 이걸 안 밝히면 실무자가 "그런 해석이 없다"로 단정한다 (실제로는 검색어를 바꿔야 하는 상황)
-  const exhausted = okDomains.find(
-    ({ r }) => (r.items?.length ?? 0) === 0 && !r.excludedByBasis && (r.ladder?.length ?? 0) > 1
-  )
-  if (exhausted) {
-    const ladder = exhausted.r.ladder || []
-    // 다른 도메인은 결과가 있을 수 있으므로 "0건인 도메인은"으로 한정한다
-    text += `\n※ 0건인 도메인은 축약 사다리 ${ladder.map((q) => `"${q}"`).join(" → ")} ${ladder.length}단계를 모두 시도한 결과입니다 — 자료가 없다는 뜻이 아니라 검색어를 바꿔야 한다는 뜻입니다 (다른 실무 용어로 재검색)`
+  let text = buildText(MAX_ITEMS_PER_DOMAIN)
+  for (let cap = MAX_ITEMS_PER_DOMAIN - 1; cap >= 1 && text.length > TEXT_BUDGET; cap--) {
+    text = buildText(cap)
   }
-
-  if (totalHits > 0) {
-    text += `\n※ 예규 본문: fin_nts_ruling · 조문 근거: fin_article`
-  }
-  // 커버 범위를 매번 밝힌다 — 이 4곳이 "전부"가 아님을 모르면 0건을 "그런 해석 없음"으로
-  // 단정하게 된다 (법제처 해석·결정례 도메인은 18곳, 여기선 재무 실무 1순위 4곳만 검색)
-  const covered = domains.map((d) => DOMAIN_LABEL[d]).join(" · ")
-  text += `\n※ 검색 범위: ${covered} (${domains.length}곳). 법제처 해석·결정례 도메인 전체(18곳) 중 재무 실무 1순위만 검색하므로, 0건이 "해석 없음"을 뜻하지 않습니다`
-  text += `\n${AUTHORITY_FOOTER}`
-  text += `\n\n${SOURCE_FOOTER}`
 
   // 전 도메인 실패는 도구 실행 실패다 — 부분 성공과 달리 isError로 표기 (Opus I5: isError 통일)
   const allFailed = okDomains.length === 0 && failedDomains.length > 0
   return {
-    content: [{ type: "text", text: truncateWithHint(text, 4000, "도메인을 좁혀 재검색") }],
+    content: [{ type: "text", text: truncateWithHint(text, TEXT_BUDGET, "도메인을 좁혀 재검색") }],
     ...(allFailed ? { isError: true as const } : {}),
   }
 }
