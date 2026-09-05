@@ -147,6 +147,10 @@ describe("fin_law_search — 행정규칙 병행 조회 (잔여②)", () => {
     // 법령 결과는 남기되 근거로 쓰지 말라고 분리 고지한다
     expect(text).toContain("다른 법령")
     expect(text).toContain("가족관계등록사무처리규칙")
+    // 조문 미제공 사유를 제공처 탓으로 돌리지 않는다 — 법제처는 조문형식여부=Y 규칙의
+    // 조문 본문을 주고 fin_verify가 그것으로 조문까지 대조한다 (CHANGELOG 2026-09-01 정정)
+    expect(text).toContain("이 도구는 행정규칙 조문 본문을 싣지 않습니다")
+    expect(text).not.toContain("조문 단위 조회 미지원")
   })
 
   it("행정규칙 조회에 원본 질의를 쓴다 — 정제된 검색어로는 못 찾는다", async () => {

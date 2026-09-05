@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest"
-import { extractCitations, extractCitationsWithTotal, handleFinVerify } from "./verify.js"
+import { extractCitations, extractCitationsWithTotal, handleFinVerify, FIN_VERIFY_TOOL } from "./verify.js"
 import { LawApiClient } from "../lib/api-client.js"
 
 describe("extractCitations — 접속사 오탐 방지 (Codex 리뷰 회귀)", () => {
@@ -1250,6 +1250,20 @@ describe("verify — 검증 범위 고지 (✓의 뜻)", () => {
 
   const NOTICE =
     "※ ✓는 법령·조문 번호가 법제처에 실존한다는 뜻입니다. 항·호·내용의 옳고 그름은 검증하지 않습니다 — 내용 확인은 fin_article로 본문을 대조하세요"
+
+  /**
+   * 헤더 고지는 응답을 **읽은 뒤에만** 보인다. 도구를 고를 때(tools/list) 보이는 것은
+   * description뿐이라, 거기에 같은 한계가 없으면 ✓를 "초안이 옳다"로 읽는 오해가 그대로 남는다
+   * (Codex 제품 검토 2026-09-05 지적 5). 둘 중 하나만 바꾸면 이 테스트가 먼저 깨진다.
+   */
+  it("도구 description이 헤더 고지와 같은 한계를 말한다", () => {
+    const d = FIN_VERIFY_TOOL.description
+    expect(d).toContain("항·호·내용의 옳고 그름은 검증하지 않는다")
+    expect(d).toContain("실존")
+    expect(d).toContain("fin_article")
+    // 헤더 고지도 같은 사실을 말해야 한다 (문안은 어미만 다르다)
+    expect(NOTICE).toContain("항·호·내용의 옳고 그름은 검증하지 않습니다")
+  })
 
   const CURRENT_LAW_XML =
     '<?xml version="1.0"?><LawSearch><totalCnt>1</totalCnt><law id="1">' +

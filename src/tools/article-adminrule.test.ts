@@ -47,11 +47,15 @@ describe("fin_article — 행정규칙 조문 요청 (잔여①)", () => {
     expect(text).toContain("외국환거래규정")
     expect(text).toContain("고시")
     expect(text).not.toContain("[LAW_NOT_FOUND]")
-    // "없는 조문"과 "조회 미지원"을 명확히 구분해야 한다
-    expect(text).toContain("조회 미지원")
+    // "없는 조문"과 "이 도구 미수록"을 명확히 구분해야 한다
+    expect(text).toContain("이 도구 미수록")
+    // 제품 미구현을 제공처 한계로 설명하지 않는다 — 법제처는 조문형식 규칙의 본문을 준다
+    // (2026-09-01 실측·CHANGELOG 정정, fin_verify가 그것으로 조문 대조까지 한다)
+    expect(text).not.toContain("법제처 API가 조문 단위 조회를 지원하지 않아")
+    expect(text).toContain("v0.2")
   })
 
-  it("조문 본문은 주지 않고 추측 금지를 명시한다 (행정규칙은 조문 단위 API가 없다)", async () => {
+  it("조문 본문은 주지 않고 추측 금지를 명시한다 (fin_article 미수록 — v0.2 예정)", async () => {
     const r = await handleFinArticle(stub(EMPTY_LAW_XML, ADMRUL_HIT_XML), {
       law: "외국환거래규정",
       article: "제9-5조",

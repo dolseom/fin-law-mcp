@@ -15,7 +15,8 @@ import { ladderQueries, parseNtsRulings, truncateWithHint, SOURCE_FOOTER } from 
 import { formatFetchFailure } from "../lib/errors.js"
 import { extractTag } from "../lib/xml-parser.js"
 
-const BUDGET_BODY = 6000
+/** 본문 1건당 절단 상한. ⚠ 도구 description의 "최대 6,000자"와 같은 수여야 한다 (nts-ruling.test.ts가 대조) */
+export const BUDGET_BODY = 6000
 // 환경변수 기본값도 0~5로 클램프 (zod .default()는 검증을 우회하므로 여기서 강제)
 const DEFAULT_TOP_N = Math.min(Math.max(Number(process.env.FIN_NTS_BODY_TOP_N) || 2, 0), 5)
 
@@ -24,11 +25,42 @@ export const FinNtsRulingInputSchema = z.object({
   top_n_bodies: z.number().int().min(0).max(5).default(DEFAULT_TOP_N).describe("본문 자동 동봉 건수 (기본 2, 최대 5, 0=목록만)"),
 })
 
+const INPUT_EXAMPLE = `{"query":"퇴직금 중간정산","top_n_bodies":3}`
+
+/**
+ * zod 기본 오류는 영어다 ("Too big: expected number to be <=5") — 사용자에게 그대로 새면
+ * 이 서버의 다른 한글 안내와 어긋난다. calc.ts·article.ts와 같은 [INVALID_PARAMETER] 형식으로 맞춘다.
+ * 필드별 문구는 스키마의 제약(0~5 정수 / 1자 이상)과 같은 사실을 말해야 한다 — 한쪽만 바뀌면 거짓말이 된다.
+ */
+function formatInputError(error: z.ZodError, rawInput: unknown): string {
+  const raw = (rawInput && typeof rawInput === "object" ? rawInput : {}) as Record<string, unknown>
+  const shown = (v: unknown): string => (v === undefined ? "없음" : JSON.stringify(v))
+  const seen = new Set<string>()
+  const parts: string[] = []
+  for (const i of error.issues) {
+    const field = String(i.path[0] ?? "")
+    if (seen.has(field)) continue
+    seen.add(field)
+    if (field === "top_n_bodies") {
+      parts.push(`top_n_bodies는 0~5의 정수입니다 (입력: ${shown(raw.top_n_bodies)})`)
+    } else if (field === "query") {
+      parts.push(
+        raw.query === undefined
+          ? "query(예규 검색어)는 필수입니다"
+          : `query는 1자 이상의 검색어 문자열입니다 (입력: ${shown(raw.query)})`
+      )
+    } else {
+      parts.push(`${field || "입력"}: ${i.message}`)
+    }
+  }
+  return `[INVALID_PARAMETER] fin_nts_ruling: ${parts.join("; ")}\n💡 예: ${INPUT_EXAMPLE}`
+}
+
 export const FIN_NTS_RULING_TOOL = {
   name: "fin_nts_ruling",
   description:
     "[재무·세무·회계 전용 — 국세청 예규가 필요하면 이 도구를 우선 사용] " +
-    "국세청 예규·법령해석을 검색하고 상위 건의 본문 전문을 자동 동봉한다 (문서번호·회신일자 포함). " +
+    "국세청 예규·법령해석을 검색하고 상위 건의 본문(최대 6,000자, 초과 시 절단 고지)을 자동 동봉한다 (문서번호·회신일자 포함). " +
     "세무 검토서에 예규 원문을 인용할 때 사용.",
   inputSchema: {
     type: "object",
@@ -62,7 +94,7 @@ export async function handleFinNtsRuling(
   const parsed = FinNtsRulingInputSchema.safeParse(rawInput)
   if (!parsed.success) {
     return {
-      content: [{ type: "text", text: `[INVALID_PARAMETER] fin_nts_ruling: ${parsed.error.issues.map((i) => i.message).join("; ")}` }],
+      content: [{ type: "text", text: formatInputError(parsed.error, rawInput) }],
       isError: true,
     }
   }
