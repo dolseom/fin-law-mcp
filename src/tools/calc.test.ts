@@ -405,10 +405,12 @@ describe("끝수 계산 (국고금 관리법 §47 · 지방세기본법 §59)", 
     expect(r.localTax).toBe(truncateCollectedTax(r.untruncatedIncomeTax * 0.1))
   })
 
-  it("원천징수세액 1천원 미만은 소액 부징수 표시가 붙는다 (소득세법 §86①1)", () => {
+  it("산출세액 1천원 미만이면 소액 부징수 플래그가 선다 (소득세법 §86①1)", () => {
     const r = calcRetirementIncomeTax(8_337_500, 5)
     expect(r.taxBase).toBe(4_000)
     expect(r.incomeTax).toBe(100)
+    // ⚠ 이 플래그는 산출세액이 1천원 미만이라는 사실만 뜻한다 — 부징수 확정이 아니다.
+    // §86①1의 기준은 지급 시점의 차감원천징수세액이고 이 도구는 조정분을 입력받지 않는다
     expect(r.belowMinimumWithholding).toBe(true)
     // 세액이 0이면 부징수 표시 대상이 아니다
     expect(calcRetirementIncomeTax(3_000_000, 5).belowMinimumWithholding).toBe(false)
@@ -593,11 +595,25 @@ describe("handleFinCalc 계약", () => {
     expect(t).toContain("71,538,461.54원")
   })
 
-  it("원천징수세액 1천원 미만이면 소액 부징수를 고지한다 (소득세법 §86①1)", async () => {
+  it("산출세액 1천원 미만이면 소액 부징수를 조건부 주의로 고지한다 (소득세법 §86①1)", async () => {
     const small = await handleFinCalc(null, { calc_type: "퇴직소득세", severance_pay: 8_337_500, service_years: 5 })
     expect(small.content[0].text).toContain("소액 부징수")
     const big = await handleFinCalc(null, { calc_type: "퇴직소득세", severance_pay: 100_000_000, service_years: 20 })
     expect(big.content[0].text).not.toContain("소액 부징수")
+  })
+
+  it("소액 부징수는 확정형으로 단정하지 않는다 — 기준은 차감원천징수세액 (Codex 8차)", async () => {
+    // §86①1의 기준은 지급 시점의 원천징수세액(기납부·과세이연 조정 후 차감원천징수세액)이고
+    // 이 도구는 산출세액만 계산한다 → "징수하지 않습니다" 단정 금지
+    const r = await handleFinCalc(null, { calc_type: "퇴직소득세", severance_pay: 1_707_917, service_years: 1 })
+    const t = r.content[0].text
+    expect(t).not.toContain("징수하지 않습니다")
+    expect(t).toContain("확정하지 않습니다")
+    expect(t).toContain("차감원천징수세액")
+    // 숫자는 그대로 — 문구만 바뀐다
+    expect(t).toContain("산출세액(소득세): 990원")
+    expect(t).toContain("개인지방소득세: 90원")
+    expect(t).toContain("합계: 1,080원")
   })
 
   it("모든 계산 유형이 산식 기준일·근거·출처를 동봉한다", async () => {
@@ -710,28 +726,64 @@ describe("입력 스키마 — 조건부 필수 (Codex 리뷰: oneOf)", () => {
   })
 
   // 도구 정의는 매 세션 모든 대화에 실린다 — 설명이 다시 길어지면 여기서 걸린다.
-  // 상한은 축약 시점 실측값(inputSchema 2,909 / 전체 3,190)에 여유를 둔 값이다.
+  // 상한은 실측값(inputSchema 3,077 / 전체 3,358)에 여유를 둔 값이다.
+  // 2026-09-05 Codex 8차로 +168자: enum 구별 기준 두 건(DISAMBIGUATING_PROPS)을 설명에 넣었다.
   it("도구 정의가 다시 부풀지 않는다 — 세션 토큰 회귀 방어", () => {
     const schemaLen = JSON.stringify(FIN_CALC_TOOL.inputSchema).length
     const wholeLen = JSON.stringify(FIN_CALC_TOOL).length
-    expect(schemaLen, `inputSchema ${schemaLen}자`).toBeLessThanOrEqual(3_000)
-    expect(wholeLen, `도구 정의 전체 ${wholeLen}자`).toBeLessThanOrEqual(3_300)
+    expect(schemaLen, `inputSchema ${schemaLen}자`).toBeLessThanOrEqual(3_160)
+    expect(wholeLen, `도구 정의 전체 ${wholeLen}자`).toBeLessThanOrEqual(3_440)
   })
 
-  it("속성 설명은 한 줄이고 조문 인용은 담지 않는다 (근거는 오류 메시지·응답 본문에)", () => {
+  /**
+   * 조문 근거는 오류 메시지·응답 본문이 담는다는 것이 원칙인데, 예외가 둘 있다.
+   * rate_type·short_period_basis는 **유효한 enum 값 중 무엇을 고르느냐**로 결과가 갈리고
+   * (정률법 6개월: 기중취득 22,550,000원 vs 사업연도1년미만 25,900,000원),
+   * 무엇을 골라도 유효 입력이라 오류 메시지가 뜨지 않는다 — 구별 기준이 스키마에 없으면
+   * LLM이 틀린 값을 확신형으로 고른다 (Codex 8차 중요 2). 이 둘만 조문 인용·길이를 허용한다.
+   */
+  const DISAMBIGUATING_PROPS = ["rate_type", "short_period_basis"]
+
+  it("속성 설명은 한 줄이고, 구별 기준이 필요한 둘 외에는 조문 인용을 담지 않는다", () => {
     const props = (FIN_CALC_TOOL.inputSchema as any).properties as Record<string, { description?: string }>
     for (const [k, v] of Object.entries(props)) {
       const d = v.description ?? ""
       expect(d, `${k} 설명에 줄바꿈`).not.toMatch(/\n/)
-      // 50자: short_period_basis만 조건부 필수 사유를 밝히느라 49자다. 그 조건은
-      // 정률법에서 -22.8% 오답을 만든 차단 사례라 property 이름을 줄이지 않는다.
+      if (DISAMBIGUATING_PROPS.includes(k)) {
+        // 각 enum 값의 구별 기준을 한 줄 안에 담느라 길다 — 상한만 둔다
+        expect(d.length, `${k} 설명이 ${d.length}자`).toBeLessThanOrEqual(140)
+        continue
+      }
+      // 50자: 나머지 속성은 조건부 필수 표시 + 단위까지만
       expect(d.length, `${k} 설명이 ${d.length}자`).toBeLessThanOrEqual(50)
       expect(d, `${k} 설명에 조문 인용`).not.toMatch(/§|시행령|시행규칙|별표/)
     }
   })
 
-  it("스키마에서 뺀 조문 근거를 오류 메시지가 대신 담는다", async () => {
+  it("구별 기준 두 속성은 enum 값마다 판단 기준을 설명에 담는다 (Codex 8차)", () => {
+    const props = (FIN_CALC_TOOL.inputSchema as any).properties as Record<
+      string,
+      { enum?: string[]; description?: string }
+    >
+    for (const k of DISAMBIGUATING_PROPS) {
+      const { enum: values = [], description = "" } = props[k]
+      expect(values.length, `${k}에 enum이 없다`).toBeGreaterThan(1)
+      // 모든 enum 값이 설명에 등장해야 한다 — 하나라도 빠지면 그 값이 무근거 선택지가 된다
+      for (const value of values) expect(description, `${k} 설명에 "${value}" 기준 없음`).toContain(value)
+    }
+    // short_period_basis: 월할 vs 환산내용연수가 갈린다는 사실이 보여야 한다
+    expect(props.short_period_basis.description).toContain("월할")
+    expect(props.short_period_basis.description).toContain("환산내용연수")
+    // rate_type: 원칙(본문)과 예외(단서 각 호)의 구분 — 오류 메시지와 조문 표기가 같아야 한다.
+    // 시행령 §89③ 원문 실조회(2026-09-05): 본문이 가중평균차입이자율이고, "다만, 다음 각 호의
+    // 경우에는 … 당좌대출이자율을 시가로 한다" 뒤에 1호·1의2호·2호가 온다 → 예외는 "단서 각 호"
+    expect(props.rate_type.description).toContain("§89③ 본문")
+    expect(props.rate_type.description).toContain("§89③ 단서 각 호")
+  })
+
+  it("오류 메시지가 조문 근거를 담는다 — 스키마 한 줄로는 부족한 몫", async () => {
     // rate_type — 원칙(§89③ 본문)과 예외(단서)의 구분이 오류 메시지에 남아야 한다
+    // (스키마 설명에도 같은 조문이 있다 — 위 "구별 기준 두 속성" 테스트가 일치를 지킨다)
     const noRate = await handleFinCalc(null, { calc_type: "가지급금인정이자", balance_days: 36_500_000_000 })
     expect(noRate.isError).toBe(true)
     expect(noRate.content[0].text).toContain("§89③")
