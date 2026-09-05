@@ -23,11 +23,9 @@ body:
   - type: input
     id: canonical
     attributes:
-      label: 정식 법령명
-      description: 국가법령정보센터에 등재된 정확한 명칭
+      label: 정식 법령명 (선택)
+      description: 아는 경우에만 적어주세요. 몰라도 됩니다 — 위 안내대로 약칭 하나면 충분합니다
       placeholder: "조세특례제한법"
-    validations:
-      required: true
 
   - type: input
     id: other_aliases

@@ -1,24 +1,73 @@
 # fin-law-mcp
 
 **재무·회계·세무·자금 실무 특화 한국 법령 MCP 서버.**
-AI가 세무 답변의 '해설'을 하는 시대에, 이 서버는 그 해설이 맞는지 확인할 **검증 가능한 원천 근거 파이프**를 제공합니다 — 조문·예규·심판례·판례를 문서번호와 출처까지 갖춘 형태로, 오류를 절대 "없음"으로 위장하지 않으면서.
+세무·재무 질문에 AI가 답할 때, 그 답에 **문서번호와 조문 원문이 붙게** 만듭니다.
+
+## 예를 들면
+
+> **"직원 결혼 축의금을 회사 돈으로 주면 세금 문제 있나?"**
+
+이 서버가 없으면 AI는 기억으로 답합니다. 있으면 **먼저 찾아보고** 답합니다.
+
+**① 관련 예규를 찾습니다** — `fin_ruling_search(query="경조사비", domains=["nts"])`
+
+```text
+■ 국세청 예규 [행정해석 — 과세실무 기준이나 법원 구속력 없음] — 최신순 4건
+  · 서면법규과-691 (2013.06.17) 경조사비를 고객명의의 기부금으로 대납한 경우 기타소득 해당여부 · https://taxlaw.nts.go.kr/qt/USEQTA002P.do?ntstDcmId=010000000000151297
+  · 서이46012-11058 (2003.05.27) 임직원에게 지급하는 경조사비의 손금산입 범위 · https://taxlaw.nts.go.kr/qt/USEQTA002P.do?ntstDcmId=010000000000004713
+  · 법인46012-1801 (2000.08.22) 법인의 1회 거래처 경조사비지출액이 5만원이상인 경우 손금인정방법 · https://taxlaw.nts.go.kr/qt/USEQTA002P.do?ntstDcmId=010000000000058138
+  · 법인46012-296 (1999.01.23) 사용인에게 지급하는 경조사비 등은 지출증빙서류 수취대상이 아님 · https://taxlaw.nts.go.kr/qt/USEQTA002P.do?ntstDcmId=010000000000505200
+```
+
+**② 근거 조문의 본문을 가져옵니다** — `fin_article(law="법인세법 시행령", article="제45조")` (발췌)
+
+```text
+■ 법인세법 시행령 제45조
+제45조(복리후생비의 손금불산입)
+  ①법인이 그 임원 또는 직원을 위하여 지출한 복리후생비중 다음 각 호의 어느 하나에 해당하는 비용 외의 비용은 손금에 산입하지 아니한다. …
+    8. 그 밖에 임원 또는 직원에게 사회통념상 타당하다고 인정되는 범위에서 지급하는 경조사비 등 제1호부터 제7호까지의 비용과 유사한 비용
+
+■ 모법 위임 근거 (역방향)
+[모법] 법인세법 제26조
+제26조(과다경비 등의 손금불산입) 다음 각 호의 손비 중 대통령령으로 정하는 바에 따라 과다하거나 부당하다고 인정하는 금액은 … 손금에 산입하지 아니한다.
+    2. 복리후생비
+
+■ 법령 정보 — 시행일자 20260227 · 원문: https://www.law.go.kr/%EB%B2%95%EB%A0%B9/%EB%B2%95%EC%9D%B8%EC%84%B8%EB%B2%95%20%EC%8B%9C%ED%96%89%EB%A0%B9/%EC%A0%9C45%EC%A1%B0
+■ ⚠ 개정 예정 — 2027-01-01 시행 개정 공포됨(공포 2026-02-27) …
+```
+
+**그래서 AI의 답에 이런 것이 붙습니다.**
+
+- 인용한 예규의 **문서번호·회신일자·원문 링크** — 그대로 복사해 검토서에 넣을 수 있는 형태
+- 근거 조문의 **본문·시행일자·원문 링크**, 그리고 그 조문을 위임한 **모법 조문**
+- **이미 공포된 미래 시행 개정** 경고 — 지금 맞는 답이 내년에도 맞는지
+- 초안을 `fin_verify`에 넣으면 인용이 실존하는지 대조합니다. 다만 그 ✓의 뜻은 좁습니다:
+  `※ ✓는 법령·조문 번호가 법제처에 실존한다는 뜻입니다. 항·호·내용의 옳고 그름은 검증하지 않습니다`
+- **남는 판단은 사람 몫입니다.** 조문은 "사회통념상 타당하다고 인정되는 범위"까지만 말합니다.
+  그 축의금이 그 범위인지, 임직원 경조사비인지 거래처 경조사비(기업업무추진비)인지는 사실관계 판단이고,
+  이 서버는 그 판단을 대신하지 않습니다.
+
+### 이 도구가 하는 것 / 하지 않는 것
+
+- **합니다** — 근거가 되는 조문·예규를 찾아오고, 그 번호가 실제로 존재하는지 법제처와 대조합니다.
+- **하지 않습니다** — 사안에 대한 세무 판단을 하지 않습니다. 판단은 근거를 보고 사람이 합니다.
 
 > 범용 법령 MCP와 다른 점: 세법은 "법률–시행령–시행규칙 3단 + 예규"가 한 세트입니다.
 > 이 서버는 그 세트를 알고 묶어서 답합니다. 조문 하나를 물으면 위임 시행령 본문과
-> 관련 예규까지 **1회 호출**로 옵니다 (범용 MCP 기준 5~6회 호출 분량).
+> 예규 후보까지 **1회 호출**로 옵니다 (범용 MCP 기준 5~6회 호출 분량).
 
 ## 도구 (기본 7개 · `FIN_NTS_BODY_ENABLED=true`면 8개)
 
 | 도구 | 하는 일 |
 |------|------|
-| `fin_article` | 조문 + 위임 시행령·시행규칙 **본문** + 관련 예규 + 별표 + **시행예정 개정 경고**를 1회 응답으로 |
+| `fin_article` | 조문 + 위임 시행령·시행규칙 **본문** + 예규 후보(조문 제목 키워드 검색) + 별표 + **시행예정 개정 경고**를 1회 응답으로 |
 | `fin_law_search` | 법령 검색 → 재무 관련도순 재정렬 (부분매칭 함정 방어 · 폐지/연혁/시행예정 표시 · 주제어→법령 힌트) |
 | `fin_ruling_search` | 국세청 예규 + 조세심판원 + 법제처 해석례 + 법원 판례(전 심급)를 한 번에, **최신순** + 전거 서열 표기 |
-| `fin_nts_ruling` | 국세청 예규 검색 + 상위 건 **본문 전문** 자동 동봉 (문서번호·회신일자 포함). **`FIN_NTS_BODY_ENABLED=true`일 때만 등록** — 기본(off)에서는 목록이 `fin_ruling_search(domains=["nts"])`와 겹쳐 노출하지 않습니다 |
+| `fin_nts_ruling` | 국세청 예규 검색 + 상위 건 **본문**(최대 6,000자, 초과 시 절단 고지) 자동 동봉 (문서번호·회신일자 포함). **`FIN_NTS_BODY_ENABLED=true`일 때만 등록** — 기본(off)에서는 목록이 `fin_ruling_search(domains=["nts"])`와 겹쳐 노출하지 않습니다 |
 | `fin_annex` | 별표·서식 목록 + 다운로드 링크. `annex_no` 지정 시 **표 내용을 구조 그대로 추출** (감가상각 내용연수표·세율표). 법령뿐 아니라 **고시·훈령의 별표·별지서식**도 (국세청 훈령의 별지 서식 등) |
 | `fin_verify` | 초안의 법령·조문·고시 인용을 실존 검증 — **✓있음/✗없음/⚠판정불가 3값**. 조문 형식으로 제공되는 행정규칙은 **조문 존재까지** 대조 |
 | `fin_calc` | 법정 산식 결정형 계산 (임원퇴직금 한도·기업업무추진비 한도·감가상각비·가지급금 인정이자·퇴직소득세) — LLM 산수 배제, 계산 과정·근거 조문 동봉 |
-| `fin_ping` | 서버 상태·API 키 설정 확인 |
+| `fin_ping` | 설치 점검 — 서버 상태 + **법제처에 실제로 검색 1건을 보내** 키가 통하는지 확인. 실패하면 원인과 다음 조치를 함께 |
 
 ### 기준일 조회 (`basis_date`)
 
@@ -42,18 +91,80 @@ AI가 세무 답변의 '해설'을 하는 시대에, 이 서버는 그 해설이
 6. **부분 실패 계약**: 묶음 응답의 한 섹션이 실패해도 나머지는 살리고, 실패 사유를 그 자리에 명시한다.
 
 "검증한다"는 말이 무엇을 뜻하는지는 [docs/BENCHMARK.md](./docs/BENCHMARK.md)에 재현 가능한 게이트로 정의해 두었습니다 —
-정상 인용 20문장이 전부 ✓로 통과하는지(거짓 양성 차단), 그리고 **실제로 발생했던 오검증·조용한 실패 81건**
+정상 인용 20문장이 전부 ✓로 통과하는지(거짓 양성 차단), 그리고 **실제로 발생했던 오검증·조용한 실패 83건**
 (틀린 인용에 ✓ / 맞는 인용에 ✗ / 조용한 누락 — 라운드별 원인과 박제 위치는 문서 3장)이 전부 테스트로 박제되어 있는지.
 두 방향 모두 통과해야 합니다.
 
 ## 설치
 
+**필요한 것: [Node.js](https://nodejs.org) 20.19.0 이상** (`node -v`로 확인). 그 외 준비물은 없습니다.
+
+### 1. 내려받아 빌드
+
 ```bash
-git clone <repo> && cd fin-law-mcp
+git clone https://github.com/dolseom/fin-law-mcp.git
+cd fin-law-mcp
 npm install && npm run build
 ```
 
-**(선택) 설치 용량 줄이기** — 빌드가 끝난 뒤 별표 추출에 쓰는 `kordoc`의 OCR 옵션 스택(onnxruntime·transformers·sharp)을 걷어냅니다. `fin_annex`는 OCR을 쓰지 않아 별표 표 추출은 그대로 동작합니다 (실측 905MB → 70MB).
+### 2. 법제처 API 키 발급 (무료)
+
+[법제처 OPEN API 신청](https://open.law.go.kr/LSO/openApi/guideResult.do)에서 가입하면 **가입 이메일의 @ 앞부분이 그대로 키**입니다.
+(예: `hong@company.com`으로 가입했다면 키는 `hong`)
+
+### 3. `.env` 파일 만들기
+
+저장소 폴더 안에서 한 줄이면 됩니다.
+
+```powershell
+# Windows PowerShell
+Set-Content -Encoding utf8 .env "LAW_OC=발급받은키"
+```
+
+```bash
+# macOS · Linux
+echo 'LAW_OC=발급받은키' > .env
+```
+
+### 4. AI에 등록
+
+- **Claude Code**: `claude mcp add fin-law node /절대경로/fin-law-mcp/build/index.js`
+- **Claude Desktop**: `claude_desktop_config.json`의 `mcpServers`에 추가
+
+```jsonc
+// macOS · Linux
+{
+  "mcpServers": {
+    "fin-law": { "command": "node", "args": ["/절대경로/fin-law-mcp/build/index.js"] }
+  }
+}
+```
+
+```jsonc
+// Windows — 경로 구분자를 \\ 로 두 번 쓰거나, / 로 써도 됩니다
+{
+  "mcpServers": {
+    "fin-law": { "command": "node", "args": ["C:\\dev\\fin-law-mcp\\build\\index.js"] }
+  }
+}
+```
+
+### 5. 됐는지 확인
+
+AI에게 **`fin_ping 실행해줘`** 라고 말하세요. 이렇게 나오면 끝입니다.
+
+```text
+fin-law-mcp v0.1.0 정상 동작
+LAW_OC: 설정됨 · 법제처 API 통신: 성공 (법인세법 검색 1건, 255ms)
+FIN_NTS_BODY_ENABLED: 미설정(기본 off) — 예규는 목록·링크만. 본문이 필요하면 .env에 true
+```
+
+`법제처 API 통신: 실패`나 `LAW_OC: 누락`이 나오면 그 줄 아래에 **원인과 다음 조치가 함께** 나옵니다.
+`fin_ping`은 키가 "설정됐는지"가 아니라 그 키로 **법제처가 실제로 응답하는지**를 봅니다 — 오타 난 키도 설정은 되어 있기 때문입니다.
+
+### (선택·고급) 설치 용량 줄이기
+
+빌드가 끝난 뒤 별표 추출에 쓰는 `kordoc`의 OCR 옵션 스택(onnxruntime·transformers·sharp)을 걷어냅니다. `fin_annex`는 OCR을 쓰지 않아 별표 표 추출은 그대로 동작합니다 (실측 905MB → 70MB).
 
 ```bash
 npm prune --omit=optional
@@ -62,20 +173,6 @@ npm prune --omit=optional
 - 다시 빌드하려면 `npm install`을 한 번 더 실행하세요. prune은 TypeScript 컴파일러 바이너리도 함께 지웁니다.
 - ⚠ **처음부터 `npm install --omit=optional`로 건너뛰면 빌드가 깨집니다.** TypeScript 7은 컴파일러 본체를 플랫폼별 `optionalDependencies`(`@typescript/typescript-<플랫폼>`)로 배포해서 `tsc`까지 함께 빠지기 때문입니다.
 - `npm audit`은 설치된 트리가 아니라 `package-lock.json`을 읽습니다. prune 후에도 OCR 스택 경유 취약점(sharp→libvips 등)이 같은 건수로 계속 보고됩니다 — 줄지 않는 것이 정상입니다.
-
-1. [법제처 OPEN API](https://open.law.go.kr/LSO/openApi/guideResult.do) 키 발급 (무료 — 가입 이메일 @ 앞부분이 키)
-2. `.env` 파일 생성: `LAW_OC=발급받은키`
-3. 등록:
-   - Claude Code: `claude mcp add fin-law node /절대경로/fin-law-mcp/build/index.js`
-   - Claude Desktop: `claude_desktop_config.json`의 `mcpServers`에 추가
-
-```jsonc
-{
-  "mcpServers": {
-    "fin-law": { "command": "node", "args": ["/절대경로/fin-law-mcp/build/index.js"] }
-  }
-}
-```
 
 ## 환경변수
 
@@ -116,7 +213,7 @@ node scripts/gate20.mjs           # 인용 검증 게이트 (정상 인용 20문
 node scripts/verify-file.mjs 검토서.md   # 문서 하나의 인용을 통째로 검증
 ```
 
-- [docs/BENCHMARK.md](./docs/BENCHMARK.md) — 검증 게이트 정의 · 오검증 회귀 사례 81건 · 실측 결과
+- [docs/BENCHMARK.md](./docs/BENCHMARK.md) — 검증 게이트 정의 · 오검증 회귀 사례 83건 · 실측 결과
 - [docs/HOOKS.md](./docs/HOOKS.md) — 검토서(.md) 저장 시 인용을 자동 검증하는 Claude Code 훅 설정
 
 ## 로드맵 (v0.2)

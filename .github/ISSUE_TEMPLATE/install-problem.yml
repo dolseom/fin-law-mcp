@@ -1,0 +1,94 @@
+name: 설치가 안 돼요
+description: 설치·등록·첫 실행에서 막힌 경우를 제보합니다 (개발 지식 없이 제출할 수 있습니다)
+title: "[설치] "
+labels: ["설치"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **먼저 이것부터 해보세요.** AI에게 `fin_ping 실행해줘`라고 말하면 아래 셋 중 하나가 나옵니다.
+
+        - `법제처 API 통신: 성공` — 설치는 끝났습니다. 조회가 안 되는 문제라면
+          "이 질문을 했는데 도움이 안 됐어요" 양식이 맞습니다.
+        - `법제처 API 통신: 실패` — 출력에 원인과 다음 조치가 함께 나옵니다. 그대로 해보고,
+          그래도 안 되면 그 출력을 아래에 붙여주세요.
+        - `LAW_OC: 누락` — `.env` 파일이 없거나 키가 안 들어갔습니다.
+
+        `fin_ping`이 아예 실행되지 않는다면(도구를 못 찾는다면) 그 사실을 그대로 적어주세요.
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: 어디에서 막혔나요
+      options:
+        - "git clone / 다운로드"
+        - "npm install (설치)"
+        - "npm run build (빌드)"
+        - "MCP 등록 — AI가 도구를 못 찾습니다"
+        - "fin_ping 실행 — 실패로 나옵니다"
+        - "그 외"
+    validations:
+      required: true
+
+  - type: textarea
+    id: ping
+    attributes:
+      label: fin_ping 출력
+      description: AI에게 "fin_ping 실행해줘"라고 말한 결과를 그대로 붙여넣어 주세요. 실행 자체가 안 되면 그렇게 적어주세요
+      placeholder: |
+        fin-law-mcp v0.1.0 정상 동작
+        LAW_OC: 설정됨 · 법제처 API 통신: 실패 — 타임아웃 — 5초 안에 응답이 오지 않았습니다
+          → 다음 조치: ...
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: 오류 메시지
+      description: 터미널이나 AI 화면에 나온 오류를 그대로 붙여넣어 주세요 (경로에 이름·회사명이 들어 있으면 지우고 올려주세요)
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 운영체제
+      options:
+        - "Windows"
+        - "macOS"
+        - "Linux"
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node 버전
+      description: 터미널에 `node -v`를 입력하면 나옵니다 (이 서버는 20.19.0 이상이 필요합니다)
+      placeholder: "v22.11.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: 어디에 등록하셨나요
+      options:
+        - "Claude Desktop"
+        - "Claude Code"
+        - "그 외 MCP 클라이언트"
+        - "아직 등록 전입니다"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: network
+    attributes:
+      label: 네트워크 환경 (해당하는 것만)
+      options:
+        - label: "사내망·VPN에서 씁니다"
+        - label: "회사 프록시를 거칩니다"
+        - label: "브라우저에서 https://www.law.go.kr 은 정상으로 열립니다"

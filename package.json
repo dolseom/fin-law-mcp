@@ -32,6 +32,8 @@
   "homepage": "https://github.com/dolseom/fin-law-mcp#readme",
   "files": [
     "build",
+    "scripts",
+    "docs",
     "README.md",
     "LICENSE",
     "NOTICE"
