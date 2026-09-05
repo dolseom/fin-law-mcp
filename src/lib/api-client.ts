@@ -147,7 +147,17 @@ export class LawApiClient {
     }
   }
 
-  /** 현재 응답 타입 반환 (환경변수 LAW_RESPONSE_TYPE, 기본값 XML) */
+  /**
+   * 현재 응답 타입 반환 (환경변수 LAW_RESPONSE_TYPE, 기본값 XML)
+   *
+   * ⚠ **XML 전용 경로에는 쓰지 말 것.** 소비자가 XML 파서뿐인 조회
+   * (searchLaw·searchAdminRule·getAdminRule·searchOrdinance)는 `type: "XML"`로 고정한다.
+   * 이유가 둘이다:
+   *  ① JSON을 받으면 XML 파서가 아무것도 못 찾아 "정상 조회 후 0건"으로 조용히 위장된다 —
+   *     LAW_RESPONSE_TYPE=JSON 우회는 그 경로에서 애초에 동작한 적이 없다.
+   *  ② 루트 가드(assertXmlRoot)가 `=== "XML"` 조건 뒤에 있어 JSON 모드에서는 가드까지 꺼진다.
+   * 고정하면 가드가 항상 켜지고, 기본값이 XML이라 정상 운영에서는 나가는 URL이 그대로다.
+   */
   private getResponseType(): "XML" | "JSON" {
     const t = (process.env.LAW_RESPONSE_TYPE || "XML").toUpperCase()
     return t === "JSON" ? "JSON" : "XML"
@@ -156,10 +166,11 @@ export class LawApiClient {
   /** 응답 본문이 HTML 에러 페이지인지 확인 — 대소문자 무시 (<HTML> 변형이 통과한 실사고, fixture 테스트로 박제) */
   private checkHtmlError(text: string, context: string): void {
     if (/<!doctype\s+html|<html[\s>]/i.test(text)) {
-      const hint = this.getResponseType() === "XML"
-        ? " XML 엔드포인트 장애 시 LAW_RESPONSE_TYPE=JSON 환경변수로 우회할 수 있습니다."
-        : ""
-      throw new Error(`${context} - API가 HTML 에러 페이지를 반환했습니다. 파라미터를 확인해주세요.${hint}`)
+      // "LAW_RESPONSE_TYPE=JSON으로 우회하세요" 힌트를 뗐다 — 이 함수를 부르는 경로가
+      // 하나도 그 환경변수를 따르지 않는다(searchLaw·searchAdminRule·getAdminRule은 XML 고정,
+      // getLawText·getOrdinance는 JSON 고정, fetchApi는 호출별 지정). 듣지 않는 우회를
+      // 안내하면 장애 진단이 엉뚱한 곳으로 샌다
+      throw new Error(`${context} - API가 HTML 에러 페이지를 반환했습니다. 파라미터를 확인해주세요.`)
     }
   }
 
@@ -186,7 +197,9 @@ export class LawApiClient {
 
     const params = new URLSearchParams({
       OC: this.getApiKey(apiKey),
-      type: this.getResponseType(),
+      // XML 고정 — 소비자(parseLawXml·parseLawBlocks·parseAbolishedLawsXml·parseUpcomingVersions)가
+      // XML 전용이라 LAW_RESPONSE_TYPE=JSON 우회는 이 경로에 적용하지 않는다 (getResponseType 주석)
+      type: "XML",
       target,
       query: finalQuery,
     })
@@ -199,7 +212,8 @@ export class LawApiClient {
     const text = await response.text()
     this.checkEmptyResponse(text, "법령 검색")
     this.checkHtmlError(text, "법령 검색 결과를 받지 못했습니다")
-    if (this.getResponseType() === "XML") this.assertXmlRoot(text, ["LawSearch"], "법령 검색")
+    // 조건 없이 항상 검증한다 — 위에서 type을 XML로 고정했으므로 가드가 꺼지는 모드가 없다
+    this.assertXmlRoot(text, ["LawSearch"], "법령 검색")
     return text
   }
 
@@ -310,7 +324,9 @@ export class LawApiClient {
   }): Promise<string> {
     const apiParams = new URLSearchParams({
       OC: this.getApiKey(params.apiKey),
-      type: this.getResponseType(),
+      // XML 고정 — 소비자(parseAdmrulHistoryXml·findAdminRule)가 XML 전용이라
+      // LAW_RESPONSE_TYPE=JSON 우회는 이 경로에 적용하지 않는다 (getResponseType 주석)
+      type: "XML",
       target: "admrul",
       query: params.query,
     })
@@ -323,7 +339,23 @@ export class LawApiClient {
     const response = await this.drfFetch(url, params.signal ? { ...DRF_RETRY, signal: params.signal } : DRF_RETRY)
     await this.throwIfError(response, "searchAdminRule")
 
-    return await response.text()
+    const text = await response.text()
+    // 200 + 오류 본문(<error>…</error> 등)이 "행정규칙 0건"으로 읽히는 것을 막는다 (Codex 8차 중요).
+    // 이 경로에만 가드가 없어서, 법제처가 200으로 오류 XML을 주면
+    //  ① abolished-laws의 연혁 조회(nw=2)에서 parseAdmrulHistoryXml이 빈 배열을 내고
+    //     "해당없음"("")이 TTL 동안 네거티브 캐시로 굳고
+    //  ② admin-rule-citation이 그 null을 "폐지 이력도 없음"으로 읽어 실존·폐지 규칙에
+    //     하드 ✗ NOT_FOUND를 찍었다 (현행 검색만 정상 0건인 조합에서 재현).
+    // findAdminRule(tools/admin-rule-citation.ts)에만 있던 같은 가드를 클라이언트로 올려
+    // 두 소비자가 모두 ⚠(판정불가)로 흐르게 한다
+    this.checkEmptyResponse(text, "행정규칙 검색")
+    this.checkHtmlError(text, "행정규칙 검색 결과를 받지 못했습니다")
+    // 정상 검색 응답의 루트는 AdmRulSearch (2026-08-19 실호출 확인 — findAdminRule의 같은 상수).
+    // ⚠ 정상 0건(<AdmRulSearch><totalCnt>0</totalCnt></AdmRulSearch>)은 루트가 맞으므로
+    // 여기서 걸리지 않는다 — 네거티브 캐시는 그대로 살아 있어야 한다.
+    // 조건 없이 항상 검증한다 — 위에서 type을 XML로 고정했으므로 가드가 꺼지는 모드가 없다
+    this.assertXmlRoot(text, ["AdmRulSearch"], "행정규칙 검색")
+    return text
   }
 
   /**
@@ -333,7 +365,9 @@ export class LawApiClient {
     const apiParams = new URLSearchParams({
       target: "admrul",
       OC: this.getApiKey(apiKey),
-      type: this.getResponseType(),
+      // XML 고정 — 소비자(extractAbolitionReason·checkAdminRuleArticle·parseAdminRuleAnnexes)가
+      // AdmRulService XML 전용이라 LAW_RESPONSE_TYPE=JSON 우회는 이 경로에 적용하지 않는다
+      type: "XML",
       ID: id,
     })
 
@@ -460,7 +494,8 @@ export class LawApiClient {
     const apiParams = new URLSearchParams({
       target: "ordin",
       OC: this.getApiKey(params.apiKey),
-      type: this.getResponseType(),
+      // XML 고정 — 소비자(tools/law-search.ts의 <law> 블록 정규식·extractTag)가 XML 전용
+      type: "XML",
       query: params.query,
       display: (params.display || 20).toString(),
     })

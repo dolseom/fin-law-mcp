@@ -88,7 +88,7 @@ npm prune --omit=optional
 | `FIN_DRF_MAX_CONCURRENCY` | 동시 호출 상한 (기본 4) |
 | `FIN_CACHE_TTL_SEC` | 캐시 TTL (기본 600초, `0`이면 비활성). **응답 본문 캐시와 검색·폐지연혁 파싱 결과 캐시 두 계층을 함께 제어**하고 각 계층 자체 TTL의 상한이 된다 — `0`이면 둘 다 완전히 꺼진다. 같은 조회의 반복 왕복을 프로세스 안에서 접는다 (행정규칙 본문 213~405KB 재조회 1258ms → 9ms) |
 | `FIN_CACHE_MAX_ENTRIES` / `FIN_CACHE_MAX_MB` | 캐시 상한 (기본 200건 / 16MB). 오류·HTML 장애 응답은 담지 않는다 |
-| `LAW_API_PROTOCOL` / `LAW_RESPONSE_TYPE` | 폐쇄망 http 전환 / XML 장애 시 JSON 우회 |
+| `LAW_API_PROTOCOL` / `LAW_RESPONSE_TYPE` | 폐쇄망 http 전환 / XML 장애 시 JSON 우회. ⚠ **법령 검색·행정규칙 검색·행정규칙 본문·자치법규 검색은 XML 고정이라 이 변수가 적용되지 않습니다** — 이 경로들의 파서가 XML 전용이어서 JSON을 받으면 응답이 정상이어도 "0건"으로 위장되고, 오류 응답 루트 가드까지 꺼지기 때문입니다 |
 | `LAW_EXTERNAL_HTTPS_PROXY` | 사내 프록시 경유 (`http://호스트:포트`, 인증은 `http://사용자:암호@호스트:포트`). ⚠ **적용 범위는 국세청 예규 본문 조회(`taxlaw.nts.go.kr`) 한 곳뿐입니다** — 법제처 경로(조문·검색·해석례·별표 파일 다운로드)는 프록시를 타지 않고 직접 나갑니다. 아웃바운드가 프록시로만 열린 망에서는 그쪽이 먼저 실패합니다. **경로 통일은 v0.2 예정** |
 | `LAW_EXTERNAL_TLS_REJECT_UNAUTHORIZED` | `0`이면 위 프록시 구간의 TLS 검증을 끕니다 (진단용 임시 우회). `NODE_ENV=production`에서는 무시하고 항상 검증합니다 |
 
