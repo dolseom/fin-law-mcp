@@ -13,12 +13,12 @@
 
 import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
-import { findLaws, resolvedLawMatches, sameLawFamily, type LawInfo } from "../lib/law-search.js"
+import { findLaws, resolvedLawMatches, sameLawFamily, lawTierOf, type LawInfo, type LawTier } from "../lib/law-search.js"
 import { formatFetchFailure, classifyErrorCode } from "../lib/errors.js"
 import { resolveVersionAt } from "../lib/historical-utils.js"
 import { buildJO } from "../lib/law-parser.js"
 import { cleanHtml, flattenContent, groupMokByReset } from "../lib/article-parser.js"
-import { parseThreeTierDelegation } from "../lib/three-tier-parser.js"
+import { parseThreeTierDelegation, parseThreeTierRows, type ThreeTierRowSet } from "../lib/three-tier-parser.js"
 import { isAdminRuleLikeName, findAdminRule, stripTrailingParen } from "./admin-rule-citation.js"
 import { formatAnnexNo } from "./annex.js"
 import { extractTag, toArray } from "../lib/xml-parser.js"
@@ -229,6 +229,156 @@ async function adminRuleNotice(
   }
 }
 
+// ── 역방향 위임 해소 (시행령·시행규칙 조문 → 모법 조문) ──────────────────
+//
+// 법제처 3단비교는 **기준법령(모법) 조번호로만 색인**된다 — 시행령 MST로 호출해도
+// 같은 모법 매핑이 온다(2026-09-05 실측). 이 사실을 모르고 시행령 §45를 물으면서
+// 배열에서 "제45조"를 찾으면 **모법 §45**(합병 시 이월결손금 승계)의 위임이
+// 시행령 §45(복리후생비)의 위임으로 실린다 — 무관한 조문이 "위임"이 되는 오검증이다.
+// 그래서 하위법령 입력이면 매핑을 뒤집어 "이 조문을 위임한 모법 조문"을 찾는다.
+
+const REVERSE_BODY_LIMIT = 2
+const REVERSE_BODY_MS = 3000
+
+/** 하위법령 이름에서 모법 이름 추정 — 기준법령명이 안 올 때만 쓰는 폴백 */
+function guessBaseLawName(name: string): string {
+  return name.replace(/\s*시행(?:령|규칙)\s*$/, "").trim()
+}
+
+interface ReverseHit {
+  baseJo: string
+  baseJoNum: string
+  /** 같은 행에 있던 반대편 하위법령 조문 표기 (시행령 입력이면 시행규칙, 반대도 성립) */
+  siblings: string[]
+}
+
+async function renderReverseDelegation(params: {
+  apiClient: LawApiClient
+  law: LawInfo
+  tier: LawTier
+  articleLabel: string
+  rowSet: ThreeTierRowSet
+  outerSignal: AbortSignal
+}): Promise<string> {
+  const { apiClient, law, tier, articleLabel, rowSet, outerSignal } = params
+
+  // 이름이 시행령·시행규칙이 아닌데 기준법령이 다르다 = 어느 열을 뒤져야 할지 모른다.
+  // 추측해서 아무 열이나 대조하면 다시 무관 조문이 "위임"으로 실린다 — 생략+고지.
+  if (tier === "본법") {
+    return (
+      `(위임 조회 생략 — 법제처 3단비교는 「${rowSet.baseLawName}」 조문 기준으로만 색인되어 ` +
+      `「${law.lawName}」 ${articleLabel}의 위임 관계는 이 응답에서 확정할 수 없습니다.\n` +
+      `💡 「${rowSet.baseLawName}」의 해당 조문으로 fin_article을 호출하세요.\n` +
+      `⚠️ LLM은 위임 조문을 추측하지 마세요 — "위임 없음"이 아니라 조회 미지원입니다)`
+    )
+  }
+
+  const baseName = rowSet.baseLawName || guessBaseLawName(law.lawName)
+  const siblingTier = tier === "시행령" ? "시행규칙" : "시행령"
+  const target = articleLabel.replace(/\s+/g, "")
+
+  // 열별 법령명 폴백 — 법제처는 같은 열에서도 법령명을 비워 보내는 행이 있다(실측)
+  const siblingLawName =
+    rowSet.rows
+      .flatMap((r) => (siblingTier === "시행규칙" ? r.rules : r.decrees))
+      .map((i) => i.lawName)
+      .find((n) => n) || ""
+
+  // 이 조문을 위임한 모법 조문 수집 (같은 모법 조문이 여러 행에 걸치면 하나로 묶는다)
+  const hitMap = new Map<string, ReverseHit>()
+  for (const row of rowSet.rows) {
+    const mine = tier === "시행령" ? row.decrees : row.rules
+    if (!mine.some((i) => i.joNum && i.joNum.replace(/\s+/g, "") === target)) continue
+    const hit = hitMap.get(row.baseJo) || { baseJo: row.baseJo, baseJoNum: row.baseJoNum, siblings: [] }
+    for (const s of siblingTier === "시행규칙" ? row.rules : row.decrees) {
+      if (!s.joNum) continue
+      const label = `${s.lawName || siblingLawName} ${s.joNum}${s.title ? ` (${s.title})` : ""}`.trim()
+      if (!hit.siblings.includes(label)) hit.siblings.push(label)
+    }
+    hitMap.set(row.baseJo, hit)
+  }
+  const hits = [...hitMap.values()].sort((a, b) => a.baseJo.localeCompare(b.baseJo))
+
+  const self = `「${law.lawName}」 ${articleLabel}`
+  const notice =
+    `※ 역방향 조회 — 법제처 3단비교는 모법(「${baseName}」) 조문 기준으로만 색인됩니다. ` +
+    `${self} — 이 조문을 **위임한 모법 조문**을 역으로 찾은 결과입니다`
+
+  if (hits.length === 0) {
+    return (
+      `(${self} — 이 조문을 위임한 모법 조문을 3단비교에서 찾지 못했습니다 — ` +
+      `위임 매핑 미발견이지 "위임 근거 없음"이 아닙니다.\n` +
+      `💡 「${baseName}」 조문으로 fin_article을 호출하면 정방향 위임 목록을 볼 수 있습니다.\n` +
+      `⚠️ LLM은 모법 조문을 추측하지 마세요)\n${notice}`
+    )
+  }
+
+  // 모법 조문 본문 동봉 — 상위 REVERSE_BODY_LIMIT건. 정방향 bodyMap과 같은 방식이다
+  // (모법 MST를 findLaws로 해소하고, 정확 일치가 없으면 목록 표시로 폴백)
+  const bodyMap = new Map<string, string>()
+  const needBody = hits.slice(0, REVERSE_BODY_LIMIT)
+  const bodyAborter = new AbortController()
+  const onOuterAbort = () => bodyAborter.abort()
+  outerSignal.addEventListener("abort", onOuterAbort, { once: true })
+  const fetchBodies = (async () => {
+    const baseLaws = await findLaws(apiClient, baseName, undefined, 3, 100, bodyAborter.signal)
+    // 정확 일치가 없으면 본문을 붙이지 않는다 — 엉뚱한 법령의 조문을 "모법 본문"으로
+    // 동봉하는 것이 이 수정이 막으려는 바로 그 오류다
+    const base = baseLaws.find((l) => resolvedLawMatches(baseName, l.lawName))
+    if (!base) return
+    await Promise.all(
+      needBody.map(async (h) => {
+        try {
+          const jt = await apiClient.fetchApi({
+            endpoint: "lawService.do",
+            target: "law",
+            type: "JSON",
+            extraParams: { MST: base.mst, JO: buildJO(h.baseJoNum) },
+            signal: bodyAborter.signal,
+            expectedJsonKey: "법령",
+          })
+          const body = renderArticleUnits(JSON.parse(jt)?.법령)
+          if (body) bodyMap.set(h.baseJo, body)
+        } catch {
+          /* 개별 조문 실패는 목록 표시로 폴백 (부분 실패 계약) */
+        }
+      })
+    )
+  })()
+  let bodyTimer: ReturnType<typeof setTimeout> | undefined
+  await Promise.race([
+    fetchBodies,
+    new Promise((r) => {
+      bodyTimer = setTimeout(() => {
+        bodyAborter.abort()
+        r(undefined)
+      }, REVERSE_BODY_MS)
+    }),
+  ]).catch(() => {})
+  clearTimeout(bodyTimer)
+  outerSignal.removeEventListener("abort", onOuterAbort)
+
+  let out = `${notice}\n\n`
+  for (const h of hits) {
+    out += `[모법] ${baseName} ${h.baseJoNum}\n`
+    const body = bodyMap.get(h.baseJo)
+    if (body) out += `${cleanHtml(body).trim()}\n`
+    if (h.siblings.length > 0) out += `  ↳ 같은 위임 행의 ${siblingTier}: ${h.siblings.join(" · ")}\n`
+    out += `\n`
+  }
+  // 상한 초과와 조회 실패는 원인이 다르다 — 뭉뚱그리면 재시도할 이유가 사라진다
+  const missing = hits.length - bodyMap.size
+  if (missing > 0) {
+    const causes: string[] = []
+    const overflow = hits.length - needBody.length
+    const failedCount = needBody.length - bodyMap.size
+    if (overflow > 0) causes.push(`${overflow}건은 상위 ${REVERSE_BODY_LIMIT}건 상한 초과(응답 시간 예산)`)
+    if (failedCount > 0) causes.push(`${failedCount}건은 조회 실패·시간 초과 — "본문 없음"이 아님`)
+    out += `\n※ 모법 조문 본문 ${missing}건은 조문 번호만 표시했습니다 (${causes.join(" / ")}). 본문은 fin_article("${baseName}", "<조번호>")로 조회하세요`
+  }
+  return out.trim()
+}
+
 // ── 메인 핸들러 ─────────────────────────────────────────────────────────
 export async function handleFinArticle(
   apiClient: LawApiClient,
@@ -345,6 +495,9 @@ export async function handleFinArticle(
 
   // ── ② 병렬: 조문 본문 ∥ 3단 위임 ∥ 별표 ──
   let joTitleForRulings = ""
+  // 위임 섹션 제목은 방향에 따라 달라진다 (정방향=하위법령 위임 / 역방향=모법 근거).
+  // threeTierP 안에서 갱신하고 Promise.all 이후에 읽는다 (joTitleForRulings와 같은 방식)
+  let delegationHeader = "■ 시행령·시행규칙 위임"
   // deadline 도달 시 진행 중 업스트림 호출을 함께 취소 — 백그라운드 쿼터 소모 방지 (Opus I3)
   const aborter = new AbortController()
   const abortOnDeadline = () => aborter.abort()
@@ -386,7 +539,30 @@ export async function handleFinArticle(
       }
     }
     const jsonText = await apiClient.getThreeTier({ mst: law.mst, knd: "2", signal: aborter.signal })
-    const data = parseThreeTierDelegation(JSON.parse(jsonText))
+    const rawJson = JSON.parse(jsonText)
+
+    // 3단비교 배열은 **기준법령(모법) 조번호**로 색인된다 — 시행령 MST로 호출해도
+    // 모법 매핑이 온다(2026-09-05 실측). 기준법령이 조회한 법령 자신이 아니면
+    // 같은 조번호로 찾은 항목은 **다른 법령의 조문**이므로 정방향 조회를 쓰면 안 된다.
+    const rowSet = parseThreeTierRows(rawJson)
+    const tier = lawTierOf(law.lawName)
+    const baseIsSelf = rowSet.baseLawName ? resolvedLawMatches(rowSet.baseLawName, law.lawName) : tier === "본법"
+    if (!baseIsSelf) {
+      delegationHeader = "■ 모법 위임 근거 (역방향)"
+      return {
+        status: "성공" as const,
+        text: await renderReverseDelegation({
+          apiClient,
+          law,
+          tier,
+          articleLabel,
+          rowSet,
+          outerSignal: aborter.signal,
+        }),
+      }
+    }
+
+    const data = parseThreeTierDelegation(rawJson)
     const target = data.articles.find((a) => a.joNum.replace(/\s+/g, "") === articleLabel.replace(/\s+/g, ""))
     if (!target || target.delegations.length === 0) {
       return { status: "성공" as const, text: "(위임 조문 없음)" }
@@ -602,7 +778,7 @@ export async function handleFinArticle(
     ``,
     sec({ ...sections[0] }, `■ ${law.lawName} ${articleLabel}${statusMark}`),
     ``,
-    sec({ ...sections[1] }, `■ 시행령·시행규칙 위임`),
+    sec({ ...sections[1] }, delegationHeader),
     ``,
     sec({ ...sections[2] }, `■ 관련 국세청 예규${efYd ? " [현행 기준 — 기준일 필터 없음]" : ""}`),
     ``,
