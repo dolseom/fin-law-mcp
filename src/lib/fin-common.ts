@@ -44,9 +44,80 @@ export async function withDeadline(
   }
 }
 
+// ── 예산 절단 ───────────────────────────────────────────────────────────
+// 조문은 앞의 원칙과 뒤의 단서·예외가 한 쌍이다. 문자 수로만 자르면 단서가
+// 통째로 사라지고, 남은 절반은 "원칙만 있는 조문"으로 읽혀 오독이 눈에 띄지
+// 않는다 (Codex 제품 검토). → 절단 지점을 의미 경계로 당기고, 무엇이 빠졌는지
+// 를 고지에 적는다. 우선순위: 항 → 호 → 줄바꿈 → 문장 끝 → 그대로 자르기.
+// 단, 당긴 결과가 예산의 60% 미만이면 너무 많이 버리는 것이라 다음 순위로 내려간다.
+
+/** 경계로 당긴 뒤 남아야 하는 최소 비율 — 이보다 짧아지면 다음 우선순위로 */
+const TRUNCATE_MIN_RATIO = 0.6
+
+// ⚠ 아래 표지 정규식은 renderArticleUnits(tools/article.ts)의 출력 형식에 묶여 있다.
+//   항 = 2칸 들여쓰기 + 원숫자(①) 또는 괄호숫자((①)·(1)), 호 = 4칸 + "N." · "N의M.",
+//   목 = 6칸. 렌더러 들여쓰기를 바꾸면 여기도 같이 바꿔야 한다.
+/** 항 경계 (조문 경계 "제N조" 포함) */
+const HANG_BOUNDARY = /\n(?: {2}\(?(?:[①-⑳㉑-㉟㊱-㊿]|\d+\))|제\d+조(?:의\d+)?)/g
+/** 호 경계 */
+const HO_BOUNDARY = /\n {4}\d+(?:의\d+)?\./g
+/** 문장 끝 "…다." — 앞 글자가 공백이 아닐 것을 요구해 목번호 "다."(들여쓰기 뒤)를 배제한다 */
+const SENTENCE_END = /\S다\.(?=\s|$)/g
+
+/** s 안에서 re의 마지막 매치 위치. after=true면 매치 끝, false면 매치 시작 */
+function lastBoundary(re: RegExp, s: string, after: boolean): number {
+  re.lastIndex = 0
+  let cut = -1
+  let m: RegExpExecArray | null
+  while ((m = re.exec(s)) !== null) {
+    cut = after ? m.index + m[0].length : m.index
+    if (m[0].length === 0) re.lastIndex++
+  }
+  return cut
+}
+
+/** 잘려나간 부분의 첫 항/호/조 표지 — "무엇이 빠졌는지"를 고지에 적기 위한 것 */
+function omittedMarker(rest: string): string {
+  const cands: Array<{ at: number; label: string }> = []
+  const hang = /\n {2}\(?([①-⑳㉑-㉟㊱-㊿])/.exec(rest)
+  if (hang) cands.push({ at: hang.index, label: `${hang[1]}항` })
+  const ho = /\n {4}(\d+(?:의\d+)?)\./.exec(rest)
+  if (ho) cands.push({ at: ho.index, label: `제${ho[1]}호` })
+  const jo = /\n(제\d+조(?:의\d+)?)/.exec(rest)
+  if (jo) cands.push({ at: jo.index, label: jo[1] })
+  cands.sort((a, b) => a.at - b.at)
+  return cands[0]?.label ?? ""
+}
+
 export function truncateWithHint(text: string, max: number, hint: string): string {
   if (text.length <= max) return text
-  return text.slice(0, max) + `\n… (예산 ${max.toLocaleString()}자 초과로 절단 — 전체는 ${hint})`
+  const cap = Math.max(0, max)
+  const head = text.slice(0, cap)
+  const floor = cap * TRUNCATE_MIN_RATIO
+
+  // 경계 절단(항·호)은 잘린 지점이 곧 다음 단위의 시작이라 "②항부터 생략"이 정확하다.
+  // 줄·문장·그대로 자르기는 단위 중간일 수 있어 "이하 생략"으로 약하게 적는다.
+  let cut = cap
+  let atUnitStart = false
+  for (const c of [
+    { at: lastBoundary(HANG_BOUNDARY, head, false), unit: true },
+    { at: lastBoundary(HO_BOUNDARY, head, false), unit: true },
+    { at: head.lastIndexOf("\n"), unit: false },
+    { at: lastBoundary(SENTENCE_END, head, true), unit: false },
+  ]) {
+    if (c.at > 0 && c.at >= floor) {
+      cut = c.at
+      atUnitStart = c.unit
+      break
+    }
+  }
+
+  const marker = omittedMarker(text.slice(cut))
+  const omitted = marker ? (atUnitStart ? `${marker}부터 생략, ` : `${marker} 등 이하 생략, `) : ""
+  return (
+    text.slice(0, cut).replace(/[ \t\n]+$/, "") +
+    `\n… (예산 ${max.toLocaleString()}자 초과로 절단 — ${omitted}전체는 ${hint})`
+  )
 }
 
 export const SOURCE_FOOTER = "출처: 법제처 국가법령정보센터 · 법적 효력이 필요한 판단에는 원문을 확인하세요"
