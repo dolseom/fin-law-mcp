@@ -52,7 +52,8 @@ export function truncateWithHint(text: string, max: number, hint: string): strin
 export const SOURCE_FOOTER = "출처: 법제처 국가법령정보센터 · 법적 효력이 필요한 판단에는 원문을 확인하세요"
 
 // ── 축약 재검색 사다리 (자체 패치 #5 원칙: 진짜 0건에만 축약, 오류에는 재시도 금지) ──
-const RULING_STOPWORDS = new Set(["등의", "등", "및", "의", "에", "관한", "대한", "따른"])
+/** 축약 시 버리는 어절. ruling-search는 자체 사다리를 쓰므로 이 목록을 직접 참조한다 (복제 금지) */
+export const RULING_STOPWORDS = new Set(["등의", "등", "및", "의", "에", "관한", "대한", "따른"])
 
 export function ladderQueries(base: string, maxSteps = 4): string[] {
   const toks = base.split(/\s+/).filter((t) => t && !RULING_STOPWORDS.has(t))

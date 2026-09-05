@@ -19,10 +19,10 @@ import {
 import {
   type SectionResult,
   failed,
-  ladderQueries,
   parseNtsRulings,
   truncateWithHint,
   AUTHORITY_FOOTER,
+  RULING_STOPWORDS,
   SOURCE_FOOTER,
 } from "../lib/fin-common.js"
 
@@ -98,16 +98,77 @@ function normDate(raw: string): string {
   return (raw || "").replace(/[^\d]/g, "").slice(0, 8)
 }
 
-/** 도메인별 검색 — 0건이면 사다리 1회 축약 (오류에는 재시도 금지) */
+/**
+ * 도메인당 검색 호출 상한 (원 검색어 1 + 축약 3).
+ * 법제처 분당 30회 한도를 도메인 4곳이 병렬로 나눠 쓰므로 4회를 넘기지 않는다.
+ */
+const LADDER_MAX_CALLS = 4
+
+/**
+ * ruling-search 전용 축약 사다리 — 양끝을 번갈아 깎아 1어절까지 내려간다.
+ *
+ * 원문 → 꼬리 1어절 제거 → 머리 1어절 제거 → 꼬리 제거 → 머리 제거 …
+ *   "임직원 경조사비 복리후생비 손금" → "임직원 경조사비 복리후생비" → "경조사비 복리후생비" → "경조사비"
+ *
+ * 공용 ladderQueries는 앞토막만 잘라(3→2→1어절) 마지막에 첫 어절만 남긴다. 실무자 자연어는
+ * [주체][주제어][쟁점 동사성 명사] 순이라 정보가 가운데 몰려 있어, 앞토막 축약은 주제어를
+ * 먼저 버린다("임직원 경조사비 복리후생비 손금"의 종착점이 "경조사비"가 아니라 "임직원").
+ * 꼬리를 먼저 깎는 이유는 "손금·여부·해당" 류 쟁점어가 꼬리에 오기 때문.
+ *
+ * 공용 함수를 고치면 article·law-search·nts-ruling까지 함께 바뀌므로 순서 생성만 국소화하고,
+ * 전처리(불용어 제거)는 공용 목록 RULING_STOPWORDS를 그대로 참조한다 (목록 복제 금지).
+ * ⚠ 예산 4회 안에서 1어절에 닿는 것은 4어절 이하 질의뿐이다. 5어절 이상은 상한에 먼저 걸린다.
+ */
+function buildLadder(query: string): string[] {
+  const normalized = query.replace(/\s+/g, " ").trim()
+  const toks = query.split(/\s+/).filter((t) => t && !RULING_STOPWORDS.has(t))
+  // 원문을 반드시 1순위로 — 불용어("및"·"관한")가 공식 명칭의 일부인 경우가 있다
+  const qs: string[] = [normalized]
+  let lo = 0
+  let hi = toks.length
+  let dropTail = true
+  while (hi - lo > 1) {
+    if (dropTail) hi--
+    else lo++
+    dropTail = !dropTail
+    qs.push(toks.slice(lo, hi).join(" "))
+  }
+  // 2어절 질의는 축약 후보가 양끝 두 어절뿐이고 예산(4회)이 남는다 — 나머지 한쪽도 시도한다.
+  // 3어절 이상은 교대 축약만으로 주제어에 닿으므로 추가하지 않는다 (호출 예산 보존)
+  if (toks.length === 2) qs.push(toks[1])
+  return [...new Set(qs.filter(Boolean))].slice(0, LADDER_MAX_CALLS)
+}
+
+/**
+ * 도메인별 검색 — 0건이면 양끝을 번갈아 깎아 단계적으로 축약한다 (최대 4회 호출).
+ *
+ * ⚠ 다음 단계로 넘어가는 조건은 "정상 조회 결과 0건" 하나뿐이다. 오류·타임아웃·429는
+ *   throw되어 catch로 빠지며 절대 재시도하지 않는다 — 오류를 0건으로 위장하면 호출측이
+ *   "그런 해석 없음"으로 단정한다 (이 저장소의 최악 결함).
+ * ⚠ 어떤 단계가 결과를 냈는데 기준일 필터로 전부 걸러진 경우는 "0건 조회"가 아니므로
+ *   사다리를 더 내려가지 않는다 (그 검색어에는 자료가 있다는 사실이 이미 확인됐다).
+ */
 async function searchDomain(
   apiClient: LawApiClient,
   domain: Domain,
   query: string,
   basisYmd?: string
-): Promise<SectionResult & { items?: UnifiedItem[]; usedQuery?: string; excludedByBasis?: number; truncated?: number }> {
-  const queries = ladderQueries(query, 2)
+): Promise<
+  SectionResult & {
+    items?: UnifiedItem[]
+    usedQuery?: string
+    /** 실제로 시도할 수 있었던 축약 사다리 전체 (0건 보고용) */
+    ladder?: string[]
+    /** 결과를 낸(또는 마지막으로 시도한) 사다리 단계. 0 = 원 검색어 */
+    ladderStep?: number
+    excludedByBasis?: number
+    truncated?: number
+  }
+> {
+  const queries = buildLadder(query)
   try {
-    for (const q of queries) {
+    for (let step = 0; step < queries.length; step++) {
+      const q = queries[step]
       let items: UnifiedItem[] = []
       if (domain === "nts") {
         const xml = await apiClient.fetchApi({ endpoint: "lawSearch.do", target: "ntsCgmExpc", type: "XML", extraParams: { query: q, display: "10" }, expectedRoot: "CgmExpc" })
@@ -185,12 +246,22 @@ async function searchDomain(
           text: "",
           items: filtered.slice(0, 5),
           usedQuery: q,
+          ladder: queries,
+          ladderStep: step,
           excludedByBasis,
           truncated: Math.max(filtered.length - 5, 0),
         }
       }
     }
-    return { status: "성공", text: "", items: [], usedQuery: queries[queries.length - 1] }
+    // 사다리 전 단계가 정상 조회 0건 — 축약으로는 더 넓힐 수 없다는 사실을 그대로 넘긴다
+    return {
+      status: "성공",
+      text: "",
+      items: [],
+      usedQuery: queries[queries.length - 1],
+      ladder: queries,
+      ladderStep: queries.length - 1,
+    }
   } catch (e) {
     return failed(e instanceof Error ? e.message : String(e))
   }
@@ -230,13 +301,29 @@ export async function handleFinRulingSearch(
   for (const { domain, r } of okDomains) {
     const label = DOMAIN_LABEL[domain]
     const items = r.items || []
-    const ladderNote = r.usedQuery && r.usedQuery !== query ? ` (검색어 축약: "${r.usedQuery}")` : ""
+    // 몇 단 축약했는지 밝힌다 — 2단 이상이면 원 질문과 검색어가 크게 달라져 결과 해석이 바뀐다
+    const step = r.ladderStep ?? 0
+    const ladderNote =
+      r.usedQuery && r.usedQuery !== query
+        ? step >= 2
+          ? ` (검색어 축약 ${step}단: "${r.usedQuery}")`
+          : ` (검색어 축약: "${r.usedQuery}")`
+        : ""
     const basisNote = r.excludedByBasis ? ` · 기준일 이후 ${r.excludedByBasis}건 제외` : ""
     if (items.length === 0) {
       // 기준일 때문에 비었으면 "자료 없음"과 구분해 표기한다 (조용한 실패 금지)
-      text += r.excludedByBasis
-        ? `\n■ ${label} — 0건${ladderNote} (검색된 ${r.excludedByBasis}건이 모두 기준일 이후 — 기준일 이전 자료는 검색 상위에 없을 수 있음)\n`
-        : `\n■ ${label} — 0건${ladderNote} (정상 조회 결과 없음)\n`
+      if (r.excludedByBasis) {
+        text += `\n■ ${label} — 0건${ladderNote} (검색된 ${r.excludedByBasis}건이 모두 기준일 이후 — 기준일 이전 자료는 검색 상위에 없을 수 있음)\n`
+        continue
+      }
+      // 축약 사다리를 끝까지 내려가고도 0건임을 도메인마다 표시한다.
+      // 사다리 검색어 자체는 도메인 전체가 동일하므로 아래에서 한 번만 나열한다 (중복 제거)
+      const ladder = r.ladder || []
+      const zeroNote =
+        ladder.length > 1
+          ? ` (축약 ${ladder.length}단계 전부 0건 — 정상 조회 결과 없음)`
+          : ` (정상 조회 결과 없음)`
+      text += `\n■ ${label} — 0건${zeroNote}\n`
       continue
     }
     const truncNote = r.truncated ? ` · 검색 ${items.length + r.truncated}건 중 최신 ${items.length}건 표시` : ""
@@ -245,6 +332,18 @@ export async function handleFinRulingSearch(
   }
   for (const { domain, r } of failedDomains) {
     text += `\n■ ${DOMAIN_LABEL[domain]} — ⚠ 조회 실패: ${r.reason} ("없음"이 아니라 확인 불가)\n`
+  }
+
+  // 축약 사다리를 끝까지 내려가고도 0건인 도메인이 있으면 실제로 시도한 검색어를 한 줄로 밝힌다.
+  // 사다리는 질의어만으로 정해지므로 도메인마다 같다 — 도메인 줄마다 반복하지 않고 여기서 한 번만.
+  // 이걸 안 밝히면 실무자가 "그런 해석이 없다"로 단정한다 (실제로는 검색어를 바꿔야 하는 상황)
+  const exhausted = okDomains.find(
+    ({ r }) => (r.items?.length ?? 0) === 0 && !r.excludedByBasis && (r.ladder?.length ?? 0) > 1
+  )
+  if (exhausted) {
+    const ladder = exhausted.r.ladder || []
+    // 다른 도메인은 결과가 있을 수 있으므로 "0건인 도메인은"으로 한정한다
+    text += `\n※ 0건인 도메인은 축약 사다리 ${ladder.map((q) => `"${q}"`).join(" → ")} ${ladder.length}단계를 모두 시도한 결과입니다 — 자료가 없다는 뜻이 아니라 검색어를 바꿔야 한다는 뜻입니다 (다른 실무 용어로 재검색)`
   }
 
   if (totalHits > 0) {
