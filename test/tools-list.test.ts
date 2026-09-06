@@ -71,16 +71,18 @@ function listTools(ntsBodyEnabled: string): Promise<string[]> {
   })
 }
 
-const BASE_TOOLS = ["fin_article", "fin_law_search", "fin_ruling_search", "fin_annex", "fin_verify", "fin_calc", "fin_ping"]
+// ⚠ 나열 순서가 곧 계약이다 — 아래 toEqual이 순서까지 본다.
+// 진입 도구 fin_topic이 맨 앞이어야 한다 (index.ts의 tools 배열 주석 참조).
+const BASE_TOOLS = ["fin_topic", "fin_article", "fin_law_search", "fin_ruling_search", "fin_annex", "fin_verify", "fin_calc", "fin_ping"]
 
 describe.skipIf(!hasBuild)("tools/list — fin_nts_ruling 조건부 등록", () => {
-  it("FIN_NTS_BODY_ENABLED=false면 7개 (fin_nts_ruling 미노출)", async () => {
+  it("FIN_NTS_BODY_ENABLED=false면 8개 (fin_nts_ruling 미노출)", async () => {
     const tools = await listTools("false")
     expect(tools).toEqual(BASE_TOOLS)
     expect(tools).not.toContain("fin_nts_ruling")
   }, 30_000)
 
-  it("FIN_NTS_BODY_ENABLED=true면 8개 (fin_nts_ruling 노출)", async () => {
+  it("FIN_NTS_BODY_ENABLED=true면 9개 (fin_nts_ruling 노출)", async () => {
     const tools = await listTools("true")
     expect(tools).toContain("fin_nts_ruling")
     expect(tools).toHaveLength(BASE_TOOLS.length + 1)

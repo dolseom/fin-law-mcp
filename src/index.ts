@@ -13,6 +13,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { LawApiClient } from "./lib/api-client.js"
+import { FIN_TOPIC_TOOL, handleFinTopic } from "./tools/topic.js"
 import { FIN_ARTICLE_TOOL, handleFinArticle } from "./tools/article.js"
 import { FIN_LAW_SEARCH_TOOL, handleFinLawSearch } from "./tools/law-search.js"
 import { FIN_RULING_SEARCH_TOOL, handleFinRulingSearch } from "./tools/ruling-search.js"
@@ -65,6 +66,9 @@ const NTS_RULING_LISTED = isNtsBodyEnabled()
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
+    // 진입 도구를 가장 앞에 — 질문자는 조문 번호를 모른다. LLM이 fin_article부터
+    // 보면 없는 번호를 지어내고, fin_topic을 먼저 보면 표에서 번호를 받아 간다
+    FIN_TOPIC_TOOL,
     FIN_ARTICLE_TOOL,
     FIN_LAW_SEARCH_TOOL,
     FIN_RULING_SEARCH_TOOL,
@@ -159,6 +163,7 @@ async function probeLawApi(): Promise<{ line: string; hint?: string }> {
 }
 
 const HANDLERS: Record<string, (client: LawApiClient, args: unknown) => Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>> = {
+  fin_topic: handleFinTopic,
   fin_article: handleFinArticle,
   fin_law_search: handleFinLawSearch,
   fin_ruling_search: handleFinRulingSearch,

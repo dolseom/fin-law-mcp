@@ -16,6 +16,7 @@ export default defineConfig({
       "**/build/**",
       "test/golden-live.test.ts",
       "test/calc-constants-live.test.ts",
+      "test/topic-articles-live.test.ts",
     ],
   },
 })
