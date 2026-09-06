@@ -244,7 +244,11 @@ async function adminRuleNotice(
 const REVERSE_BODY_LIMIT = 2
 const REVERSE_BODY_MS = 3000
 
-/** 하위법령 이름에서 모법 이름 추정 — 기준법령명이 안 올 때만 쓰는 폴백 */
+/**
+ * 하위법령 이름에서 모법 이름 도출 ("소득세법 시행령" → "소득세법").
+ * 응답의 기준법령이 **이 법령의 모법이 맞는지** 대조하는 데 쓴다 —
+ * 표시용 폴백으로 쓰면 추측한 이름이 진짜 기준법령인 양 실린다 (2026-09-06 실측 결함).
+ */
 function guessBaseLawName(name: string): string {
   return name.replace(/\s*시행(?:령|규칙)\s*$/, "").trim()
 }
@@ -277,7 +281,33 @@ async function renderReverseDelegation(params: {
     )
   }
 
-  const baseName = rowSet.baseLawName || guessBaseLawName(law.lawName)
+  // 하위법령 입력이라 해서 응답의 기준법령이 이 법령의 **모법**이라는 보장은 없다.
+  // 법제처 3단비교는 조회한 MST와 **무관한 법령**의 표를 돌려줄 때가 있다
+  // (2026-09-06 raw 실측 18건 중 4건 어긋남. 괄호 안은 법률조문 배열 원본 행 수):
+  //   법인세법 시행령 283635 → 「법인세법」(499) ✓ / 부가가치세법 시행령 283641 → 「부가가치세법」(189) ✓
+  //   소득세법 시행령 286211 → 「법인세법」(499) ✗ / 소득세법 시행규칙 286379 → 「국세기본법」(216) ✗
+  //   법인세법 시행규칙 287787 → 「국세기본법」(216) ✗ / 근로기준법 시행령 270551 → 「공휴일에 관한 법률」(5) ✗
+  // 그 표에서 조번호만 맞춰 뒤지면 무관 법령의 조문이 "모법 위임 근거"로 확신형으로 실린다
+  // (실측: 「소득세법 시행령」 §38(근로소득의 범위)에 법인세법 §24(기부금의 손금불산입)).
+  // 기준법령명이 **빈** 경우도 같은 확정 불가다 — 어느 법령의 표인지 모르는 채 조번호만
+  // 맞추게 되므로, 이름을 추측해(guessBaseLawName) 진짜 기준법령인 양 쓰면 안 된다
+  // (실측: 국세징수법 시행규칙 284983은 기준법령명이 빈 채로 온다).
+  const expectedBase = guessBaseLawName(law.lawName)
+  if (!rowSet.baseLawName || !resolvedLawMatches(expectedBase, rowSet.baseLawName)) {
+    const cause = rowSet.baseLawName
+      ? `응답은 「${rowSet.baseLawName}」 조문 기준의 표여서 이 법령의 모법(「${expectedBase}」)이 아닙니다`
+      : `응답에 기준법령명이 없어 어느 법령 기준의 표인지 확정할 수 없습니다`
+    return (
+      `(위임 조회 생략 — 「${law.lawName}」 ${articleLabel}의 모법 위임 근거를 확정할 수 없습니다. ${cause}.\n` +
+      `법제처 3단비교가 조회한 법령과 무관한 표를 돌려주는 경우가 있어(실측), ` +
+      `조번호만 같은 **다른 법령의 조문**이 "모법"으로 실리는 것을 막기 위해 생략했습니다.\n` +
+      `💡 「${expectedBase}」의 해당 조문으로 fin_article을 호출하면 정방향 위임 목록을 볼 수 있습니다.\n` +
+      `⚠️ LLM은 모법 조문을 추측하지 마세요 — "위임 없음"이 아니라 조회 미지원입니다)`
+    )
+  }
+
+  // 여기 도달했으면 기준법령 = 이 법령의 모법임이 위에서 확인됐다 (추측한 이름은 쓰지 않는다)
+  const baseName = rowSet.baseLawName
   const siblingTier = tier === "시행령" ? "시행규칙" : "시행령"
   const target = articleLabel.replace(/\s+/g, "")
 
@@ -550,6 +580,8 @@ export async function handleFinArticle(
     // 같은 조번호로 찾은 항목은 **다른 법령의 조문**이므로 정방향 조회를 쓰면 안 된다.
     const rowSet = parseThreeTierRows(rawJson)
     const tier = lawTierOf(law.lawName)
+    // 역방향으로 넘어가도 끝이 아니다 — 기준법령이 이 하위법령의 **모법**이 맞는지는
+    // renderReverseDelegation이 다시 확인한다 (무관 법령의 표가 오는 실측 사례가 있다)
     const baseIsSelf = rowSet.baseLawName ? resolvedLawMatches(rowSet.baseLawName, law.lawName) : tier === "본법"
     if (!baseIsSelf) {
       delegationHeader = "■ 모법 위임 근거 (역방향)"
