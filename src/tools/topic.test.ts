@@ -12,7 +12,14 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { matchTopics, rankTopics, handleFinTopic, MAX_TOPICS, FIN_TOPIC_TOOL } from "./topic.js"
+import {
+  matchTopics,
+  rankTopics,
+  handleFinTopic,
+  MAX_TOPICS,
+  NO_MATCH_TRIGGERS_SHOWN,
+  FIN_TOPIC_TOOL,
+} from "./topic.js"
 import { FIN_CALC_TOOL } from "./calc.js"
 import { TOPICS, TOPICS_VERIFIED_AT, type Topic } from "../data/topics.js"
 
@@ -226,25 +233,93 @@ describe("handleFinTopic — 출력", () => {
     for (const t of TOPICS) expect(text, `주제 목록에 ${t.name}이 없습니다`).toContain(t.name)
   })
 
-  it("0건 안내의 fin_law_search 인자 JSON도 따옴표를 깨뜨리지 않는다", async () => {
-    // 손으로 문자열을 이었다면 여기서 JSON.parse가 터진다
-    const 질문 = 'zzz 따옴표 "포함" \\역슬래시 qqq'
-    const res = await handleFinTopic(null, { question: 질문 })
-    const m = /^ +(\{"query":.*\})$/m.exec(res.content[0].text)
-    expect(m, "fin_law_search 인자 JSON이 없습니다").not.toBeNull()
-    expect(JSON.parse(m![1])).toEqual({ query: 질문 })
+  it("0건은 '그런 제도가 없다'가 아니라 '이 표에 없다'라고 말한다 (판정이 아님)", async () => {
+    const text = (await handleFinTopic(null, { question: "zzz 아무 데도 없는 말 qqq" })).content[0].text
+    expect(text).toContain("판정이 아닙니다")
+    expect(text).toContain("이 표에 그 주제가 없다")
+    // fin_law_search의 0건도 "법이 없다"로 읽히면 안 된다는 경고가 함께 있어야 한다
+    expect(text).toContain("그런 법령이 없다")
   })
 
-  it("하단 고지 두 줄이 항상 붙는다 (매칭 여부와 무관)", async () => {
-    for (const q of [확실한질문, "zzz 아무 데도 없는 말 qqq"]) {
-      const text = (await handleFinTopic(null, { question: q })).content[0].text
-      expect(text, q).toContain("큐레이션 표")
-      expect(text, q).toContain("fin_article로 확인하세요")
-      expect(text, q).toContain(TOPICS_VERIFIED_AT)
-      expect(text, q).toContain("이 도구는 사안을 판단하지 않습니다")
-      // 이 응답은 법제처 원문이 아니다 — 출처 문구를 달면 원문처럼 읽힌다
-      expect(text, q).not.toContain("출처: 법제처")
+  it("0건 안내가 사용자 질문 문장을 다른 도구의 인자로 넘기지 않는다", async () => {
+    // 실측 결함(9/6): 질문 문장을 fin_law_search의 query로 주면 그 도구는 반드시 0건을 내고,
+    // 돌아온 "✗없음"이 "그런 법령은 없다"로 읽혀 (a)형 오답 경로가 된다.
+    // 표식을 심어, 질문 조각이 응답 어디에도 실리지 않는다는 것을 고정한다.
+    const 표식 = "ZZQQ표식XY"
+    const 질문 = `${표식} 직원이 갑자기 그만둔다는데 입사 2년 3개월이면 얼마 줘야해요`
+    const text = (await handleFinTopic(null, { question: 질문 })).content[0].text
+
+    expect(text, "0건 안내에 사용자 질문이 그대로 실렸습니다").not.toContain(표식)
+    expect(text).not.toContain("얼마 줘야해요")
+
+    // 응답에 남은 인자 JSON은 모두 파싱되고(손으로 이은 문자열이 아님),
+    // 어느 값도 사용자 질문에서 온 것이 아니어야 한다
+    const jsons = [...text.matchAll(/\{"[^\n{}]*\}/g)].map((m) => JSON.parse(m[0]) as Record<string, string>)
+    expect(jsons.length, "다음 수의 인자 JSON이 한 벌도 없습니다").toBeGreaterThan(0)
+    for (const j of jsons) {
+      for (const v of Object.values(j)) {
+        expect(질문, `인자 JSON에 질문 조각이 실렸습니다: ${JSON.stringify(j)}`).not.toContain(v)
+      }
     }
+  })
+
+  it("0건 안내는 주제 이름과 대표 트리거를 함께 보여 준다", async () => {
+    const text = (await handleFinTopic(null, { question: "zzz 아무 데도 없는 말 qqq" })).content[0].text
+    for (const t of TOPICS) {
+      // 주제 수·이름을 하드코딩하지 않고 TOPICS에서 끌어 쓴다 (표가 늘어도 이 테스트는 산다)
+      const shown = t.triggers.slice(0, NO_MATCH_TRIGGERS_SHOWN)
+      expect(shown.length, `${t.id}: 트리거가 없습니다`).toBeGreaterThan(0)
+      const 줄 = `  · ${t.name} — ${shown.map((s) => `"${s}"`).join(", ")}`
+      expect(text, `${t.id}: 이름과 대표 트리거가 한 줄에 없습니다`).toContain(줄)
+    }
+  })
+
+  it("0건 안내에 보여 준 트리거를 그대로 넣으면 그 주제가 실제로 걸린다", async () => {
+    // 안내가 거짓말이 아님을 고정한다. rankTopics(전체)로 본다 — 흔한 말이 여러 주제에
+    // 걸리면 MAX_TOPICS 상한에 잘릴 수 있고, 안내가 약속한 것은 "1위"가 아니라 "후보에 든다"이다.
+    for (const t of TOPICS) {
+      for (const trigger of t.triggers.slice(0, NO_MATCH_TRIGGERS_SHOWN)) {
+        const ids = rankTopics(trigger).map((m) => m.topic.id)
+        expect(ids, `${t.id}: 안내한 트리거 "${trigger}"를 넣어도 걸리지 않습니다`).toContain(t.id)
+      }
+    }
+  })
+
+  it("0건 안내가 길어져도 한 주제는 한 줄이다 (주제가 늘어도 형식이 무너지지 않는다)", async () => {
+    const text = (await handleFinTopic(null, { question: "zzz 아무 데도 없는 말 qqq" })).content[0].text
+    const 주제줄 = text.split("\n").filter((l) => TOPICS.some((t) => l.startsWith(`  · ${t.name} — `)))
+    expect(주제줄).toHaveLength(TOPICS.length)
+  })
+
+  it("매칭 응답의 하단 고지 두 줄은 종전 그대로다", async () => {
+    const text = (await handleFinTopic(null, { question: 확실한질문 })).content[0].text
+    expect(text).toContain("큐레이션 표")
+    expect(text).toContain("fin_article로 확인하세요")
+    expect(text).toContain(TOPICS_VERIFIED_AT)
+    expect(text).toContain("이 도구는 사안을 판단하지 않습니다")
+    // 이 응답은 법제처 원문이 아니다 — 출처 문구를 달면 원문처럼 읽힌다
+    expect(text).not.toContain("출처: 법제처")
+    // 두 줄이 이 순서로 응답의 맨 끝에 붙는다 — README의 실측 출력이 이 형태다
+    const 끝두줄 = text.split("\n").slice(-2)
+    expect(끝두줄[0]).toContain("위 조문은")
+    expect(끝두줄[1]).toContain("이 도구는 사안을 판단하지 않습니다")
+  })
+
+  it("0건 응답에는 '위 조문' 고지가 붙지 않는다 — 가리킬 조문이 없다", async () => {
+    const text = (await handleFinTopic(null, { question: "zzz 아무 데도 없는 말 qqq" })).content[0].text
+    // 조문을 하나도 내놓지 않은 응답에서 "위 조문"·"대조일"은 없는 것을 있다고 암시한다
+    expect(text, "0건인데 '위 조문'을 가리킵니다").not.toContain("위 조문")
+    expect(text, "0건인데 큐레이션 조문 고지가 붙었습니다").not.toContain("큐레이션 표")
+    expect(text, "0건인데 조문 대조일이 실렸습니다").not.toContain(TOPICS_VERIFIED_AT)
+    // 판단하지 않는다는 고지는 0건에도 남는다
+    expect(text).toContain("이 도구는 사안을 판단하지 않습니다")
+    expect(text).not.toContain("출처: 법제처")
+  })
+
+  it("'판단하지 않는다' 고지는 두 경로에서 같은 문장이다 (한쪽만 표류하지 않는다)", async () => {
+    const 마지막줄 = async (q: string) =>
+      (await handleFinTopic(null, { question: q })).content[0].text.split("\n").at(-1)
+    expect(await 마지막줄("zzz 아무 데도 없는 말 qqq")).toBe(await 마지막줄(확실한질문))
   })
 
   it("판정 기호(✓·✗)를 내지 않는다 — 진입 도구는 판정하지 않는다", async () => {

@@ -118,13 +118,22 @@ const LABELS: Record<string, string> = {
 }
 
 /**
- * 하단 고지 두 줄 — 표가 낡을 수 있다는 것과, 이 도구가 판단하지 않는다는 것.
+ * 표가 낡을 수 있다는 고지 — **조문을 실제로 내놓은 응답에만** 붙인다.
  * 마지막 대조일을 함께 실어 "얼마나 낡았는지"를 사용자가 스스로 판단하게 한다.
+ *
+ * 0건 응답에는 붙이지 않는다: "위 조문"이 가리킬 조문도, 대조일이 낡음을 말해 줄 대상도
+ * 그 응답에는 없다. 없는 것을 있다고 암시하는 문장이 된다.
  */
-const FOOTER = [
-  `※ 위 조문은 사람이 적어 둔 **큐레이션 표**입니다 — 조문 본문은 반드시 fin_article로 확인하세요 (표의 조문을 실 API로 마지막 대조한 날: ${TOPICS_VERIFIED_AT}).`,
-  `※ 이 도구는 사안을 판단하지 않습니다 — 손금·과세 여부와 금액은 조문 본문·예규와 사실관계로 판단하세요.`,
-]
+const FOOTER_CURATED = `※ 위 조문은 사람이 적어 둔 **큐레이션 표**입니다 — 조문 본문은 반드시 fin_article로 확인하세요 (표의 조문을 실 API로 마지막 대조한 날: ${TOPICS_VERIFIED_AT}).`
+
+/**
+ * 이 도구가 판단하지 않는다는 고지 — **매칭 여부와 무관하게 항상** 붙는다.
+ * 0건이라고 해서 판정 도구로 오해될 여지가 줄어드는 것은 아니다.
+ */
+const FOOTER_NOT_JUDGED = `※ 이 도구는 사안을 판단하지 않습니다 — 손금·과세 여부와 금액은 조문 본문·예규와 사실관계로 판단하세요.`
+
+/** 매칭이 있을 때의 하단 고지 두 줄 — 문구·순서 고정 (README의 실측 출력이 이 형태다) */
+const FOOTER = [FOOTER_CURATED, FOOTER_NOT_JUDGED]
 
 function renderTopic(m: TopicMatch, basisDate?: string): string[] {
   const t = m.topic
@@ -164,25 +173,59 @@ function renderTopic(m: TopicMatch, basisDate?: string): string[] {
 }
 
 /**
- * 매칭 0건 — 판정하지 않고 안내만 한다.
+ * 0건 안내에서 주제마다 함께 보여 주는 대표 트리거 수.
+ *
+ * 3개인 근거: 주제 이름만 나열하면 실무자는 "퇴직금 (일반 근로자)"를 보고도 **무슨 말을
+ * 넣어야 걸리는지** 모른다. 3개면 하나가 사용자의 어휘와 어긋나도 둘이 남고, 주제가
+ * 12개여도 한 줄에 다 들어가 화면이 무너지지 않는다 (주제가 늘면 줄 수만 늘고 줄 길이는 그대로).
+ */
+export const NO_MATCH_TRIGGERS_SHOWN = 3
+
+/**
+ * 매칭 0건 — 판정하지 않고, **두 번째 시도로 가는 길**만 준다.
  *
  * isError가 아니다: 도구는 물어본 것("표에 이 질문에 걸리는 주제가 있는가")을 정확히 답했다.
  * isError로 만들면 클라이언트에 따라 이 본문이 통째로 감춰져, 사용자는 다음 수도
  * 표에 무엇이 있는지도 보지 못한다 (fin_ping 진단 실패와 같은 판단).
+ *
+ * ⚠ 사용자 질문 문장을 다른 도구의 인자로 실어 보내지 않는다 (실측 결함, 9/6).
+ *   질문 문장을 fin_law_search의 query로 주면 그 도구는 **반드시** 0건을 낸다 — 법령"명"을
+ *   찾는 도구이기 때문이다. 그러면 왕복 한 번과 API 호출 한 번을 버리고, 돌아온 "✗없음"을
+ *   LLM이 "그런 법령은 없다"로 읽어 진입 도구가 오히려 잘못된 확신을 만든다.
+ *
+ * 대표 트리거를 **표에 적힌 순서대로 앞에서** 고르는 근거 — 세 후보를 견줬다:
+ *   · 짧은 것 우선 → "3.3"·"8.8"·"월차" 같은 파편이 대표어가 되어, 무슨 말인지 모를 것이 앞선다.
+ *   · 긴 것 우선 → 법령 용어("기업업무추진비")가 앞서는데, 그 말을 아는 사람은 애초에 0건이 나지 않는다.
+ *   · 표 순서 → topics.ts의 triggers는 "그 주제를 부르는 대표어 → 변형·일상어" 순으로 적혀 있고,
+ *     그 순서를 지킬 책임이 표를 쓰는 사람에게 있다는 전제는 매칭어 출력(TopicMatch.matched)에도 이미 있다.
+ *   표 순서를 골랐다 — 대표어를 정하는 판단은 코드가 아니라 표에 두는 것이 이 도구의 일관된 방침이다.
+ *
+ * 여기 실린 말을 그대로 넣어 다시 물으면 그 주제는 **반드시 후보에 든다**:
+ * 매칭은 normalizeForMatch(질문).includes(normalizeForMatch(트리거))인데, compactName은
+ * 문자를 지우기만 하므로 부분 문자열 관계가 정규화 후에도 보존된다.
  */
-function renderNoMatch(question: string, topics: readonly Topic[]): string[] {
+function renderNoMatch(topics: readonly Topic[]): string[] {
   const lines = [
     `매칭된 주제가 없습니다 — 표의 트리거 중 어느 것도 질문에 나타나지 않았습니다 (부분 문자열 매칭).`,
+    `※ 이것은 판정이 아닙니다. "그런 제도·규정이 없다"는 뜻이 아니라 **이 표에 그 주제가 없다**는 뜻입니다.`,
     ``,
-    `다음 수:`,
-    `  · 법령부터 찾기 → fin_law_search`,
-    `    ${JSON.stringify({ query: question })}`,
-    `  · 법령·조문 번호를 이미 안다면 → fin_article({"law":"…","article":"제N조"})`,
-    `  · 아래 주제 중 가까운 것이 있으면 그 말을 넣어 다시 물어보세요`,
+    `■ 다음 수 ① — 아래에서 가까운 주제를 찾아, 오른쪽 말 하나를 그대로 넣어 fin_topic을 다시 부르세요.`,
+    `   (오른쪽 말은 그 주제의 실제 트리거입니다 — 그대로 넣으면 반드시 걸립니다)`,
     ``,
-    `표에 있는 주제 (${topics.length}개):`,
+    `표에 있는 주제 (${topics.length}개) — 주제 이름 · 다시 물을 때 쓸 말:`,
   ]
-  for (const t of topics) lines.push(`  · ${t.name}`)
+  for (const t of topics) {
+    const shown = t.triggers.slice(0, NO_MATCH_TRIGGERS_SHOWN)
+    lines.push(`  · ${t.name}${shown.length > 0 ? ` — ${shown.map((s) => `"${s}"`).join(", ")}` : ""}`)
+  }
+  lines.push(
+    ``,
+    `■ 다음 수 ② — 표 밖의 주제라면 (표에 없다고 해서 규정이 없는 것은 아닙니다):`,
+    `  · 법령·조문 번호를 이미 안다면 → fin_article {"law":"<법령명>","article":"<제N조>"}`,
+    `  · 법령명까지만 안다면 → fin_law_search {"query":"<법령명>"} — 예: "법인세법", "근로기준법"`,
+    `    ⚠ fin_law_search는 법령의 **이름**을 찾는 도구입니다. 질문 문장을 통째로 넣지 마세요 —`,
+    `      반드시 0건이 나오고, 그 0건은 "그런 법령이 없다"가 아니라 "그런 이름의 법령이 없다"는 뜻일 뿐입니다.`
+  )
   return lines
 }
 
@@ -221,7 +264,7 @@ export async function handleFinTopic(
   const shown = ranked.slice(0, MAX_TOPICS)
 
   const body: string[] =
-    shown.length === 0 ? renderNoMatch(question, TOPICS) : shown.flatMap((m, i) => (i === 0 ? renderTopic(m, basisDate) : ["", ...renderTopic(m, basisDate)]))
+    shown.length === 0 ? renderNoMatch(TOPICS) : shown.flatMap((m, i) => (i === 0 ? renderTopic(m, basisDate) : ["", ...renderTopic(m, basisDate)]))
 
   const lines = [...body]
   if (ranked.length > shown.length) {
@@ -233,7 +276,9 @@ export async function handleFinTopic(
   if (basisDate && shown.length > 0) {
     lines.push(``, `※ 기준일 ${basisDate}을 위 fin_article 인자에 함께 실었습니다 — 그 시점 시행본으로 조회됩니다.`)
   }
-  lines.push(``, ...FOOTER)
+  // 조문을 하나라도 내놓았을 때만 큐레이션·대조일 고지를 붙인다.
+  // 0건 응답에서 "위 조문"은 가리킬 대상이 없다 (매칭 응답의 두 줄은 종전 그대로).
+  lines.push(``, ...(shown.length > 0 ? FOOTER : [FOOTER_NOT_JUDGED]))
 
   return { content: [{ type: "text", text: lines.join("\n") }] }
 }
