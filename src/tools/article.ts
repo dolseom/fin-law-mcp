@@ -1,7 +1,7 @@
 /**
  * fin_article — 묶음 조문 조회 (fin-law-mcp의 핵심 도구)
  *
- * 1회 호출로: 조문 본문 + 시행령·시행규칙 위임조문 + 관련 예규 + 별표 + 개정 정보.
+ * 1회 호출로: 조문 본문 + 시행령·시행규칙 위임조문 + 예규 후보 + 별표 + 개정 정보.
  * 3단계 파이프라인 (단계 내 병렬):
  *   ① 법령명 → MST 확정 (findLaws: 별칭 사전·부분매칭 방어 내장)
  *   ② 조문 본문(eflaw) ∥ 3단비교 위임조문(thdCmp) ∥ 별표 목록(licbyl)
@@ -31,6 +31,7 @@ import {
   parseNtsRulings,
   parseUpcomingVersions,
   formatYmd,
+  isFutureDate,
   AUTHORITY_FOOTER,
   SOURCE_FOOTER,
 } from "../lib/fin-common.js"
@@ -67,7 +68,7 @@ export const FIN_ARTICLE_TOOL = {
       law: { type: "string", description: "법령명 (약칭 허용: 법인세법, 조특법, 상증세법 등)" },
       article: { type: "string", description: "조문 번호 (예: '제26조', '제10조의2')" },
       basis_date: { type: "string", description: "기준일 YYYY-MM-DD (생략 시 현행)" },
-      include_rulings: { type: "boolean", description: "관련 예규 검색 포함 (기본 true)" },
+      include_rulings: { type: "boolean", description: "예규 후보 검색 포함 (기본 true — 조문 제목 키워드 검색이라 적용 관계는 미확인)" },
     },
     required: ["law", "article"],
   },
@@ -800,7 +801,20 @@ export async function handleFinArticle(
   const basisScope = efYd
     ? `※ 기준일 조회 범위: 조문 본문·시행일자만 ${input.basis_date} 시행본입니다. 위임(3단비교)·개정 예정은 법제처가 현행 기준만 제공하여 생략했고, [현행 기준] 표시 섹션은 현행 데이터입니다`
     : ""
-  const statusMark = law.status === "연혁" ? " ⚠연혁(폐지·과거본)" : ""
+  // 기준일 조회에서는 그 시점 시행본이 **정상 결과**다 — 경고를 붙이면 정상을 이상으로 읽게 된다
+  // (fin_law_search는 basisMode에서 이미 억제한다: law-search.ts의 formatLawLine).
+  // 특히 미래 시행일은 "과거본"이 사실과 정반대인데, 이 도구는 아래 "개정 예정" 줄에서
+  // basis_date로 그 시행일을 조회하라고 **직접 권한다** — 권한 대로 한 사용자에게
+  // "폐지" 딱지를 보여주면 개정 대비 검토를 막는 (b)형이 된다.
+  // 여기서 status가 "연혁"인 것은 위 resolveVersionAt이 시행본을 갈아끼우며 덮어쓴 값이고
+  // 폐지를 뜻하지 않는다 (기준일 없는 현행 조회에서만 폐지·과거본을 의미한다).
+  const statusMark = efYd
+    ? isFutureDate(law.effectiveDate || "")
+      ? " 📅시행예정"
+      : ""
+    : law.status === "연혁"
+      ? " ⚠연혁(폐지·과거본)"
+      : ""
   const publicUrl = `https://www.law.go.kr/법령/${law.lawName}/${articleLabel}`
 
   const sec = (s: { name: string; r: SectionResult; budget: number; hint: string }, header: string): string => {
