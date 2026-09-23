@@ -4,14 +4,6 @@
  */
 
 /**
- * HTML 태그 제거 (검색 결과의 하이라이트 태그 등)
- * 예: <strong class="tbl_tx_type">지방</strong>자치법 → 지방자치법
- */
-export function stripHtml(text: string): string {
-  return text.replace(/<[^>]+>/g, "")
-}
-
-/**
  * 단일 객체 정규화 (Critical Rule 6) — API 응답의 배열 필드가 단일 객체로 올 수 있음.
  * 기존 수동 패턴 `Array.isArray(x) ? x : x ? [x] : []`과 의미 동일 (falsy → []).
  */
@@ -156,59 +148,6 @@ export function parseInterpretationXML(xml: string) {
 }
 
 /**
- * 행정심판례 검색 결과 파싱
- */
-export interface AdminAppealItem {
-  행정심판재결례일련번호: string
-  사건명: string
-  사건번호: string
-  처분일자: string
-  의결일자: string
-  처분청: string
-  재결청: string
-  재결구분명: string
-  재결구분코드: string
-  행정심판례상세링크: string
-}
-
-export function parseAdminAppealXML(xml: string) {
-  return parseSearchXML<AdminAppealItem>(xml, "Decc", "decc", (content) => ({
-    행정심판재결례일련번호: extractTag(content, "행정심판재결례일련번호"),
-    사건명: extractTag(content, "사건명"),
-    사건번호: extractTag(content, "사건번호"),
-    처분일자: extractTag(content, "처분일자"),
-    의결일자: extractTag(content, "의결일자"),
-    처분청: extractTag(content, "처분청"),
-    재결청: extractTag(content, "재결청"),
-    재결구분명: extractTag(content, "재결구분명"),
-    재결구분코드: extractTag(content, "재결구분코드"),
-    행정심판례상세링크: extractTag(content, "행정심판례상세링크")
-  }))
-}
-
-/**
- * 헌법재판소 결정례 검색 결과 파싱
- */
-export interface ConstitutionalItem {
-  헌재결정례일련번호: string
-  사건명: string
-  사건번호: string
-  종국일자: string
-  헌재결정례상세링크: string
-}
-
-export function parseConstitutionalXML(xml: string) {
-  // DetcSearch 루트, Detc 항목 (대문자 주의)
-  return parseSearchXML<ConstitutionalItem>(xml, "DetcSearch", "Detc", (content) => ({
-    헌재결정례일련번호: extractTag(content, "헌재결정례일련번호"),
-    사건명: extractTag(content, "사건명"),
-    사건번호: extractTag(content, "사건번호"),
-    종국일자: extractTag(content, "종국일자"),
-    헌재결정례상세링크: extractTag(content, "헌재결정례상세링크")
-  }))
-}
-
-/**
  * 조세심판원 재결례 검색 결과 파싱
  */
 export interface TaxTribunalItem {
@@ -237,51 +176,5 @@ export function parseTaxTribunalXML(xml: string) {
     재결구분명: extractTag(content, "재결구분명"),
     재결구분코드: extractTag(content, "재결구분코드"),
     행정심판재결례상세링크: extractTag(content, "행정심판재결례상세링크")
-  }))
-}
-
-/**
- * 조약 검색 결과 파싱
- */
-export interface TreatyItem {
-  조약일련번호: string
-  조약명: string
-  조약번호: string
-  체결일자: string
-  발효일자: string
-  조약구분: string
-  조약상세링크: string
-}
-
-export function parseTreatyXML(xml: string) {
-  return parseSearchXML<TreatyItem>(xml, "TrtySearch", "Trty", (content) => ({
-    조약일련번호: extractTag(content, "조약일련번호"),
-    조약명: extractTag(content, "조약명"),
-    조약번호: extractTag(content, "조약번호"),
-    체결일자: extractTag(content, "서명일자"),
-    발효일자: extractTag(content, "발효일자"),
-    조약구분: extractTag(content, "조약구분명"),
-    조약상세링크: extractTag(content, "조약상세링크")
-  }))
-}
-
-/**
- * 관세해석례 검색 결과 파싱
- */
-export interface CustomsItem {
-  관세행정해석례일련번호: string
-  안건명: string
-  질의내용: string
-  회신일자: string
-  처리부서: string
-}
-
-export function parseCustomsXML(xml: string) {
-  return parseSearchXML<CustomsItem>(xml, "CustomsSearch", "customs", (content) => ({
-    관세행정해석례일련번호: extractTag(content, "관세행정해석례일련번호"),
-    안건명: extractTag(content, "안건명"),
-    질의내용: extractTag(content, "질의내용"),
-    회신일자: extractTag(content, "회신일자"),
-    처리부서: extractTag(content, "처리부서")
   }))
 }
