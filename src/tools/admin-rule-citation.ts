@@ -6,26 +6,76 @@
 //
 // 동작: 행정규칙 접미사(고시·훈령·예규·통칙·기준·지침)로 끝나는 인용은
 // 법령 검색 대신 행정규칙 API(target=admrul)로 명칭 실존을 확인한다.
+// 단 국세청 기본통칙·집행기준은 이 DB에 수록되지 않아(2026-09-16 실측) 0건을 ✗로 쓰지 않는다.
 // 조문이 붙은 인용은 명칭에 그치지 않고 본문까지 대조한다 (2026-09-01 실측으로 배선):
 // `lawService.do?target=admrul`이 본문을 주고, **조문형식여부=Y** 규칙은 조문 단위로
 // ✓있음/✗없음을 가른다(checkAdminRuleArticle). N인 규칙(「외국환거래규정」 등 "제1-1조"
 // 자체 체계)은 통짜 본문이라 조문 판정을 하지 않고 **명칭 실존만** 확인해 ⚠로 남긴다.
 // ⚠ 종전 주석의 "조문 단위 조회 API가 없다"는 사실이 아니었다 (CHANGELOG 정정).
-// '기준'·'지침'은 일반 명사와 겹칠 수 있어 미발견 시 ✗ 대신 ⚠로 보고한다.
+// '기준'·'지침'은 일반 명사와 겹칠 수 있어, '통칙'은 DB에 수록 사례가 없어 미발견 시 ✗ 대신 ⚠로 보고한다.
 import { DOMParser } from "@xmldom/xmldom"
 import type { LawApiClient } from "../lib/api-client.js"
 import { looseMatchLawName } from "../lib/law-search.js"
 import { detectAbolishedAdminRule } from "../lib/abolished-laws.js"
 import { compactName } from "../lib/fin-common.js"
 
-// 확실한 행정규칙 접미사 — 미발견 시 ✗(환각 의심)로 보고
-const STRICT_ADMIN_SUFFIX = /(고시|훈령|예규|통칙)$/
-// 일반 명사와 겹칠 수 있는 접미사 — 미발견 시 ⚠(재확인)로만 보고
-const SOFT_ADMIN_SUFFIX = /(기준|지침)$/
+// 확실한 행정규칙 접미사 — 미발견 시 ✗(환각 의심)로 보고.
+// "통칙"은 여기 두면 안 된다 — 법제처 행정규칙 DB에는 이름에 "통칙"이 든 규칙이 한 건도 없다
+// (2026-09-16 실측: admrul 검색 "통칙"·"기본통칙"·"법인세법 기본통칙"·"소득세법 기본통칙" 모두
+// totalCnt 0). 조회 대상 DB에 그 종류가 없으면 0건은 부존재의 증거가 아닌데, 실존하는
+// 「법인세법 기본통칙」 인용이 전부 ✗ "존재하지 않는 규칙"으로 단정되고 있었다 (9차 리뷰 차단 B2)
+const STRICT_ADMIN_SUFFIX = /(고시|훈령|예규)$/
+// 일반 명사와 겹치거나 DB 수록이 확실하지 않은 접미사 — 미발견 시 ⚠(재확인)로만 보고.
+// isAdminRuleName이 두 목록의 합집합이므로 "통칙"을 옮겨도 추출·폴백 대상은 그대로다
+const SOFT_ADMIN_SUFFIX = /(기준|지침|통칙)$/
 
 export function isAdminRuleName(name: string): boolean {
   const trimmed = name.trim()
   return STRICT_ADMIN_SUFFIX.test(trimmed) || SOFT_ADMIN_SUFFIX.test(trimmed)
+}
+
+/**
+ * 국세청 기본통칙·집행기준인가 — 법제처 DB에 수록되지 않는 국세청 해석 문서.
+ *
+ * 기본통칙은 DB에 "통칙" 이름이 한 건도 없어(위 실측) 조회해도 0건일 수밖에 없다.
+ * 집행기준은 다르다 — 「(계약예규)정부 입찰ㆍ계약 집행기준」처럼 DB에 실존하는 규칙이 있다
+ * (2026-09-16 실측: admrul "집행기준" totalCnt 5). 그래서 세목명("…세"·"…세법")이 붙은
+ * 형태만 국세청 문서로 보고, 판정 전에 DB 조회는 그대로 한다 (verify.ts)
+ */
+export function ntsGuideKind(name: string): "기본통칙" | "집행기준" | null {
+  const n = compactName(stripTrailingParen(name))
+  if (/기본통칙$/.test(n)) return "기본통칙"
+  if (/세(?:법)?집행기준$/.test(n)) return "집행기준"
+  return null
+}
+
+/** 기본통칙·집행기준 판정 문구의 공통부 — fin_verify와 이 파일의 폴백이 같은 사실을 말해야 한다 */
+export const NTS_GUIDE_UNLISTED_NOTE =
+  "법제처 DB 미수록(국세청 기본통칙·집행기준) — 국세법령정보시스템에서 확인, 번호 실존은 검증하지 않음"
+
+/**
+ * 조문 전체가 삭제된 자리표시 조문인가 — 삭제 표기(<일자>)를 돌려주고, 아니면 null.
+ *
+ * 법제처는 삭제된 조문도 번호를 남겨 둔다. 법령은 `"제39조 삭제 <2001.12.31>"`(lawService JSON
+ * 조문내용 — 법인세법 조문 213개 중 32개), 행정규칙은 `"제26조 삭제<2025. 2. 5.>"`(admrul 본문,
+ * CDATA 안 — 전자금융감독규정 실측) 형태다. 번호가 있다는 것만 보고 ✓를 주면 삭제된 조문이
+ * "실존"으로 통과한다 (9차 리뷰 차단 B1 — 훅도 exit 0).
+ *
+ * **조 전체 삭제만** 잡는다. 문자열 전체가 "제N조(의M) 삭제 [<일자>]"여야 한다 —
+ * 항·호 하나가 삭제된 조문("② 삭제", "2. 삭제")이나 제목·본문에 "삭제"라는 낱말이 든 조문
+ * ("제10조(등록의 삭제) …")은 살아 있는 조문이다 (실측 캐시 법령 16개 3,301개 조문단위에서
+ * 조문내용에 "삭제"가 든 조문은 전부 이 형태였고, 행정규칙 본문에는 조문 중간의 "삭제"가 섞여 있다)
+ */
+export function parseDeletedArticle(content: string): string | null {
+  const text = content
+    .replace(/^\s*<!\[CDATA\[/, "")
+    .replace(/\]\]>\s*$/, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .trim()
+  const m = /^제\s*\d+\s*조(?:\s*의\s*\d+)?\s*(?:삭제|\(\s*삭제\s*\))\s*((?:<[^<>]*>\s*)*)$/.exec(text)
+  if (!m) return null
+  return m[1].replace(/\s+/g, " ").trim()
 }
 
 /**
@@ -97,6 +147,8 @@ export interface AdminRuleMatch {
 export type AdminArticleCheck =
   | { status: "확인"; total: number }
   | { status: "없음"; total: number }
+  /** 번호는 남아 있으나 조 전체가 삭제된 자리표시 조문 — "있음"도 "없음"도 아니다 */
+  | { status: "삭제"; total: number; stamp: string }
   /** 조문 형식이 아닌 규칙(조문형식여부=N) — 통짜 본문이라 조문 단위 판정 불가 */
   | { status: "형식아님" }
 
@@ -137,15 +189,28 @@ export async function checkAdminRuleArticle(
   // 조문형식여부가 없거나 N이면 조문 단위 판정을 하지 않는다
   if (format !== "Y" || bodies.length === 0) return { status: "형식아님" }
   const numbers = new Set<string>()
+  // 삭제 자리표시 조문은 따로 모은다 — 같은 번호가 살아 있는 조문으로도 나오면(부칙 등)
+  // 삭제로 단정하지 않는다 (live 우선)
+  const live = new Set<string>()
+  const deleted = new Map<string, string>()
   for (const b of bodies) {
     // "제5조의2(관할 조정 사유) …" — 조문 표제로 **시작**하는 것만 본다.
     // 본문 중간의 참조("제23조에 따라")를 세면 없는 조문이 실존으로 둔갑한다
     const m = /^(?:<!\[CDATA\[)?\s*제\s*(\d+)\s*조(?:\s*의\s*(\d+))?/.exec(b)
-    if (m) numbers.add(m[2] ? `제${m[1]}조의${m[2]}` : `제${m[1]}조`)
+    if (!m) continue
+    const key = m[2] ? `제${m[1]}조의${m[2]}` : `제${m[1]}조`
+    numbers.add(key)
+    // 법령 경로(verify.ts)와 같은 판정 함수를 쓴다 — 한쪽만 고치면 행정규칙의 삭제 조문이
+    // 계속 ✓로 통과한다 (절반 수정 방지)
+    const stamp = parseDeletedArticle(b.split("</조문내용>")[0])
+    if (stamp === null) live.add(key)
+    else if (!deleted.has(key)) deleted.set(key, stamp)
   }
   if (numbers.size === 0) return { status: "형식아님" }
   const want = article.replace(/\s+/g, "")
-  return numbers.has(want) ? { status: "확인", total: numbers.size } : { status: "없음", total: numbers.size }
+  if (!numbers.has(want)) return { status: "없음", total: numbers.size }
+  if (!live.has(want) && deleted.has(want)) return { status: "삭제", total: numbers.size, stamp: deleted.get(want)! }
+  return { status: "확인", total: numbers.size }
 }
 
 /** 행정규칙 DB(admrul)에서 명칭 실존 확인 — verify 외에 law_search의 0건 폴백도 사용 */
@@ -271,6 +336,16 @@ export async function tryVerifyAdminRuleCitation(
               `(본문 조문 ${check.total}개 대조${meta ? ` · ${meta}` : ""}). 조문 번호 확인`
             )
           }
+          // 삭제 자리표시 조문 — ✗가 아니다(✗의 계약은 "정상 조회 후 0건"). 그렇다고 ✓를 주면
+          // 삭제된 조문이 근거로 통과한다. "[사용 보류]"는 앞쪽에 둔다 — 훅이 이 문구로 보류를
+          // 식별하는데, 라인 끝에만 있으면 출력 절단 시 조용히 사라진다
+          if (check.status === "삭제") {
+            return (
+              `⚠ ${label} — [사용 보류] 삭제된 조문${check.stamp ? ` (삭제 ${check.stamp})` : ""} — ` +
+              `행정규칙 「${match.name}」에 ${article} 번호만 남고 본문이 없어 현행 근거로 쓸 수 없음 ` +
+              `(없음 ✗ 아님 · 본문 조문 ${check.total}개 대조${meta ? ` · ${meta}` : ""})`
+            )
+          }
           return (
             `⚠ ${label} — 행정규칙 「${match.name}」 실존${meta ? ` (${meta})` : ""} · ` +
             `${article}는 미확인 — 이 규칙은 조문 형식이 아니어서(본문이 통짜 텍스트) 조문 단위 대조 불가. 원문 확인 필요`
@@ -325,6 +400,12 @@ export async function verifyAdminRuleCitation(
     // 괄호가 붙으면 이름이 ')'로 끝나 soft 강등이 빗나가고, 더 정밀한 표기가 오히려
     // ✗ 환각 낙인을 받는다 (Claude 리뷰 중요 3)
     const suffixBase = stripTrailingParen(rawName.trim())
+    // 국세청 기본통칙·집행기준은 법제처 DB에 수록되지 않는다 — 0건은 부존재가 아니다.
+    // fin_verify는 이 경로에 오기 전에 따로 판정하지만(모법 실존까지 확인), 다른 호출부가
+    // 생겨도 ✗나 "규칙명이 아닐 수 있음"이라는 틀린 사유가 나가지 않게 여기서도 막는다
+    if (ntsGuideKind(suffixBase)) {
+      return `⚠ ${label} — ${NTS_GUIDE_UNLISTED_NOTE}`
+    }
     if (SOFT_ADMIN_SUFFIX.test(suffixBase) && !STRICT_ADMIN_SUFFIX.test(suffixBase)) {
       return `⚠ ${label} — 행정규칙 DB에서 확인 실패 ('${rawName}'이(가) 규칙명이 아닐 수 있음. 정식 명칭 재확인 필요)`
     }

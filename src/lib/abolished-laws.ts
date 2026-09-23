@@ -92,24 +92,11 @@ export async function findAbolishedLaws(
   }
 }
 
-export function buildAbolishedLawNotes(query: string, abolished: AbolishedLaw[]): string {
-  if (abolished.length === 0) return ""
-  const lines = [`[폐지] '${query}' — 현행 법령 0건. 폐지된 법령이 확인됩니다:`, ""]
-  abolished.slice(0, 5).forEach((a, i) => {
-    lines.push(`${i + 1}. ${a.name} [${a.lawType || "법령"}] — ${a.revisionType}, 최종 시행 ${fmtDate(a.effDate)} (MST ${a.mst})`)
-  })
-  const first = abolished[0]
-  lines.push("")
-  lines.push(`💡 폐지 경위·대체 법령은 get_law_text(mst="${first.mst}", efYd="${first.effDate}")의 부칙·개정문에서 확인하세요 (타법폐지면 부칙 표제에 폐지시킨 법률명이 나옵니다).`)
-  lines.push("⚠️ 폐지된 법령을 현행 기준으로 인용하지 마세요. 답변에는 폐지 사실을 명시하고, 해당 제도의 현행 근거는 대체 법령명으로 재검색해 확인하세요.")
-  return lines.join("\n") + "\n"
-}
-
 // ========== 행정규칙 (target=admrul, nw=2) ==========
 
 interface AdmRuleHistoryHit {
   name: string
-  seq: string // 행정규칙일련번호 (get_admin_rule의 id)
+  seq: string // 행정규칙일련번호 (본문 조회 ID)
   ruleId: string // 행정규칙ID — 개명을 넘어 유지되는 그룹핑 키
   promDate: string // 발령일자
   revisionType: string // 제개정구분명
@@ -207,7 +194,7 @@ export async function detectAbolishedAdminRule(
       if (!g.some((h) => isRelated(h.name, query))) continue
 
       if (latest.revisionType === "폐지") {
-        const built = await buildAbolishedAdminRuleNote(apiClient, query, g, apiKey)
+        const built = await buildAbolishedAdminRuleNote(apiClient, query, g, apiKey, signal)
         result = built.note
         partial = built.bodyLookupFailed
         break
@@ -217,7 +204,7 @@ export async function detectAbolishedAdminRule(
         result =
           `[제명변경] '${query}' — 현행 행정규칙 0건. 같은 규칙이 명칭 변경되어 현행입니다:\n\n` +
           `「${g.find((h) => isRelated(h.name, query))?.name || query}」 → 「${latest.name}」 (${latest.ruleType}, ${latest.orgName}, 발령 ${fmtDate(latest.promDate)})\n\n` +
-          `💡 get_admin_rule(id="${latest.seq}") 또는 search_admin_rule("${latest.name}")로 현행본을 조회하세요.\n`
+          `💡 현행 명칭 「${latest.name}」(행정규칙일련번호 ${latest.seq})으로 다시 조회하세요.\n`
         break
       }
     }
@@ -237,7 +224,10 @@ async function buildAbolishedAdminRuleNote(
   apiClient: LawApiClient,
   query: string,
   history: AdmRuleHistoryHit[],
-  apiKey?: string
+  apiKey?: string,
+  // 상위(detectAbolishedAdminRule)가 받은 deadline signal을 본문 조회까지 잇는다 —
+  // 연혁 검색에만 걸고 여기서 끊기면 상한 이후에도 수백 KB 본문 조회가 살아 쿼터를 쓴다
+  signal?: AbortSignal
 ): Promise<{ note: string; bodyLookupFailed: boolean }> {
   const latest = history[history.length - 1] // 폐지 레코드
   const prev = history.length >= 2 ? history[history.length - 2] : null
@@ -248,16 +238,18 @@ async function buildAbolishedAdminRuleNote(
     `「${latest.name}」 (${latest.ruleType}, ${latest.orgName}) — ${fmtDate(latest.promDate)} 폐지`,
   ]
   if (prev) {
-    lines.push(`   - 폐지 직전 버전: 행정규칙일련번호 ${prev.seq} (발령 ${fmtDate(prev.promDate)}) — 폐지 전 본문이 필요하면 get_admin_rule(id="${prev.seq}")`)
+    lines.push(`   - 폐지 직전 버전: 행정규칙일련번호 ${prev.seq} (발령 ${fmtDate(prev.promDate)}) — 폐지 전 본문은 이 일련번호로 국가법령정보센터에서 확인`)
   }
 
   // 폐지 레코드 본문에서 폐지사유·후속 규정 추출 (실패해도 폐지 안내 자체는 유지).
   // ⚠ 조회 실패와 "조회했으나 후속 규정이 없음"을 같은 문장으로 쓰면 안 된다 —
-  // 전자는 아직 모르는 것이고 후자는 확인된 것이다 (3값 판정)
+  // 전자는 아직 모르는 것이고 후자는 확인된 것이다 (3값 판정).
+  // deadline 취소도 이 catch로 들어와 bodyLookupFailed가 된다 — 폐지 사실(검색으로 확인)은
+  // 남기고 "후속 규정 없음"으로는 말하지 않으며, 반쪽 안내문이라 캐시도 하지 않는다
   let successors: string[] = []
   let bodyLookupFailed = false
   try {
-    const bodyXml = await apiClient.getAdminRule(latest.seq, apiKey)
+    const bodyXml = await apiClient.getAdminRule(latest.seq, apiKey, signal)
     const reason = extractAbolitionReason(bodyXml)
     if (reason) {
       lines.push("", "폐지사유(제개정이유):", ...reason.split("\n").map((l) => `   ${l}`))
@@ -269,11 +261,11 @@ async function buildAbolishedAdminRuleNote(
 
   lines.push("")
   if (successors.length > 0) {
-    lines.push(`💡 후속(통합) 규정: ${successors.map((s) => `「${s}」`).join(", ")} — search_admin_rule("${successors[0]}")로 현행 규정을 조회해 그 기준으로 답변하세요.`)
+    lines.push(`💡 후속(통합) 규정: ${successors.map((s) => `「${s}」`).join(", ")} — 「${successors[0]}」 현행본을 조회해 그 기준으로 답변하세요.`)
   } else if (bodyLookupFailed) {
-    lines.push(`⚠️ 폐지사유 본문 조회에 **실패**했습니다 — 후속 규정이 없다는 뜻이 아닙니다. get_admin_rule(id="${latest.seq}")로 직접 조회하거나 잠시 후 재시도하세요.`)
+    lines.push(`⚠️ 폐지사유 본문 조회에 **실패**했습니다 — 후속 규정이 없다는 뜻이 아닙니다. 행정규칙일련번호 ${latest.seq}로 국가법령정보센터에서 직접 확인하거나 잠시 후 재시도하세요.`)
   } else {
-    lines.push(`💡 후속 규정 자동 추출 실패 — 위 폐지사유를 근거로 후속·통합 규정을 확인하거나, 소관부처(${latest.orgName})의 제도 키워드로 search_admin_rule 재검색하세요.`)
+    lines.push(`💡 후속 규정 자동 추출 실패 — 위 폐지사유를 근거로 후속·통합 규정을 확인하거나, 소관부처(${latest.orgName})의 제도 키워드로 행정규칙을 재검색하세요.`)
   }
   lines.push("⚠️ 폐지된 행정규칙을 현행 기준으로 인용하지 마세요. 답변에는 폐지 사실과 후속 규정을 명시하세요.")
   return { note: lines.join("\n") + "\n", bodyLookupFailed }

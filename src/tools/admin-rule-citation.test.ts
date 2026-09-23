@@ -10,6 +10,8 @@ import {
   tryVerifyAdminRuleCitation,
   verifyAdminRuleCitation,
   checkAdminRuleArticle,
+  parseDeletedArticle,
+  ntsGuideKind,
 } from "./admin-rule-citation.js"
 // fin-law-mcp: upstream verify-citations 대신 자체 verify.ts의 추출기로 연결
 // (상한 15은 추출기 내부 고정)
@@ -423,5 +425,129 @@ describe("findAdminRule — 3절 강화의 소비자 영향 (퍼즈 차단 3단�
   it("정확 일치는 영향받지 않는다", async () => {
     const m = await findAdminRule(xmlStub(RULE_ONLY_XML), "조사사무처리규정")
     expect(m!.exact).toBe(true)
+  })
+})
+
+/**
+ * 9차 리뷰 차단 B1 — 삭제된 조문 판정 함수 (법령·행정규칙 공유).
+ * 법제처는 삭제된 조문도 번호를 남긴다. 번호만 보고 ✓를 주면 삭제 조문이 "실존"으로 통과한다.
+ * 조 전체 삭제만 잡아야 한다 — 항·호 삭제나 "삭제"라는 낱말이 든 조문은 살아 있다.
+ */
+describe("parseDeletedArticle — 조 전체 삭제 자리표시만 (9차 차단 B1)", () => {
+  it.each([
+    ["제39조 삭제 <2001.12.31>", "<2001.12.31>"], // 법령 lawService JSON 실응답
+    ["제18조의3 삭제 <2022.12.31>", "<2022.12.31>"],
+    ["<![CDATA[제26조 삭제<2025. 2. 5.>\n]]>", "<2025. 2. 5.>"], // 행정규칙 본문 실응답 (전자금융감독규정)
+    ["제26조 삭제&lt;2025. 2. 5.&gt;", "<2025. 2. 5.>"], // CDATA 대신 엔티티로 올 때
+    ["제5조 삭제", ""],
+    ["제5조(삭제)", ""],
+  ])("삭제: %s", (content, stamp) => {
+    expect(parseDeletedArticle(content)).toBe(stamp)
+  })
+
+  it.each([
+    "제10조(등록의 삭제) 관할 세무서장은 다음 각 호의 경우 등록을 삭제한다.",
+    "제26조(과다경비 등의 손금불산입)", // 제목만 있고 항은 따로 오는 조문
+    "<![CDATA[제37조의6(침해사고대응기관 지정 및 업무범위 등) ① 침해사고에 대응하기 위한 침해사고대응기관은 다음 각 호의 자로 한다.\n  1. 금융보안원\n  2. 삭제\n  3. 금융위원장이 지정한 자]]>",
+    "제5조 삭제된 항목은 다시 등록할 수 없다.",
+    "제5조 삭제 <2020.1.1> 제6조(시행) 이 규정은 …", // 통짜 본문 — 조문 하나가 아니다
+    "② 삭제 <2022.12.31>",
+  ])("살아 있음: %s", (content) => {
+    expect(parseDeletedArticle(content)).toBeNull()
+  })
+})
+
+describe("checkAdminRuleArticle — 삭제 조문 (9차 차단 B1)", () => {
+  const bodyClient = (xml: string): LawApiClient =>
+    ({ getAdminRule: async () => xml }) as unknown as LawApiClient
+  const BODY = [
+    '<?xml version="1.0"?><AdmRulService><조문형식여부>Y</조문형식여부>',
+    "<조문내용><![CDATA[제1조(목적) 이 규정은 …]]></조문내용>",
+    "<조문내용><![CDATA[제26조 삭제<2025. 2. 5.>\n]]></조문내용>",
+    "<조문내용><![CDATA[제37조의6(침해사고대응기관 지정) ① …\n  2. 삭제\n]]></조문내용>",
+    "</AdmRulService>",
+  ].join("")
+
+  it("삭제 자리표시는 '확인'이 아니라 '삭제'", async () => {
+    expect(await checkAdminRuleArticle(bodyClient(BODY), "1", "제26조")).toEqual({
+      status: "삭제",
+      total: 3,
+      stamp: "<2025. 2. 5.>",
+    })
+  })
+
+  it("[반대] 호 하나가 삭제된 조문은 '확인', 없는 조문은 '없음' 그대로", async () => {
+    expect(await checkAdminRuleArticle(bodyClient(BODY), "1", "제37조의6")).toEqual({ status: "확인", total: 3 })
+    expect(await checkAdminRuleArticle(bodyClient(BODY), "1", "제99조")).toEqual({ status: "없음", total: 3 })
+  })
+
+  it("[반대] 같은 번호가 살아 있는 조문으로도 나오면 삭제로 단정하지 않는다", async () => {
+    const dup = BODY.replace("</AdmRulService>", "<조문내용><![CDATA[제26조(경과조치) …]]></조문내용></AdmRulService>")
+    expect((await checkAdminRuleArticle(bodyClient(dup), "1", "제26조")).status).toBe("확인")
+  })
+
+  it("tryVerify 문구 — ⚠ + [사용 보류]를 앞쪽에, ✗·✓ 아님", async () => {
+    const client = {
+      searchAdminRule: async () =>
+        '<?xml version="1.0"?><AdmRulSearch><totalCnt>1</totalCnt><admrul><행정규칙명>전자금융감독규정</행정규칙명>' +
+        "<행정규칙일련번호>2100000282622</행정규칙일련번호><행정규칙종류>고시</행정규칙종류>" +
+        "<소관부처명>금융위원회</소관부처명><발령일자>20250205</발령일자></admrul></AdmRulSearch>",
+      getAdminRule: async () => BODY,
+    } as unknown as LawApiClient
+    const line = await tryVerifyAdminRuleCitation(client, ["전자금융감독규정"], "전자금융감독규정 제26조", undefined, undefined, "제26조")
+    expect(line!.startsWith("⚠ 전자금융감독규정 제26조 — [사용 보류] 삭제된 조문 (삭제 <2025. 2. 5.>)")).toBe(true)
+    expect(line).toContain("현행 근거로 쓸 수 없음")
+  })
+})
+
+/**
+ * 9차 리뷰 차단 B2 — 법제처 행정규칙 DB에는 이름에 "통칙"이 든 규칙이 한 건도 없다
+ * (2026-09-16 실측 admrul "통칙" totalCnt 0). 0건을 ✗ 근거로 쓰면 실존 기본통칙이 환각으로 낙인찍힌다.
+ */
+describe("기본통칙·집행기준 — 미수록 문서 (9차 차단 B2)", () => {
+  it.each([
+    ["법인세법 기본통칙", "기본통칙"],
+    ["소득세법기본통칙", "기본통칙"],
+    ["부가가치세법 집행기준", "집행기준"],
+    ["법인세 집행기준", "집행기준"],
+    ["상속세 및 증여세 집행기준", "집행기준"],
+  ])("국세청 문서: %s", (name, kind) => {
+    expect(ntsGuideKind(name)).toBe(kind)
+  })
+
+  it.each([
+    "(계약예규)정부 입찰ㆍ계약 집행기준", // DB 실존 (2026-09-16 실측)
+    "지방자치단체 입찰 및 계약 집행기준",
+    "지방자치단체 교육비특별회계 세출예산 집행기준",
+    "식품등의 표시기준",
+    "법인세 사무처리규정",
+  ])("국세청 문서 아님: %s", (name) => {
+    expect(ntsGuideKind(name)).toBeNull()
+  })
+
+  it("isAdminRuleName은 그대로다 — 통칙 인용이 추출 대상에서 빠지지 않는다", () => {
+    expect(isAdminRuleName("법인세법 기본통칙")).toBe(true)
+    expect(isAdminRuleName("징수사무 통칙")).toBe(true)
+  })
+
+  it("미발견 기본통칙은 ✗ NOT_FOUND가 아니라 ⚠ 미수록", async () => {
+    const line = await verifyAdminRuleCitation(stubClient(EMPTY_XML), ["법인세법 기본통칙"], "라벨T", "법인세법 기본통칙")
+    expect(line.startsWith("⚠")).toBe(true)
+    expect(line).toContain("법제처 DB 미수록")
+    expect(line).not.toContain("NOT_FOUND")
+  })
+
+  it("미발견 '…통칙'(기본통칙 아님)은 ⚠ 재확인 — DB에 통칙 수록 사례가 없어 0건은 부존재 근거가 아니다", async () => {
+    const line = await verifyAdminRuleCitation(stubClient(EMPTY_XML), ["가공징수사무통칙"], "라벨U", "가공징수사무통칙")
+    expect(line.startsWith("⚠")).toBe(true)
+    expect(line).not.toContain("NOT_FOUND")
+  })
+
+  it("[반대] 고시·훈령·예규는 미발견 시 ✗ NOT_FOUND 유지", async () => {
+    for (const name of ["가공전산처리고시", "가공조사사무훈령", "가공회계처리예규"]) {
+      const line = await verifyAdminRuleCitation(stubClient(EMPTY_XML), [name], name, name)
+      expect(line.startsWith("✗"), name).toBe(true)
+      expect(line, name).toContain("NOT_FOUND")
+    }
   })
 })

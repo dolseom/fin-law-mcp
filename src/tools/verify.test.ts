@@ -425,8 +425,11 @@ describe("현행 0건 → 폐지·연혁 확인 (Opus 재검증 개선 — findR
     })
     const text = res.content[0].text
     expect(text).toContain("⚠")
-    expect(text).toContain("미확인 약칭 인용 있음") // 요약 헤더 (조용한 통과 금지)
+    // 요약 헤더 (조용한 통과 금지) — R2부터 보류 사유가 약칭만이 아니라서 중립 헤더다.
+    // "정식 명칭으로 재검증" 조치는 이 약칭 판정 줄이 말한다
+    expect(text).toContain("⚠️ 사용 보류 인용 있음")
     expect(text).toContain("사용을 보류")
+    expect(text).toContain("정식 명칭으로 재검증")
     expect(text).toContain("현행·연혁 법령 DB 어디에도 없습니다")
   })
 

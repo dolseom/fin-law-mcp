@@ -16,6 +16,7 @@
  *   FIN_VERIFY_WARN_EXIT   사용 보류·미검증·판정 불가(⚠·⌛) 시 종료 코드 (기본 1 — 비차단
  *                          hook error로 표시. FAIL_EXIT=0이면 기본 0). Claude에게 전문 전달은 2
  *   FIN_VERIFY_BASIS_DATE  기준일 YYYY-MM-DD (생략 시 현행)
+ *   (종료 코드 변수는 0~255 정수만 — 빈 값·숫자 아님은 기본값. 경고만 모드는 "0"을 명시)
  *
  * 종료 코드: 0 = 통과(전 인용 ✓, 또는 인용 표기 자체가 없는 문서) / FAIL_EXIT(기본 1) = ✗ 있음
  *           / WARN_EXIT(기본 1) = 사용 보류·미검증 잔여·판정 불가(⚠·⌛)·추출 0건인데 표기 흔적 있음
@@ -32,20 +33,24 @@ import { pathToFileURL, fileURLToPath } from "node:url"
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 config({ path: join(ROOT, ".env"), quiet: true })
 
-// ?? 가 아니라 || 를 쓰면 FIN_VERIFY_FAIL_EXIT=0(경고만 하고 통과)을 설정할 수 없다
-const FAIL_EXIT = Number.isFinite(Number(process.env.FIN_VERIFY_FAIL_EXIT))
-  ? Number(process.env.FIN_VERIFY_FAIL_EXIT)
-  : 1
+/**
+ * 종료 코드 환경변수 — 0~255 정수만 받고, 그 밖(미설정·빈 문자열·숫자 아님)은 undefined(기본값).
+ * Number.isFinite(Number(v))로 판정하면 Number("")·Number(" ")가 0이라, 설정 파일에서 값을
+ * 비워 둔 FIN_VERIFY_FAIL_EXIT=""가 "경고만 모드"(0)로 바뀌어 ✗ 문서가 exit 0으로 나갔다 (9차 리뷰 E5).
+ * 0은 여전히 명시적으로 설정할 수 있어야 한다 — ||로 기본값을 붙이면 FAIL_EXIT=0을 못 쓴다
+ */
+function exitCodeFromEnv(value) {
+  if (typeof value !== "string" || !/^\s*\d{1,3}\s*$/.test(value)) return undefined
+  const n = Number(value)
+  return n <= 255 ? n : undefined
+}
+const FAIL_EXIT = exitCodeFromEnv(process.env.FIN_VERIFY_FAIL_EXIT) ?? 1
 // 사용 보류·미검증 잔여의 종료 코드. 종전에는 0이었는데, PostToolUse에서 종료 코드 0의
 // stderr는 디버그 로그에만 남아 "따로 다시 보고한다"던 보고가 구조적으로 Claude에게
 // 도달 불가였다 (Claude 리뷰 중요 5 — HOOKS.md 자기 문서와 모순). 기본 1(비차단 오류 —
 // 대화 기록에 hook error + stderr 첫 줄 표시). Claude에게 전문을 전달하려면 2로.
 // FAIL_EXIT=0(경고만 모드)이면 이쪽도 0이 기본이다
-const WARN_EXIT = Number.isFinite(Number(process.env.FIN_VERIFY_WARN_EXIT))
-  ? Number(process.env.FIN_VERIFY_WARN_EXIT)
-  : FAIL_EXIT === 0
-    ? 0
-    : 1
+const WARN_EXIT = exitCodeFromEnv(process.env.FIN_VERIFY_WARN_EXIT) ?? (FAIL_EXIT === 0 ? 0 : 1)
 const MAX_BYTES = 512 * 1024
 /** fin_verify의 인용 상한(15건)에 맞춰 문단 단위로 나눈다 — 넘기면 뒷부분이 조용히 미검증된다 */
 const CHUNK_CITATION_LIMIT = 15
@@ -143,7 +148,6 @@ function chunkByCitations(fullText) {
   const chunks = []
   let buf = []
   let bufCount = 0
-  let plannedTotal = 0
   for (const p of paragraphs) {
     const n = extractCitationsWithTotal(p).total
     if (n === 0) continue
@@ -154,14 +158,20 @@ function chunkByCitations(fullText) {
     }
     buf.push(p)
     bufCount += n
-    plannedTotal += n
   }
   if (buf.length > 0) chunks.push(buf.join("\n\n"))
-  return chunks.length > 0 ? { chunks, plannedTotal } : { chunks: [fullText], plannedTotal: total }
+  if (chunks.length === 0) return { chunks: [fullText], plannedTotal: total }
+  // 판정 수와 맞댈 기준은 **조립된 청크를 fin_verify가 보는 그대로** 센 건수의 합이다.
+  // fin_verify는 청크 안에서 같은 인용을 한 번만 판정하는데, 문단별 추출 합으로 세면 같은 청크
+  // 안의 반복 인용이 두 번 세어져 "17건 중 16건만 판정"이라는 거짓 미검증과 exit 1이 나갔다
+  // (9차 리뷰 중요 I4). 한 문단이 상한을 넘는 진짜 절단은 청크 단위로 세도 그대로 드러난다
+  // — 그 청크의 건수가 15를 넘고 fin_verify는 15건만 판정한다
+  const plannedTotal = chunks.reduce((sum, ch) => sum + extractCitationsWithTotal(ch).total, 0)
+  return { chunks, plannedTotal }
 }
 
 // judged와의 대조 기준은 plannedTotal — 전체 문서의 total은 전역 dedup 결과인데
-// 청크 검증은 문단별 추출 합이라, 같은 인용이 여러 문단에 반복되면 judged가 total을
+// 청크 검증은 청크별 추출 합이라, 같은 인용이 여러 청크에 반복되면 judged가 total을
 // 넘어 미검증 잔여가 가려질 수 있다 (Codex 5차 개선 — max(0, …)이 음수를 0으로 접음)
 const { chunks, plannedTotal } = chunkByCitations(text)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -186,10 +196,18 @@ if (chunks.length > 1) {
 const failLines = []
 const warnLines = []
 let ok = 0
+// fin_verify가 오류 응답(isError — 예: 달력에 없는 FIN_VERIFY_BASIS_DATE)을 주면 판정 라인이 0건이라
+// 미검증으로만 잡히고, 사유가 "상한 절단"으로 잘못 안내됐다. 오류 문구를 그대로 보고한다
+const toolErrors = []
 
 for (let i = 0; i < chunks.length; i++) {
   if (i > 0) await sleep(CHUNK_INTERVAL_MS)
   const res = await handleFinVerify(client, basis_date ? { text: chunks[i], basis_date } : { text: chunks[i] })
+  if (res.isError) {
+    const msg = (res.content?.[0]?.text || "").trim().split("\n")[0] || "(오류 문구 없음)"
+    if (!toolErrors.includes(msg)) toolErrors.push(msg)
+    continue
+  }
   for (const line of res.content[0].text.split("\n")) {
     const t = line.trim()
     // 판정 라인만 센다. 요약 헤더는 이모지 변형(⚠️ = U+26A0 U+FE0F)이라 뒤에 공백이 오지
@@ -208,16 +226,33 @@ console.log(`  ✓${ok} / ✗${failLines.length} / ⚠${warnLines.length}`)
 // 어긋나는 것으로만 드러나던 것을 명시한다 (Opus 리뷰 개선 6)
 const judged = ok + failLines.length + warnLines.length
 const unjudged = Math.max(0, plannedTotal - judged)
-if (unjudged > 0) {
+if (unjudged > 0 && toolErrors.length > 0) {
+  console.log(
+    `\n⚠ 검증 대상 ${plannedTotal}건 중 ${judged}건만 판정됐습니다 (${unjudged}건 미검증 — fin_verify 오류 응답):\n` +
+      toolErrors.map((m) => `  ${m}`).join("\n")
+  )
+} else if (unjudged > 0) {
   console.log(
     `\n⚠ 검증 대상 ${plannedTotal}건 중 ${judged}건만 판정됐습니다 (${unjudged}건 미검증 — 한 문단의 인용이 ` +
       `상한 ${CHUNK_CITATION_LIMIT}건을 넘어 잘렸습니다). 그 문단을 나눠 다시 검증하세요.`
   )
 }
 
-if (warnLines.length > 0) {
-  console.log(`\n⚠ 판정 불가 ${warnLines.length}건 ("없음"이 아니라 확인 실패 — 원문으로 직접 확인하세요)`)
-  for (const l of warnLines) console.log(`  ${l}`)
+// 사용 보류(삭제 조문·미등재 약칭 등)와 일반 판정 불가를 stdout에서도 나눈다 — stderr 분류와
+// 같은 정규식을 쓴다. 전부 "판정 불가"로 세면 삭제 조문(조회는 정상)이 "확인 실패"로 읽히고
+// 같은 실행에서 stdout·stderr 건수가 어긋난다 (R3 라이브 D1)
+const HOLD_RE = /사용\s*보류|사용을 보류/
+const holdLines = warnLines.filter((l) => HOLD_RE.test(l))
+const plainWarnLines = warnLines.filter((l) => !HOLD_RE.test(l))
+const plainWarnCount = plainWarnLines.length
+
+if (holdLines.length > 0) {
+  console.log(`\n⚠ 사용 보류 ${holdLines.length}건 (조회는 됐지만 그대로 쓸 수 없는 인용 — 삭제된 조문·실존 미확인 등, 조치는 줄의 사유를 따르세요)`)
+  for (const l of holdLines) console.log(`  ${l}`)
+}
+if (plainWarnCount > 0) {
+  console.log(`\n⚠ 판정 불가 ${plainWarnCount}건 ("없음"이 아닙니다 — 사유는 줄마다 다릅니다: 조회 실패면 재시도, DB 미수록·기준일 미적용이면 원문으로 직접 확인)`)
+  for (const l of plainWarnLines) console.log(`  ${l}`)
 }
 
 // ── stderr 보고 + 종료 코드 결정 ──
@@ -227,9 +262,6 @@ if (warnLines.length > 0) {
 // 또 삼켰다 (Codex 4차 개선). 해당하는 코드들의 최댓값으로 한 번에 나간다.
 // stderr 첫 줄이 요지를 담아야 한다 — 종료 코드가 2가 아닌 비차단 오류일 때 대화 기록에는
 // "hook error + stderr 첫 줄"만 표시되므로, 가장 심각한 보고(✗)를 첫 줄에 둔다
-const holdLines = warnLines.filter((l) => /사용\s*보류|사용을 보류/.test(l))
-const plainWarnCount = warnLines.length - holdLines.length
-
 if (failLines.length > 0) {
   // 훅에서 Claude가 읽는 경로는 stderr다
   console.error(
@@ -243,11 +275,17 @@ if (failLines.length > 0) {
 // 확인 전까지 쓰면 안 되는 인용이다. 이것을 다른 ⚠와 뭉뚱그리면 마지막 줄의
 // "인용 검증 통과"가 보류 항목까지 통과시킨 것으로 읽힌다 (실측: 환각 규정 인용이
 // soft 강등으로 ⚠가 된 뒤 "통과"로 보고됐다)
+// 삭제된 조문도 이 분기로 온다 (fin_verify가 "[사용 보류] 삭제된 조문"으로 표기 — 9차 리뷰 차단 B1).
+// 일반 ⚠로 흘려보내면 "삭제하지 말고 원문·재시도로 확인하라"는 정반대 조치가 붙는다
 if (holdLines.length > 0) {
+  const hasDeleted = holdLines.some((l) => /삭제된 조문/.test(l))
   console.error(
-    `⚠ 사용 보류 ${holdLines.length}건 — 실존이 확인되지 않은 인용입니다. "통과"가 아닙니다:\n` +
+    `⚠ 사용 보류 ${holdLines.length}건 — 실존이 확인되지 않았거나 삭제된 조문이라 그대로 쓸 수 없는 인용입니다. "통과"가 아닙니다:\n` +
       holdLines.map((l) => `  ${l}`).join("\n") +
-      `\n\n정식 명칭으로 재검증하거나, 법령이 아닌 문서(사내 규정 등)라면 그렇게 표기하세요.`
+      `\n\n조치는 줄마다 적힌 사유를 따르세요 — 약칭이면 정식 명칭으로 재검증, 법령이 아닌 문서(사내 규정 등)라면 그렇게 표기, 모법이 확인되지 않았으면 법령명 확인.` +
+      (hasDeleted
+        ? `\n삭제된 조문은 대조한 시점(판정 줄 참조)에 유효한 근거 조문으로 바꾸고, 삭제 전 규정을 인용한 것이면 FIN_VERIFY_BASIS_DATE로 그 시점을 지정해 다시 검증하세요.`
+        : "")
   )
 }
 
@@ -256,8 +294,11 @@ if (holdLines.length > 0) {
 // (Codex 3차 차단: 경고만 찍고 마지막 줄에서 통과로 보고했다)
 if (unjudged > 0) {
   console.error(
-    `⚠ 미검증 ${unjudged}건이 남아 "통과"로 판정하지 않습니다 — 검증되지 않은 인용에 ` +
-      `환각이 있어도 여기서는 드러나지 않습니다. 문단을 나눠 다시 검증하세요.`
+    toolErrors.length > 0
+      ? `⚠ 미검증 ${unjudged}건 — fin_verify가 오류를 돌려줘 "통과"로 판정하지 않습니다. 사유:\n` +
+          toolErrors.map((m) => `  ${m}`).join("\n")
+      : `⚠ 미검증 ${unjudged}건이 남아 "통과"로 판정하지 않습니다 — 검증되지 않은 인용에 ` +
+          `환각이 있어도 여기서는 드러나지 않습니다. 문단을 나눠 다시 검증하세요.`
   )
 }
 
@@ -269,9 +310,9 @@ if (unjudged > 0) {
 // stderr에서 유실된다 (Codex 5차 중요). 첫 줄 우선순위(✗→보류→미검증→⚠)는 순서로 유지
 if (plainWarnCount > 0) {
   console.error(
-    `⚠ 판정 불가 ${plainWarnCount}건 — 확인에 실패한 인용이 있어 "통과"가 아닙니다 ` +
-      `("없음" 아님 — 삭제하지 말고 원문·재시도로 직접 확인하세요):\n` +
-      warnLines.filter((l) => !holdLines.includes(l)).map((l) => `  ${l}`).join("\n")
+    `⚠ 판정 불가 ${plainWarnCount}건 — 확정하지 못한 인용이 있어 "통과"가 아닙니다 ` +
+      `("없음" 아님 — 삭제하지 말고 줄의 사유대로 재시도하거나 원문으로 직접 확인하세요):\n` +
+      plainWarnLines.map((l) => `  ${l}`).join("\n")
   )
 }
 

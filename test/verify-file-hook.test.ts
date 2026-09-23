@@ -26,13 +26,15 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 const ROOT = fileURLToPath(new URL("..", import.meta.url))
 const SCRIPT = join(ROOT, "scripts", "verify-file.mjs")
 const STUB_URL = pathToFileURL(join(ROOT, "test", "fixtures", "hook-fetch-stub.mjs")).href
+/** 법령이 실존하는 시나리오 — ✓가 정답인 문서를 훅 전 구간으로 검증할 때 (9차 리뷰) */
+const LAWDATA_STUB_URL = pathToFileURL(join(ROOT, "test", "fixtures", "hook-fetch-stub-lawdata.mjs")).href
 const hasBuild = existsSync(join(ROOT, "build", "tools", "verify.js"))
 
 let docDir: string
 
 function runHook(
   doc: string,
-  opts: { scenario?: string; env?: Record<string, string | undefined> } = {}
+  opts: { scenario?: string; env?: Record<string, string | undefined>; stubUrl?: string } = {}
 ) {
   const docPath = join(docDir, `doc-${Math.random().toString(36).slice(2)}.md`)
   writeFileSync(docPath, doc, "utf8")
@@ -46,7 +48,7 @@ function runHook(
     FIN_VERIFY_BASIS_DATE: undefined,
     ...opts.env,
   }
-  const r = spawnSync(process.execPath, ["--import", STUB_URL, SCRIPT, docPath], {
+  const r = spawnSync(process.execPath, ["--import", opts.stubUrl || STUB_URL, SCRIPT, docPath], {
     encoding: "utf8",
     timeout: 25_000,
     env: env as NodeJS.ProcessEnv,
@@ -99,6 +101,17 @@ describe.skipIf(!hasBuild)("verify-file 훅 — ✗ 경로 (기존 계약 유지
     expect(r.status).toBe(2)
     expect(r.stderr).toContain("실존하지 않는 인용")
     expect(r.stderr.split("\n")[0]).toContain("✗")
+  }, 30_000)
+})
+
+describe.skipIf(!hasBuild)("verify-file 훅 — fin_verify 오류 응답의 사유 보고", () => {
+  it("달력에 없는 FIN_VERIFY_BASIS_DATE는 오류 사유를 그대로 보고하고 '상한 절단'으로 둔갑하지 않는다", () => {
+    const r = runHook("법인세법 제26조를 검토한다.\n", { env: { FIN_VERIFY_BASIS_DATE: "2024-02-30" } })
+    expect(r.stdout + r.stderr).toContain("INVALID_PARAMETER")
+    expect(r.stdout + r.stderr).not.toContain("잘렸습니다")
+    expect(r.stderr.split("\n")[0]).toContain("미검증")
+    expect(r.stdout).not.toContain("인용 검증 통과")
+    expect(r.status).toBe(1)
   }, 30_000)
 })
 
@@ -228,5 +241,139 @@ describe.skipIf(!hasBuild)("verify-file 훅 — 청크 집계 기준 (Codex 5차
     const r = runHook(`${para1}\n\n${para2}\n`, { env: { FIN_VERIFY_INTERVAL_MS: "1" } })
     expect(r.stdout + r.stderr).toContain("미검증")
     expect(r.status).not.toBe(0)
+  }, 30_000)
+})
+
+/**
+ * 9차 적대적 리뷰 회귀 — 훅 전 구간 (lawdata 스텁: 법령 실존·조문 실존, 제39조만 삭제 자리표시).
+ *
+ *  B1 [차단] 삭제된 조문에 ✓ → 훅 exit 0으로 "통과"
+ *  B2 [차단] 기본통칙 인용이 ✗ → FAIL_EXIT + "실존하지 않는 인용"
+ *  I4 [중요] 같은 청크 안의 반복 인용을 두 번 세어 "17건 중 16건만 판정" + exit 1
+ *  E5       FIN_VERIFY_FAIL_EXIT=""(빈 문자열)이 0으로 해석돼 ✗ 문서가 exit 0
+ */
+const LAWDATA_ENV = { FIN_VERIFY_INTERVAL_MS: "1", FIN_DRF_RATE_PER_MIN: "1000" }
+const runLawdata = (doc: string, env: Record<string, string | undefined> = {}) =>
+  runHook(doc, { stubUrl: LAWDATA_STUB_URL, scenario: "law-exists", env: { ...LAWDATA_ENV, ...env } })
+
+describe.skipIf(!hasBuild)("verify-file 훅 — 삭제된 조문 (9차 차단 B1)", () => {
+  const DELETED_DOC = "법인세법 제39조에 따라 손금에 산입한다.\n"
+
+  it("삭제 조문은 '통과'가 아니다 — ⚠ 사용 보류로 WARN_EXIT, 조치는 '삭제하지 말라'가 아니다", () => {
+    const r = runLawdata(DELETED_DOC)
+    expect(r.stdout).toContain("✓0 / ✗0 / ⚠1")
+    expect(r.stdout).not.toContain("인용 검증 통과")
+    expect(r.stderr.split("\n")[0]).toContain("사용 보류") // 비차단 코드에서는 첫 줄만 보인다
+    expect(r.stderr).toContain("삭제된 조문")
+    expect(r.stderr).toContain("FIN_VERIFY_BASIS_DATE")
+    expect(r.stderr).not.toContain("삭제하지 말고") // 일반 ⚠(확인 실패) 문구로 새면 정반대 조치다
+    expect(r.status).toBe(1)
+  }, 30_000)
+
+  it("WARN_EXIT=2면 2 (Claude에게 전문 전달)", () => {
+    expect(runLawdata(DELETED_DOC, { FIN_VERIFY_WARN_EXIT: "2" }).status).toBe(2)
+  }, 30_000)
+
+  it("삭제 조문+기본통칙 혼합 — stdout도 사용 보류 1건·판정 불가 1건으로 나눈다 (R3 D1)", () => {
+    const r = runLawdata(
+      "법인세법 제26조에 따른다.\n\n법인세법 제39조에 따라 손금에 산입한다.\n\n" +
+        "업무무관 가지급금 판단은 법인세법 기본통칙 28-53…2를 참고한다.\n"
+    )
+    expect(r.stdout).toContain("✓1 / ✗0 / ⚠2")
+    // stdout과 stderr의 분류·건수가 같아야 한다 — 종전에는 stdout이 삭제 조문까지 "판정 불가 2건"으로 셌다
+    expect(r.stdout).toContain("⚠ 사용 보류 1건")
+    expect(r.stdout).toContain("⚠ 판정 불가 1건")
+    expect(r.stdout).not.toContain("판정 불가 2건")
+    expect(r.stderr).toContain("⚠ 사용 보류 1건")
+    expect(r.stderr).toContain("⚠ 판정 불가 1건")
+    // 삭제 조문 줄은 사용 보류 블록에만, 기본통칙 줄은 판정 불가 블록에만 있다
+    const out = r.stdout
+    const holdBlock = out.slice(out.indexOf("⚠ 사용 보류"), out.indexOf("⚠ 판정 불가"))
+    const plainBlock = out.slice(out.indexOf("⚠ 판정 불가"))
+    expect(holdBlock).toContain("제39조")
+    expect(holdBlock).not.toContain("기본통칙")
+    expect(plainBlock).toContain("기본통칙 28-53…2")
+    expect(plainBlock).not.toContain("제39조")
+    // 기본통칙 라벨에 앞 문장이 붙지 않는다 (R3 D2)
+    expect(out).not.toContain("업무무관 가지급금 판단은 법인세법 기본통칙")
+    expect(r.status).toBe(1)
+  }, 30_000)
+
+  it("[반대] 살아 있는 조문은 ✓ + exit 0", () => {
+    const r = runLawdata("법인세법 제26조에 따른다.\n")
+    expect(r.stdout).toContain("✓1 / ✗0 / ⚠0")
+    expect(r.stdout).toContain("인용 검증 통과")
+    expect(r.status).toBe(0)
+  }, 30_000)
+})
+
+describe.skipIf(!hasBuild)("verify-file 훅 — 기본통칙 (9차 차단 B2)", () => {
+  it("기본통칙은 ✗(FAIL_EXIT)가 아니라 ⚠ 판정 불가(WARN_EXIT) — 미수록 사유를 보고한다", () => {
+    const r = runLawdata("법인세법 기본통칙 19-19…46에 따라 처리한다.\n", { FIN_VERIFY_FAIL_EXIT: "2" })
+    expect(r.stdout).toContain("✓0 / ✗0 / ⚠1")
+    expect(r.stderr).not.toContain("실존하지 않는 인용")
+    expect(r.stderr).toContain("판정 불가")
+    expect(r.stderr).toContain("법제처 DB 미수록")
+    expect(r.stderr).toContain("19-19…46") // 번호가 잘리지 않는다
+    // DB 미수록은 조회가 정상으로 끝난 ⚠다 — 훅 문구가 "확인 실패"로 일반화하면 사유와 어긋난다
+    expect(r.stdout + r.stderr).not.toContain("확인 실패")
+    expect(r.status).toBe(1) // WARN_EXIT 기본 — FAIL_EXIT(2)가 아니다
+  }, 30_000)
+
+  it("[반대] 없는 고시는 여전히 ✗ + FAIL_EXIT", () => {
+    const r = runHook("가공전산처리고시 제3조를 따른다.\n", { env: { FIN_VERIFY_FAIL_EXIT: "2" } })
+    expect(r.stderr.split("\n")[0]).toContain("실존하지 않는 인용")
+    expect(r.status).toBe(2)
+  }, 30_000)
+})
+
+describe.skipIf(!hasBuild)("verify-file 훅 — 청크 안 반복 인용 (9차 중요 I4)", () => {
+  const range = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, i) => a + i)
+
+  it("같은 청크 안의 반복 인용을 두 번 세지 않는다 — 전부 ✓면 exit 0", () => {
+    // 전역 16건(>15) → 청크 분할. 문단1·2가 한 청크로 묶이고 그 안에서 "소득세법 제1조"가 반복된다
+    const doc =
+      range(1, 5).map((n) => `소득세법 제${n}조`).join(", ") + "를 본다.\n\n" +
+      "소득세법 제1조를 다시 본다. " + range(1, 4).map((n) => `법인세법 제${n}조`).join(", ") + "도 본다.\n\n" +
+      range(1, 7).map((n) => `부가가치세법 제${n}조`).join(", ") + "를 본다.\n"
+    const r = runLawdata(doc)
+    expect(r.stdout).toContain("✓16 / ✗0 / ⚠0")
+    expect(r.stdout + r.stderr).not.toContain("미검증") // 종전: "17건 중 16건만 판정"
+    expect(r.stdout).toContain("인용 검증 통과")
+    expect(r.status).toBe(0)
+  }, 30_000)
+
+  it("[반대] 한 문단이 상한을 넘는 진짜 절단은 전부 ✓여도 미검증으로 잡힌다", () => {
+    const doc =
+      range(1, 16).map((n) => `법인세법 제${n + 100}조`).join(", ") + "를 본다.\n\n" +
+      "소득세법 제1조를 다시 본다.\n"
+    const r = runLawdata(doc)
+    expect(r.stdout + r.stderr).toContain("미검증")
+    expect(r.stdout).not.toContain("인용 검증 통과")
+    expect(r.status).toBe(1)
+  }, 30_000)
+})
+
+describe.skipIf(!hasBuild)("verify-file 훅 — 종료 코드 환경변수 해석 (9차 E5)", () => {
+  const FAIL_DOC = "법인세법 제99조를 본다.\n" // lawdata 스텁: 제99조는 조문 없음 → ✗
+
+  it.each([[""], [" "], ["abc"], ["-1"], ["1.5"], ["999"]])(
+    "FIN_VERIFY_FAIL_EXIT=%j는 기본값(1) — ✗ 문서가 exit 0으로 새지 않는다",
+    (value) => {
+      const r = runLawdata(FAIL_DOC, { FIN_VERIFY_FAIL_EXIT: value })
+      expect(r.stdout).toContain("✗1")
+      expect(r.status).toBe(1)
+    },
+    30_000
+  )
+
+  it("FIN_VERIFY_WARN_EXIT=\"\"도 기본값(1) — 삭제 조문 ⚠가 exit 0으로 새지 않는다", () => {
+    expect(runLawdata("법인세법 제39조에 따른다.\n", { FIN_VERIFY_WARN_EXIT: "" }).status).toBe(1)
+  }, 30_000)
+
+  it("[반대] 명시적 0은 여전히 0 (경고만 모드)", () => {
+    const r = runLawdata(FAIL_DOC, { FIN_VERIFY_FAIL_EXIT: "0" })
+    expect(r.stderr).toContain("실존하지 않는 인용") // 보고는 그대로
+    expect(r.status).toBe(0)
   }, 30_000)
 })
