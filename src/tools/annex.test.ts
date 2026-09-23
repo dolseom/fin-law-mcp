@@ -299,3 +299,88 @@ describe("fin_annex — 행정규칙 폴백", () => {
     expect(res.content[0].text).not.toContain("[별지 20]")
   })
 })
+
+/**
+ * Codex 9차 — 파일 링크가 비면 collectAnnexes가 별표법령상세링크(/DRF/lawService.do?OC=<키>…)를
+ * 다운로드 링크로 쓴다. 실응답은 이 링크에 인증키를 싣고 온다(2026-09-16 실측: licbyl 응답에 OC= 포함).
+ */
+describe("fin_annex — 다운로드 링크의 인증키 마스킹 (Codex 9차)", () => {
+  const annexClient = (entry: Record<string, string>): LawApiClient =>
+    ({
+      getAnnexes: async () =>
+        JSON.stringify({
+          LicBylSearch: {
+            licbyl: [{ 별표명: "감가상각자산의 내용연수표", 별표번호: "000500", 관련법령명: "법인세법 시행규칙", ...entry }],
+          },
+        }),
+    }) as unknown as LawApiClient
+
+  it("파일 링크가 없어 상세링크가 쓰이면 OC 값을 가리고 가렸다는 사실을 적는다", async () => {
+    const res = await handleFinAnnex(
+      annexClient({
+        별표서식파일링크: "",
+        별표법령상세링크: "/DRF/lawService.do?OC=OC_SENTINEL_TEST&amp;target=licbyl&amp;ID=18410573&amp;type=HTML",
+      }),
+      { law: "법인세법 시행규칙" }
+    )
+    const text = res.content[0].text
+    expect(text).not.toContain("OC_SENTINEL_TEST")
+    expect(text).toContain("다운로드: https://www.law.go.kr/DRF/lawService.do?OC=***&target=licbyl&ID=18410573&type=HTML (인증키 가림")
+  })
+
+  it("반대 방향: 키 없는 파일 링크는 그대로 싣고 가림 표시를 붙이지 않는다", async () => {
+    const res = await handleFinAnnex(
+      annexClient({
+        별표서식파일링크: "/LSW/flDownload.do?flSeq=168517221",
+        별표법령상세링크: "/DRF/lawService.do?OC=OC_SENTINEL_TEST&amp;target=licbyl&amp;ID=1",
+      }),
+      { law: "법인세법 시행규칙" }
+    )
+    const text = res.content[0].text
+    expect(text).toContain("다운로드: https://www.law.go.kr/LSW/flDownload.do?flSeq=168517221\n")
+    expect(text).not.toContain("인증키 가림")
+    expect(text).not.toContain("OC_SENTINEL_TEST")
+  })
+})
+
+describe("fin_annex — 호출 맥락(apiKey·signal) 전달 (s2-fixes · r2-verify 발견)", () => {
+  it("getAnnexes·searchAdminRule·getAdminRule 셋 모두에 apiKey·signal을 넘긴다", async () => {
+    const calls: Record<string, unknown[]> = {}
+    const client = adminRuleClient({
+      getAnnexes: async (p: { apiKey?: string; signal?: AbortSignal }) => {
+        calls.getAnnexes = [p.apiKey, p.signal]
+        return EMPTY_ANNEX_JSON
+      },
+      searchAdminRule: async (p: { apiKey?: string; signal?: AbortSignal }) => {
+        calls.searchAdminRule = [p.apiKey, p.signal]
+        return ADMRUL_SEARCH
+      },
+      getAdminRule: async (id: string, apiKey?: string, signal?: AbortSignal) => {
+        calls.getAdminRule = [id, apiKey, signal]
+        return ADMRUL_BODY
+      },
+    })
+    const aborter = new AbortController()
+    const res = await handleFinAnnex(client, { law: "조사사무처리규정", kind: "3" }, {
+      apiKey: "KEY_SENTINEL",
+      signal: aborter.signal,
+    })
+    expect(res.content[0].text).toContain("[행정규칙] 「조사사무처리규정」")
+    expect(calls.getAnnexes).toEqual(["KEY_SENTINEL", aborter.signal])
+    expect(calls.searchAdminRule).toEqual(["KEY_SENTINEL", aborter.signal])
+    expect(calls.getAdminRule).toEqual(["2100000277992", "KEY_SENTINEL", aborter.signal])
+  })
+
+  it("맥락을 안 주면(기존 호출 형태) 종전처럼 동작한다", async () => {
+    let seen: unknown[] = []
+    const client = adminRuleClient({
+      getAdminRule: async (id: string, apiKey?: string, signal?: AbortSignal) => {
+        seen = [id, apiKey, signal]
+        return ADMRUL_BODY
+      },
+    })
+    const res = await handleFinAnnex(client, { law: "조사사무처리규정", kind: "3" })
+    expect(res.content[0].text).toContain("2건")
+    expect(seen).toEqual(["2100000277992", undefined, undefined])
+  })
+})

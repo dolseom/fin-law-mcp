@@ -405,12 +405,12 @@ describe("끝수 계산 (국고금 관리법 §47 · 지방세기본법 §59)", 
     expect(r.localTax).toBe(truncateCollectedTax(r.untruncatedIncomeTax * 0.1))
   })
 
-  it("산출세액 1천원 미만이면 소액 부징수 플래그가 선다 (소득세법 §86①1)", () => {
+  it("산출세액 1천원 미만이면 소액 부징수 플래그가 선다 (소득세법 제86조제1호)", () => {
     const r = calcRetirementIncomeTax(8_337_500, 5)
     expect(r.taxBase).toBe(4_000)
     expect(r.incomeTax).toBe(100)
     // ⚠ 이 플래그는 산출세액이 1천원 미만이라는 사실만 뜻한다 — 부징수 확정이 아니다.
-    // §86①1의 기준은 지급 시점의 차감원천징수세액이고 이 도구는 조정분을 입력받지 않는다
+    // §86 제1호의 기준은 지급 시점의 차감원천징수세액이고 이 도구는 조정분을 입력받지 않는다
     expect(r.belowMinimumWithholding).toBe(true)
     // 세액이 0이면 부징수 표시 대상이 아니다
     expect(calcRetirementIncomeTax(3_000_000, 5).belowMinimumWithholding).toBe(false)
@@ -595,15 +595,19 @@ describe("handleFinCalc 계약", () => {
     expect(t).toContain("71,538,461.54원")
   })
 
-  it("산출세액 1천원 미만이면 소액 부징수를 조건부 주의로 고지한다 (소득세법 §86①1)", async () => {
+  it("산출세액 1천원 미만이면 소액 부징수를 조건부 주의로 고지한다 (소득세법 제86조제1호)", async () => {
     const small = await handleFinCalc(null, { calc_type: "퇴직소득세", severance_pay: 8_337_500, service_years: 5 })
     expect(small.content[0].text).toContain("소액 부징수")
+    // §86은 항 없이 호만 있다 — "§86①1"은 존재하지 않는 항을 인용한 오표기였다 (Codex 9차 E8,
+    // 소득세법 원문 대조: "제86조(소액 부징수) 다음 각 호의 어느 하나에 해당하는 경우에는 …")
+    expect(small.content[0].text).toContain("소득세법 제86조제1호")
+    expect(small.content[0].text).not.toContain("§86①")
     const big = await handleFinCalc(null, { calc_type: "퇴직소득세", severance_pay: 100_000_000, service_years: 20 })
     expect(big.content[0].text).not.toContain("소액 부징수")
   })
 
   it("소액 부징수는 확정형으로 단정하지 않는다 — 기준은 차감원천징수세액 (Codex 8차)", async () => {
-    // §86①1의 기준은 지급 시점의 원천징수세액(기납부·과세이연 조정 후 차감원천징수세액)이고
+    // §86 제1호의 기준은 지급 시점의 원천징수세액(기납부·과세이연 조정 후 차감원천징수세액)이고
     // 이 도구는 산출세액만 계산한다 → "징수하지 않습니다" 단정 금지
     const r = await handleFinCalc(null, { calc_type: "퇴직소득세", severance_pay: 1_707_917, service_years: 1 })
     const t = r.content[0].text
@@ -619,7 +623,7 @@ describe("handleFinCalc 계약", () => {
   it("모든 계산 유형이 산식 기준일·근거·출처를 동봉한다", async () => {
     const inputs = [
       { calc_type: "임원퇴직금한도", annual_salary: 120_000_000, years: 5 },
-      { calc_type: "기업업무추진비한도", revenue: 5_000_000_000 },
+      { calc_type: "기업업무추진비한도", revenue: 5_000_000_000, is_sme: false },
       { calc_type: "감가상각비", acquisition_cost: 100_000_000, useful_life: 5, method: "정액법" },
       { calc_type: "가지급금인정이자", balance_days: 36_500_000_000, rate_type: "당좌대출이자율" },
       { calc_type: "퇴직소득세", severance_pay: 100_000_000, service_years: 20 },
@@ -643,7 +647,7 @@ describe("입력 스키마 — 조건부 필수 (Codex 리뷰: oneOf)", () => {
 
   it("계산 유형별 필수 인자가 스키마에 표현된다 (평면 목록만으론 알 수 없음)", () => {
     expect(branchOf("임원퇴직금한도").required).toEqual(["calc_type", "annual_salary", "years"])
-    expect(branchOf("기업업무추진비한도").required).toEqual(["calc_type", "revenue"])
+    expect(branchOf("기업업무추진비한도").required).toEqual(["calc_type", "revenue", "is_sme"])
     expect(branchOf("감가상각비").required).toEqual(["calc_type", "acquisition_cost", "useful_life", "method"])
     expect(branchOf("퇴직소득세").required).toEqual(["calc_type", "severance_pay", "service_years"])
   })
@@ -685,7 +689,7 @@ describe("입력 스키마 — 조건부 필수 (Codex 리뷰: oneOf)", () => {
     // 스키마가 요구하는 것만 채우면 실제로 통과해야 한다
     const ok1 = await handleFinCalc(null, { calc_type: "임원퇴직금한도", annual_salary: 120_000_000, years: 5 })
     expect(ok1.isError).toBeFalsy()
-    const ok2 = await handleFinCalc(null, { calc_type: "기업업무추진비한도", revenue: 5_000_000_000 })
+    const ok2 = await handleFinCalc(null, { calc_type: "기업업무추진비한도", revenue: 5_000_000_000, is_sme: false })
     expect(ok2.isError).toBeFalsy()
     const ok3 = await handleFinCalc(null, {
       calc_type: "감가상각비",
@@ -705,6 +709,9 @@ describe("입력 스키마 — 조건부 필수 (Codex 리뷰: oneOf)", () => {
     // 하나라도 빠지면 실패해야 한다
     const ng = await handleFinCalc(null, { calc_type: "기업업무추진비한도" })
     expect(ng.isError).toBe(true)
+    // 스키마가 필수로 표시한 is_sme가 빠져도 실제로 실패해야 한다 (스키마만 필수, 런타임은 기본값 — 금지)
+    const ngSme = await handleFinCalc(null, { calc_type: "기업업무추진비한도", revenue: 5_000_000_000 })
+    expect(ngSme.isError).toBe(true)
     const ng2 = await handleFinCalc(null, { calc_type: "퇴직소득세", severance_pay: 100_000_000 })
     expect(ng2.isError).toBe(true)
   })
@@ -728,6 +735,7 @@ describe("입력 스키마 — 조건부 필수 (Codex 리뷰: oneOf)", () => {
   // 도구 정의는 매 세션 모든 대화에 실린다 — 설명이 다시 길어지면 여기서 걸린다.
   // 상한은 실측값(inputSchema 3,077 / 전체 3,358)에 여유를 둔 값이다.
   // 2026-09-05 Codex 8차로 +168자: enum 구별 기준 두 건(DISAMBIGUATING_PROPS)을 설명에 넣었다.
+  // 2026-09-16 Codex 9차 I3로 +14자(inputSchema 3,091 / 전체 3,372): is_sme 필수화(설명·oneOf required).
   it("도구 정의가 다시 부풀지 않는다 — 세션 토큰 회귀 방어", () => {
     const schemaLen = JSON.stringify(FIN_CALC_TOOL.inputSchema).length
     const wholeLen = JSON.stringify(FIN_CALC_TOOL).length
@@ -949,6 +957,10 @@ describe("가지급금인정이자 — 이자율 0% 거부 (Claude 리뷰 중요
     expect(t).toContain("무상 대여")
     expect(t).toContain("당좌대출이자율")
     expect(t).not.toContain("익금산입하지 않음")
+    // 세 번째 갈래 (Codex 4차 중요 — BENCHMARK #58): 적격 차입금 전액 무이자인 이례 케이스를
+    // 안내 없이 막지 않고, 그 경우 4.6%로 우회하면 과대 산출이라는 것까지 알린다
+    expect(t).toContain("이례적")
+    expect(t).toContain("과대 산출")
   })
 
   it("0이 아닌 가중평균차입이자율은 종전대로 계산된다 (과잉 거부 방지)", async () => {
@@ -962,6 +974,134 @@ describe("가지급금인정이자 — 이자율 0% 거부 (Claude 리뷰 중요
     const t = res.content[0].text
     expect(t).not.toContain("계산을 거부")
     expect(t).toContain("9,000,000")
+  })
+})
+
+/**
+ * Codex 9차 중요 I3 회귀 — 기업업무추진비한도의 is_sme 기본값 false.
+ * 기본한도가 1,200만원 vs 3,600만원(법인세법 §25④1)으로 3배 갈리는데, 생략하면 조용히
+ * "중소기업 아님"으로 계산해 매출 30억 중소기업에 21,000,000원(맞는 값 45,000,000원)을
+ * 근거 조문과 함께 확정형으로 냈다. rate_type(가지급금인정이자)의 기본값 제거와 같은 처리다.
+ */
+describe("기업업무추진비한도 — 중소기업 여부 기본값 없음 (Codex 9차 I3)", () => {
+  const base = { calc_type: "기업업무추진비한도", revenue: 3_000_000_000 }
+
+  it("is_sme를 생략하면 계산하지 않고 두 갈래의 기본한도를 안내한다", async () => {
+    const res = await handleFinCalc(null, base)
+    expect(res.isError).toBe(true)
+    const t = res.content[0].text
+    expect(t).toContain("[INVALID_PARAMETER]")
+    expect(t).toContain("is_sme")
+    expect(t).toContain("3,600만원")
+    expect(t).toContain("1,200만원")
+    expect(t).toContain("조세특례제한법")
+    expect(t).toContain("사용자에게 확인")
+    // 종전의 조용한 기본값 결과가 나오면 회귀
+    expect(t).not.toContain("21,000,000원")
+    expect(t).not.toContain("한도액")
+  })
+
+  it("is_sme=true면 3,600만원 기본한도로 계산하고 전제를 출력에 밝힌다", async () => {
+    const res = await handleFinCalc(null, { ...base, is_sme: true })
+    expect(res.isError).toBeFalsy()
+    const t = res.content[0].text
+    expect(t).toContain("한도액: 45,000,000원") // 3,600만 + 30억×0.3%
+    expect(t).toContain("중소기업(is_sme=true)")
+  })
+
+  it("is_sme=false면 1,200만원 기본한도로 계산하고, 중소기업이면 달라진다는 것을 함께 밝힌다", async () => {
+    const res = await handleFinCalc(null, { ...base, is_sme: false })
+    expect(res.isError).toBeFalsy()
+    const t = res.content[0].text
+    expect(t).toContain("한도액: 21,000,000원") // 1,200만 + 30억×0.3%
+    expect(t).toContain("중소기업 아님(is_sme=false)")
+    expect(t).toContain("중소기업이면 기본한도가 3,600만원")
+  })
+
+  it("is_sme에 불리언이 아닌 값을 주면 한글로 거부한다", async () => {
+    const res = await handleFinCalc(null, { ...base, is_sme: "예" })
+    expect(res.isError).toBe(true)
+    expect(res.content[0].text).toContain("is_sme(중소기업 여부)")
+  })
+
+  it("다른 계산 유형은 is_sme를 요구하지 않는다 (반대 방향 — 과잉 거부 방지)", async () => {
+    const others = [
+      { calc_type: "임원퇴직금한도", annual_salary: 120_000_000, years: 5 },
+      { calc_type: "감가상각비", acquisition_cost: 100_000_000, useful_life: 5, method: "정액법" },
+      { calc_type: "가지급금인정이자", balance_days: 36_500_000_000, rate_type: "당좌대출이자율" },
+      { calc_type: "퇴직소득세", severance_pay: 100_000_000, service_years: 20 },
+    ]
+    for (const input of others) {
+      const res = await handleFinCalc(null, input)
+      expect(res.isError, `${input.calc_type}가 is_sme 없이 실패`).toBeFalsy()
+      expect(res.content[0].text, `${input.calc_type} 출력에 is_sme 언급`).not.toContain("is_sme")
+    }
+    // 스키마에서도 다른 분기의 필수 목록에 끼어들지 않는다
+    const oneOf = (FIN_CALC_TOOL.inputSchema as any).oneOf as Array<{ properties: any; required: string[] }>
+    for (const b of oneOf) {
+      if (b.properties.calc_type.const === "기업업무추진비한도") continue
+      expect(b.required, `${b.properties.calc_type.const} 필수 목록에 is_sme`).not.toContain("is_sme")
+    }
+  })
+
+  /**
+   * Codex 9차 E9 — 입력값이 출력에 없어 총매출을 revenue에 넣고 특수관계인분을 또 넣은
+   * 중복 입력을 검산할 수 없었다. 입력 전제와 ③의 합산 기준액을 숫자로 되보인다.
+   */
+  it("일반·특수관계인 수입금액 입력값과 ③의 합산 기준을 숫자로 보여 검산할 수 있다", async () => {
+    const input = { calc_type: "기업업무추진비한도", revenue: 60_000_000_000, related_party_revenue: 10_000_000_000, is_sme: false }
+    const res = await handleFinCalc(null, input)
+    expect(res.isError).toBeFalsy()
+    const t = res.content[0].text
+    const w = (n: number) => `${Math.floor(n).toLocaleString("ko-KR")}원`
+    const r = calcEntertainmentLimit(60_000_000_000, 10_000_000_000, false, 12)
+    expect(t).toContain(`일반 수입금액(revenue): ${w(60_000_000_000)}`)
+    expect(t).toContain(`특수관계인 수입금액(related_party_revenue): ${w(10_000_000_000)}`)
+    expect(t).toContain(`사업연도 월수(business_months): 12개월`)
+    expect(t).toContain(`합산 수입금액 ${w(70_000_000_000)} 기준 ${w(r.combinedAmount)} − ② ${w(r.generalAmount)}`)
+    expect(t).toContain(`→ ${w(r.relatedAmount)} (§25④2 단서)`)
+    expect(t).toContain(`한도액: ${w(r.limit)}`)
+    // 총수입금액을 revenue에 넣는 오입력의 결과(과대·이중 계상)를 주의로 밝힌다
+    expect(t).toContain("특수관계인과의 거래 수입금액을 **뺀** 금액")
+  })
+
+  it("특수관계인 수입금액이 없어도 입력 전제에 0원으로 보인다 (없음과 누락을 구분)", async () => {
+    const res = await handleFinCalc(null, { ...base, is_sme: true })
+    const t = res.content[0].text
+    expect(t).toContain("특수관계인 수입금액(related_party_revenue): 0원")
+    expect(t).toContain("③ 특수관계인 거래분 = 없음")
+  })
+
+  it("combinedAmount는 별지 제23호서식(갑) ⑤(총수입금액 기준)와 같다", () => {
+    // 일반 100억 + 특수관계인 100억 → ⑤ 총 200억 = 100억×0.3% + 100억×0.2% = 5,000만
+    const { combinedAmount, generalAmount, relatedAmount } = calcEntertainmentLimit(10_000_000_000, 10_000_000_000, false, 12)
+    expect(combinedAmount).toBe(50_000_000)
+    expect(relatedAmount).toBeCloseTo((combinedAmount - generalAmount) * 0.1, 6)
+  })
+})
+
+/**
+ * Codex 9차 부수 관찰 — 인정이자 출력이 "적수÷365 구조: 시행규칙 제43조제5항이 지정한 별지 제19호서식"이라
+ * 적었는데, §43⑤는 서식을 지정하는 조항이 아니라 "영 제89조제3항제2호에 따라 이자율을 선택하는 경우"의
+ * 작성·제출 의무 조항이다 (원문 대조). 서식 목록 조항은 §82①19다.
+ */
+describe("가지급금인정이자 — 서식·조문 표기 (Codex 9차 부수 관찰)", () => {
+  const input = { calc_type: "가지급금인정이자", principal: 100_000_000, days: 365 }
+
+  it("적수÷365 구조의 출처를 §43⑤가 아니라 서식 목록 조항(§82①19)으로 적는다", async () => {
+    const res = await handleFinCalc(null, { ...input, rate_type: "가중평균차입이자율", weighted_average_rate: 9 })
+    const t = res.content[0].text
+    expect(t).toContain("법인세법 시행규칙 제82조제1항제19호")
+    expect(t).not.toContain("제43조제5항이 지정한")
+    // §43⑤는 당좌대출이자율 **선택**의 제출 의무라 가중평균 갈래에는 나오지 않는다
+    expect(t).not.toContain("§43⑤")
+  })
+
+  it("당좌대출이자율 갈래는 신고 시 선택이면 §43⑤ 제출 의무를 알린다", async () => {
+    const res = await handleFinCalc(null, { ...input, rate_type: "당좌대출이자율" })
+    const t = res.content[0].text
+    expect(t).toContain("§89③2")
+    expect(t).toContain("시행규칙 §43⑤")
   })
 })
 

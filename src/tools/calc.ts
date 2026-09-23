@@ -181,7 +181,10 @@ export const FinCalcInputSchema = z.discriminatedUnion("calc_type", [
     calc_type: z.literal("기업업무추진비한도"),
     revenue: z.number().min(0, "revenue(수입금액)는 0 이상이어야 합니다").max(MAX_AMOUNT, amountMax("revenue(수입금액)")).describe("일반 수입금액 (원)"),
     related_party_revenue: z.number().min(0, "related_party_revenue(특수관계인 수입금액)는 0 이상이어야 합니다").max(MAX_AMOUNT, amountMax("related_party_revenue(특수관계인 수입금액)")).default(0).describe("특수관계인 거래 수입금액 (원)"),
-    is_sme: z.boolean().default(false).describe("중소기업 여부"),
+    // 기본값을 두면 안 된다 (rate_type과 같은 모양의 결함): 기본한도가 1,200만원 vs 3,600만원(법 §25④1)으로
+    // 3배 갈리는데, false를 기본값으로 두면 생략만으로 중소기업의 한도를 낮춘 확정 금액이 근거 조문과 함께
+    // 나간다 (매출 30억: 21,000,000원 vs 45,000,000원 — Codex 9차 중요 I3). 누락은 핸들러가 한글로 잡는다
+    is_sme: z.boolean().optional().describe("중소기업 여부 (필수, 기본값 없음)"),
     business_months: z.number().int("business_months(월수)는 정수여야 합니다").min(1, "business_months(월수)는 1 이상이어야 합니다").max(12, "business_months(월수)는 12 이하여야 합니다").default(12).describe("사업연도 월수 (기본 12)"),
   }),
   z.object({
@@ -259,7 +262,7 @@ export const FIN_CALC_TOOL = {
       months: { type: "integer", minimum: 0, maximum: 11, description: "[임원퇴직금한도] 잔여 개월(기본 0)" },
       revenue: { type: "number", minimum: 0, description: "[기업업무추진비한도·필수] 일반 수입금액(원)" },
       related_party_revenue: { type: "number", minimum: 0, description: "[기업업무추진비한도] 특수관계인 수입금액(원, 기본 0)" },
-      is_sme: { type: "boolean", description: "[기업업무추진비한도] 중소기업 여부(기본 false)" },
+      is_sme: { type: "boolean", description: "[기업업무추진비한도·필수, 기본값 없음] 중소기업 여부" },
       business_months: { type: "integer", minimum: 1, maximum: 12, description: "[기업업무추진비한도·감가상각비] 사업연도·상각 월수(기본 12)" },
       acquisition_cost: { type: "number", exclusiveMinimum: 0, description: "[감가상각비·필수] 취득가액(원)" },
       useful_life: { type: "integer", minimum: 2, maximum: 60, description: "[감가상각비·필수] 내용연수(년)" },
@@ -294,7 +297,8 @@ export const FIN_CALC_TOOL = {
       },
       {
         properties: { calc_type: { const: "기업업무추진비한도" } },
-        required: ["calc_type", "revenue"],
+        // is_sme도 런타임 필수다 — rate_type과 같은 이유로 스키마와 실행 계약을 맞춘다
+        required: ["calc_type", "revenue", "is_sme"],
       },
       {
         properties: { calc_type: { const: "감가상각비" } },
@@ -388,7 +392,7 @@ export function calcEntertainmentLimit(revenue: number, relatedPartyRevenue: num
   const relatedAmount = (combinedAmount - generalAmount) * 0.1
 
   const limit = base + generalAmount + relatedAmount
-  return { base, generalAmount, relatedAmount, limit }
+  return { base, generalAmount, combinedAmount, relatedAmount, limit }
 }
 
 /** 1년 미만 월수의 성격 — §26⑧⑨(월할)과 §28②(환산내용연수)는 산식이 다르다 */
@@ -495,8 +499,10 @@ export function calcDepreciationLimit(
  * 인정이자(익금산입 대상액) = 이자시가 − 약정이자
  *
  * ⚠ 적수 ÷ 365 라는 계산 구조 자체는 조문 본문이 아니라 법인세법 시행규칙 별지 제19호서식
- *   「가지급금 등의 인정이자 조정명세서」의 작성 구조다 (시행규칙 §43⑤이 그 서식을 지정한다).
+ *   「가지급금등의 인정이자조정명세서」의 작성 구조다 (서식 목록: 시행규칙 §82①19).
  *   조문이 명문으로 정한 것은 "시가"(= 이자율)이지 일할 계산식이 아니다.
+ *   ⚠ 시행규칙 §43⑤는 이 서식을 **지정하는** 조항이 아니다 — "영 제89조제3항제2호에 따라 이자율을
+ *   선택하는 경우" 그 서식(갑)의 작성·제출 의무를 정할 뿐이다 (원문 대조 2026-09-16, Codex 9차 부수 관찰)
  */
 export function calcDeemedInterest(
   balanceDays: number,
@@ -584,9 +590,10 @@ export function calcRetirementIncomeTax(severancePay: number, rawServiceYears: n
     untruncatedLocalTax,
     localTax,
     total: incomeTax + localTax,
-    // 소득세법 §86①1 — 원천징수세액이 1천원 미만이면 징수하지 않는다 (세액 0은 해당 없음).
+    // 소득세법 제86조제1호 — 원천징수세액이 1천원 미만이면 징수하지 않는다 (세액 0은 해당 없음).
+    // §86은 항 없이 호만 있다 — "§86①1"로 적지 말 것 (Codex 9차 E8).
     // ⚠ 이 플래그는 **산출세액**이 1천원 미만이라는 사실만 뜻한다. 부징수 여부의 확정이 아니다
-    // — §86①1의 기준은 지급 시점의 차감원천징수세액이고 이 도구는 기납부·과세이연 조정분을
+    // — §86 제1호의 기준은 지급 시점의 차감원천징수세액이고 이 도구는 기납부·과세이연 조정분을
     // 입력받지 않는다. 표시 문구를 "징수하지 않습니다"로 되돌리지 말 것 (Codex 8차)
     belowMinimumWithholding: incomeTax > 0 && incomeTax < MINIMUM_WITHHOLDING,
   }
@@ -733,28 +740,47 @@ export async function handleFinCalc(
   }
 
   if (input.calc_type === "기업업무추진비한도") {
-    const { base, generalAmount, relatedAmount, limit } = calcEntertainmentLimit(
+    if (input.is_sme === undefined) {
+      return invalidParam(
+        "is_sme(중소기업 여부)가 필요합니다 — 기본한도가 3배 달라 기본값을 두지 않습니다:\n" +
+          "  · true — 「조세특례제한법」 제6조제1항에 따른 중소기업(법인세법 §13① 단서의 정의): 기본한도 연 3,600만원 (법인세법 §25④1)\n" +
+          "  · false — 그 밖의 법인: 기본한도 연 1,200만원\n" +
+          "  중소기업 해당 여부를 모르면 임의로 정하지 말고 사용자에게 확인하세요 (아래 예의 값은 형식 예시일 뿐입니다)",
+        EXAMPLES["기업업무추진비한도"]
+      )
+    }
+    const { base, generalAmount, combinedAmount, relatedAmount, limit } = calcEntertainmentLimit(
       input.revenue,
       input.related_party_revenue,
       input.is_sme,
       input.business_months
     )
+    const hasRelated = input.related_party_revenue > 0
     const text = [
       `[산식 기준: ${FORMULA_BASIS}] 기업업무추진비 손금산입 한도`,
       ``,
       `한도액: ${won(limit)}`,
       ``,
+      // 입력값을 그대로 되보인다 — 중소기업 여부는 한도를 3배 가르는 전제이고, 총매출을 revenue에
+      // 넣고 특수관계인분을 또 넣는 중복 입력은 출력에 입력값이 없으면 검산할 수 없다 (Codex 9차 E9)
+      `입력 전제:`,
+      `  · 중소기업 여부: ${input.is_sme ? "중소기업(is_sme=true)" : "중소기업 아님(is_sme=false) — 중소기업이면 기본한도가 3,600만원"}`,
+      `  · 일반 수입금액(revenue): ${won(input.revenue)}`,
+      `  · 특수관계인 수입금액(related_party_revenue): ${won(input.related_party_revenue)}`,
+      `  · 사업연도 월수(business_months): ${input.business_months}개월`,
+      ``,
       `계산 과정:`,
       `  ① 기본한도 = ${input.is_sme ? "3,600만원(중소기업)" : "1,200만원"} × ${input.business_months}/12 = ${won(base)}`,
-      `  ② 수입금액분 = 100억 이하 0.3% + 100억~500억 0.2% + 500억 초과 0.03% 적용 → ${won(generalAmount)}`,
-      input.related_party_revenue > 0
-        ? `  ③ 특수관계인 거래분 = 합산 산출액 증가분의 10%만 인정 → ${won(relatedAmount)} (§25④2 단서)`
+      `  ② 수입금액분 = 일반 수입금액 ${won(input.revenue)}에 100억 이하 0.3% + 100억~500억 0.2% + 500억 초과 0.03% 적용 → ${won(generalAmount)}`,
+      hasRelated
+        ? `  ③ 특수관계인 거래분 = (합산 수입금액 ${won(input.revenue + input.related_party_revenue)} 기준 ${won(combinedAmount)} − ② ${won(generalAmount)}) × 10% → ${won(relatedAmount)} (§25④2 단서)`
         : `  ③ 특수관계인 거래분 = 없음`,
       `  한도 = ① + ② + ③ = ${won(limit)}`,
       ``,
       `근거: 법인세법 제25조제4항`,
       ``,
       `⚠ 주의:`,
+      `  · revenue는 특수관계인과의 거래 수입금액을 **뺀** 금액이다 — 총수입금액을 그대로 넣으면 특수관계인분이 10%로 줄지 않아 한도가 과대 계산되고, related_party_revenue까지 함께 넣으면 그 금액이 이중으로 잡힌다`,
       `  · 문화 기업업무추진비 추가 한도(조세특례제한법 §136③)는 이 계산에 미포함`,
       `  · 3만원 초과 적격증빙(신용카드 등) 미수취분은 한도 이전에 전액 손금불산입 (§25②)`,
       `  · 부동산임대업 주업 법인 등 특정법인은 한도 50% 축소 (§25⑤) — 미반영`,
@@ -943,6 +969,7 @@ export async function handleFinCalc(
         ? [
             `     ⚠ 당좌대출이자율은 §89③ **단서 각 호의 예외**입니다 (원칙은 가중평균차입이자율) —`,
             `        ①가중평균 적용 불가 사유 ②대여기간 5년 초과 등 ③신고와 함께 선택 중 하나에 해당하는지 확인하세요`,
+            `        ③(신고 시 선택, §89③2)이면 별지 제19호서식(갑)을 작성·제출해야 합니다 (시행규칙 §43⑤)`,
           ]
         : []),
       `  ③ 이자 시가 = 적수 × ${pct(annualRate)} ÷ ${daysInYear}일${input.is_leap_year ? " (윤년)" : ""} = ${won(marketInterest)}`,
@@ -972,7 +999,7 @@ export async function handleFinCalc(
       isOverdraft
         ? `      당좌대출이자율 연 4.6%: 법인세법 시행규칙 제43조제2항 ("연간 1,000분의 46")`
         : `      가중평균차입이자율의 계산방법: 법인세법 시행규칙 제43조제1항 (입력값 사용)`,
-      `      적수 ÷ ${daysInYear} 계산 구조: 시행규칙 제43조제5항이 지정한 별지 제19호서식 「가지급금 등의 인정이자 조정명세서」`,
+      `      적수 ÷ ${daysInYear} 계산 구조: 조문 본문이 아니라 별지 제19호서식 「가지급금등의 인정이자조정명세서」의 작성 구조 (서식 목록: 법인세법 시행규칙 제82조제1항제19호)`,
       ...unitWarning,
       ``,
       `⚠ 주의:`,
@@ -998,7 +1025,7 @@ export async function handleFinCalc(
     `※ 끝수 계산 반영 — 과세표준은 1원 미만, 산출세액은 10원 미만을 절사했습니다 (국고금 관리법 §47②·§47① · 지방세는 지방세기본법 §59가 준용)`,
     ...(r.belowMinimumWithholding
       ? [
-          `⚠ 산출세액이 1천원 미만입니다 — 소액 부징수(소득세법 §86①1)의 판단 기준은 지급 시점의 **원천징수세액**(기납부세액·과세이연 조정 후 차감원천징수세액)이고 이 도구는 산출세액만 계산하므로, 징수 여부는 여기서 확정하지 않습니다. 다른 조정분이 없다면 징수하지 않는 방향입니다`,
+          `⚠ 산출세액이 1천원 미만입니다 — 소액 부징수(소득세법 제86조제1호)의 판단 기준은 지급 시점의 **원천징수세액**(기납부세액·과세이연 조정 후 차감원천징수세액)이고 이 도구는 산출세액만 계산하므로, 징수 여부는 여기서 확정하지 않습니다. 다른 조정분이 없다면 징수하지 않는 방향입니다`,
         ]
       : []),
     ``,

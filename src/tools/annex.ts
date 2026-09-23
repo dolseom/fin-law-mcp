@@ -13,7 +13,7 @@ import type { LawApiClient } from "../lib/api-client.js"
 import { sameLawFamily } from "../lib/law-search.js"
 import { stripTrailingParen, isAdminRuleLikeName, findAdminRule } from "./admin-rule-citation.js"
 import { formatFetchFailure } from "../lib/errors.js"
-import { fetchWithRetry } from "../lib/fetch-with-retry.js"
+import { fetchWithRetry, maskSensitiveUrl } from "../lib/fetch-with-retry.js"
 import { flattenContent } from "../lib/article-parser.js"
 import { truncateWithHint, SOURCE_FOOTER, compactName } from "../lib/fin-common.js"
 
@@ -292,7 +292,11 @@ async function extractAnnexContent(
 
 export async function handleFinAnnex(
   apiClient: LawApiClient,
-  rawInput: unknown
+  rawInput: unknown,
+  // 호출 맥락 — 디스패처가 MCP 요청 취소 신호를 넘긴다. 종전에는 이 도구의 API 호출 셋
+  // (getAnnexes·findAdminRule·getAdminRule) 모두 apiKey·signal 없이 불려, 요청이 취소돼도
+  // 수백 KB 행정규칙 본문 조회가 끝까지 돌았다 (r2-verify 발견 — 다른 소비자는 signal을 넘긴다)
+  ctx: { apiKey?: string; signal?: AbortSignal } = {}
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   const parsed = FinAnnexInputSchema.safeParse(rawInput)
   if (!parsed.success) {
@@ -309,7 +313,7 @@ export async function handleFinAnnex(
     // 보정됐는데 별표 직행 경로만 남아 있었다 (Codex 4차 중요 — 반쪽 수정의 같은 패턴).
     // 출력 헤더의 표시는 원문(law) 그대로 둔다
     const lawLookup = stripTrailingParen(law)
-    const jsonText = await apiClient.getAnnexes({ lawName: lawLookup, knd: kind })
+    const jsonText = await apiClient.getAnnexes({ lawName: lawLookup, knd: kind, apiKey: ctx.apiKey, signal: ctx.signal })
     const acc: AnnexEntry[] = []
     collectAnnexes(JSON.parse(jsonText), acc, lawLookup)
 
@@ -324,7 +328,7 @@ export async function handleFinAnnex(
     let adminRuleOtherKinds = ""
     if (entries.length === 0 && isAdminRuleLikeName(lawLookup)) {
       try {
-        const match = await findAdminRule(apiClient, lawLookup)
+        const match = await findAdminRule(apiClient, lawLookup, ctx.apiKey, ctx.signal)
         // 이름은 정확히 맞는데 본문 조회 ID가 없으면 별표를 확인할 방법이 없다 —
         // 그대로 "0건"으로 내보내면 실존 별표가 없는 것으로 읽힌다 (Codex 7차 중요.
         // 조문 검증 경로는 같은 상황을 ⚠로 처리하는데 별표 경로에만 빠져 있었다)
@@ -333,7 +337,7 @@ export async function handleFinAnnex(
         }
         // 접두 일치(더 긴 다른 규칙)로 남의 별표를 보여주지 않는다 — 정확 일치만
         if (match?.exact && match.seq) {
-          const body = await apiClient.getAdminRule(match.seq)
+          const body = await apiClient.getAdminRule(match.seq, ctx.apiKey, ctx.signal)
           const found = parseAdminRuleAnnexes(body, kind, match.name)
           const meta = [match.ruleType, match.orgName].filter(Boolean).join(" · ")
           if (found.entries.length > 0) {
@@ -405,7 +409,11 @@ export async function handleFinAnnex(
         let line = `  · [${formatAnnexNo(a.no, kindLabel)}]${ownerNote} ${a.name}`
         if (a.fileLink) {
           const url = a.fileLink.startsWith("http") ? a.fileLink : `https://www.law.go.kr${a.fileLink}`
-          line += `\n      다운로드: ${url.replace(/&amp;/g, "&")}`
+          // 파일 링크가 비면 별표법령상세링크(/DRF/lawService.do?OC=<키>…)가 대신 들어온다 — 인증키가
+          // 출력에 그대로 새지 않게 &amp;를 되돌린 뒤 가리고, 가렸다는 사실을 적는다 (Codex 9차)
+          const plain = url.replace(/&amp;/g, "&")
+          const masked = maskSensitiveUrl(plain)
+          line += `\n      다운로드: ${masked}${masked !== plain ? " (인증키 가림 — 법제처 API 상세링크라 그대로는 열리지 않음)" : ""}`
         }
         return line
       })
