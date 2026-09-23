@@ -9,7 +9,6 @@
  *    필요한 비공개 헬퍼를 이 파일에 복제했다 (rebase 충돌 방지).
  */
 
-import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
 import { cleanHtml } from "../lib/article-parser.js"
 import { truncateResponse } from "../lib/schemas.js"
@@ -31,16 +30,11 @@ function ntsGate(): void {
   if (!v2.ok) throw new Error(`RATE_LIMITED: 국세청 경로 일일 한도 초과 — ${v2.retryAfterSec}초 후 재시도하세요.`)
 }
 
-export const GetNtsDecisionBodySchema = z.object({
-  id: z.string().describe(
-    "search_decisions(domain='nts') 결과의 링크(taxlaw.nts.go.kr …ntstDcmId=…) 또는 ntstDcmId 값"
-  ),
-  apiKey: z.string().optional().describe(
-    "미사용 — 국세청 공개 엔드포인트 직접 조회라 법제처 OC 키가 필요 없음 (타 도메인과의 인터페이스 호환용)"
-  ),
-})
-
-export type GetNtsDecisionBodyInput = z.infer<typeof GetNtsDecisionBodySchema>
+/** 본문 조회 입력 — 국세청 공개 엔드포인트 직접 조회라 법제처 OC 키가 필요 없다 */
+export interface GetNtsDecisionBodyInput {
+  /** fin_ruling_search 국세청 예규 결과의 링크(taxlaw.nts.go.kr …ntstDcmId=…) 또는 ntstDcmId 값 */
+  id: string
+}
 
 /**
  * id 입력에서 ntstDcmId 추출.
@@ -149,7 +143,7 @@ async function fetchTaxlawAction(ntstDcmId: string, referer: string): Promise<an
 
 // ---- 본체 ----
 
-/** 국세청 예규·법령해석 본문 조회 — get_decision_text(domain="nts") 핸들러 */
+/** 국세청 예규·법령해석 본문 조회 — fin_nts_ruling이 호출하는 내부 함수 */
 export async function getNtsDecisionBody(
   _apiClient: LawApiClient,
   args: GetNtsDecisionBodyInput
@@ -158,7 +152,7 @@ export async function getNtsDecisionBody(
   if (!ntstDcmId) {
     const text =
       `[ID_MISMATCH] '${args.id}'는 법제처 일련번호로 보입니다. 국세청 본문 조회에는 ntstDcmId가 필요합니다.\n` +
-      `→ search_decisions(domain="nts") 결과의 '링크'(taxlaw.nts.go.kr …ntstDcmId=…)를 id로 그대로 전달하세요.\n` +
+      `→ fin_ruling_search(국세청 예규) 결과의 '링크'(taxlaw.nts.go.kr …ntstDcmId=…)를 id로 그대로 전달하세요.\n` +
       `(두 식별번호는 별개 체계라 자동 변환이 불가합니다.)`
     return { content: [{ type: "text", text }], isError: true }
   }
