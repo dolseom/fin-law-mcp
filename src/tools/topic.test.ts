@@ -15,6 +15,7 @@ import { describe, it, expect } from "vitest"
 import {
   matchTopics,
   rankTopics,
+  analyzeTopics,
   handleFinTopic,
   MAX_TOPICS,
   NO_MATCH_TRIGGERS_SHOWN,
@@ -24,7 +25,7 @@ import { FIN_CALC_TOOL } from "./calc.js"
 import { TOPICS, TOPICS_VERIFIED_AT, type Topic } from "../data/topics.js"
 
 /** 실제 표와 무관한 최소 주제 — 매칭 규칙만 본다 */
-function fake(id: string, triggers: string[], name = id): Topic {
+function fake(id: string, triggers: string[], name = id, extra: Partial<Topic> = {}): Topic {
   return {
     id,
     name,
@@ -34,6 +35,7 @@ function fake(id: string, triggers: string[], name = id): Topic {
     rulingQuery: null,
     calc: null,
     notJudged: [`${name}는 판단하지 않는다`],
+    ...extra,
   }
 }
 
@@ -42,42 +44,129 @@ function articleArgs(text: string): Array<{ law: string; article: string; basis_
   return [...text.matchAll(/^ +(\{"law":.*\})$/gm)].map((m) => JSON.parse(m[1]))
 }
 
-describe("matchTopics — 트리거 부분 문자열 매칭", () => {
+const ids = (q: string, 표: Topic[]) => matchTopics(q, 표).map((t) => t.id)
+
+describe("matchTopics — 어절 단위 매칭", () => {
   const 표: Topic[] = [
-    fake("card", ["법인카드", "카드"], "법인카드"),
+    fake("card", ["법인카드"], "법인카드"),
     fake("meal", ["식대", "밥값"], "식대"),
     fake("trip", ["출장비", "출장"], "출장비"),
   ]
 
   it("트리거 하나가 걸리면 그 주제 하나를 돌려준다", () => {
-    expect(matchTopics("법인카드 한도가 궁금합니다", 표).map((t) => t.id)).toEqual(["card"])
+    expect(ids("법인카드 한도가 궁금합니다", 표)).toEqual(["card"])
   })
 
-  it("띄어쓰기가 달라도 걸린다 — 공백을 지우고 비교한다", () => {
-    expect(matchTopics("법인 카드로 결제했어요", 표).map((t) => t.id)).toEqual(["card"])
+  it("트리거 뒤에 조사·어미가 붙어도 걸린다", () => {
+    expect(ids("법인카드로 결제했어요", 표)).toEqual(["card"])
+    expect(ids("출장비를 정액으로 주면", 표)).toEqual(["trip"])
+  })
+
+  it("띄어쓰기가 흔들려도 걸린다 — 경계 양쪽 조각이 2글자 이상이면", () => {
+    expect(ids("법인 카드로 결제했어요", 표)).toEqual(["card"])
+  })
+
+  it("어절 이음새에서만 생기는 말에는 걸리지 않는다 (9차 리뷰 차단 결함)", () => {
+    const 이음새표 = [fake("loan", ["가지급"]), fake("car", ["회사차", "주차비"]), fake("pt", ["알바"])]
+    // 공백을 지우면 "회사가지급한"·"회사차원"·"주차비"·"알바가"가 되지만 사용자는 그 말을 쓰지 않았다
+    expect(ids("회사가 지급한 과태료 손금 되나요", 이음새표)).toEqual([])
+    expect(ids("회사 차원에서 결산 일정", 이음새표)).toEqual([])
+    expect(ids("이번 주 차비 좀 아껴야겠어요", 이음새표)).toEqual([])
+    expect(ids("그건 내 알 바가 아니에요", 이음새표)).toEqual([])
+  })
+
+  it("어절 안쪽에서 시작하는 짧은 말에는 걸리지 않는다", () => {
+    const 내부표 = [fake("flower", ["화환"]), fake("trip2", ["출장비"])]
+    expect(ids("기말 외화환산손익 계산", 내부표)).toEqual([])
+    expect(ids("수출 장비 선적 서류", 내부표)).toEqual([])
+  })
+
+  it("2글자 이하 트리거는 뒤에 조사·어미만 허용한다", () => {
+    const 짧은표 = [fake("condolence", ["부조"]), fake("lease", ["리스"])]
+    expect(ids("거래처 상가에 부조를 했어요", 짧은표)).toEqual(["condolence"])
+    expect(ids("부조리 신고 절차", 짧은표)).toEqual([])
+    expect(ids("차를 리스했는데 비용처리", 짧은표)).toEqual(["lease"])
+    expect(ids("환율 리스크 관리", 짧은표)).toEqual([])
+  })
+
+  it("'이'로 시작하는 나머지는 정확한 조사 꼴만 허용한다 — '대표이사'의 '이사'는 조사가 아니다", () => {
+    const 표2 = [fake("boss", ["사장", "대표"])]
+    expect(ids("사장이 돈 뺐어요", 표2)).toEqual(["boss"])
+    expect(ids("대표님이 가져갔어요", 표2)).toEqual(["boss"])
+    expect(ids("대표이사 상여금", 표2)).toEqual([])
+  })
+
+  it("1글자 트리거는 나머지가 정확한 조사일 때만 걸린다", () => {
+    const 한글자표 = [fake("car", ["차"])]
+    expect(ids("차를 샀는데", 한글자표)).toEqual(["car"])
+    expect(ids("3개월 차이", 한글자표)).toEqual([])
+    expect(ids("차가운 반응", 한글자표)).toEqual([])
+  })
+
+  it("공백이 든 트리거는 연속 어절 각각의 앞부분에서 걸린다", () => {
+    const 공백표 = [fake("ent", ["거래처 접대"]), fake("gift", ["선물 사"])]
+    expect(ids("거래처랑 접대했는데 영수증", 공백표)).toEqual(["ent"])
+    expect(ids("거래처접대비 한도", 공백표)).toEqual(["ent"])
+    // 조각에도 짧은 말 규칙이 걸린다 — "선물세트"의 "세트"는 조사가 아니다
+    expect(ids("선물세트 사서 돌렸어요", 공백표)).toEqual([])
+    expect(ids("선물 사 줬어요", 공백표)).toEqual(["gift"])
+  })
+
+  it("숫자 트리거는 더 긴 숫자의 일부에서 걸리지 않는다", () => {
+    const 숫자표 = [fake("car", ["800만원"]), fake("fee", ["3.3"]), fake("ins", ["60시간"])]
+    expect(ids("연봉 2,800만원 직원", 숫자표)).toEqual([])
+    expect(ids("3.31 기준 결산", 숫자표)).toEqual([])
+    expect(ids("2023.3.15에 산 기계", 숫자표)).toEqual([])
+    expect(ids("월 160시간 근무", 숫자표)).toEqual([])
+    expect(ids("3.3% 떼고 줬어요", 숫자표)).toEqual(["fee"])
+    expect(ids("감가상각 800만원 한도", 숫자표)).toEqual(["car"])
+    expect(ids("월60시간 미만", 숫자표)).toEqual(["ins"])
+  })
+
+  it("4글자 이상 트리거는 붙여 쓴 복합어 안에서도 걸린다 — 어절 경계는 건너지 않는다", () => {
+    const 복합표 = [fake("c", ["경조사비"]), fake("p", ["가지급금"]), fake("m", ["법인명의"])]
+    expect(ids("직원경조사비 한도", 복합표)).toEqual(["c"])
+    expect(ids("대표이사가지급금 정리", 복합표)).toEqual(["p"])
+    // "외국법인" 안에서 시작해 다음 어절로 넘어가는 매칭은 인정하지 않는다
+    expect(ids("외국법인 명의로 송금", 복합표)).toEqual([])
+  })
+
+  it("+로 이은 트리거는 두 말이 질문 어디에든 모두 있어야 걸린다 (순서 무관)", () => {
+    const 조합표 = [fake("wed", ["결혼+직원"])]
+    expect(ids("직원이 결혼해서 50만원 줬어요", 조합표)).toEqual(["wed"])
+    expect(ids("결혼하는 직원 축하금", 조합표)).toEqual(["wed"])
+    expect(ids("자녀 결혼시키면 증여재산공제", 조합표)).toEqual([])
+    const [top] = rankTopics("직원이 결혼해서", 조합표)
+    expect(top.hits[0].words).toEqual(["결혼해서", "직원이"])
   })
 
   it("두 주제가 걸리면 전부 돌려준다", () => {
-    const ids = matchTopics("법인카드로 출장 숙박비 결제", 표).map((t) => t.id)
-    expect(ids).toContain("card")
-    expect(ids).toContain("trip")
+    const got = ids("법인카드로 출장 숙박비 결제", 표)
+    expect(got).toContain("card")
+    expect(got).toContain("trip")
   })
 
-  it("걸린 트리거 수가 많은 주제가 앞선다 (점수 = 트리거 수)", () => {
-    // "출장비"·"출장"이 둘 다 걸리는 trip(2점) > "카드" 하나만 걸리는 card(1점)
-    expect(matchTopics("카드로 낸 출장비", 표).map((t) => t.id)).toEqual(["trip", "card"])
-  })
-
-  it("어느 트리거가 걸렸는지 rankTopics가 표 표기 순서로 알려 준다", () => {
+  it("겹치는 매칭은 가장 긴 것 하나만 센다 — 트리거가 서로를 포함해도 점수가 부풀지 않는다", () => {
     const [top] = rankTopics("출장비 정산", 표)
     expect(top.topic.id).toBe("trip")
-    expect(top.matched).toEqual(["출장비", "출장"])
+    expect(top.matched).toEqual(["출장비"])
   })
 
-  it("동점이면 표 순서를 유지한다 (안정 정렬)", () => {
-    expect(matchTopics("밥값과 출장 처리", 표).map((t) => t.id)).toEqual(["meal", "trip"])
-    // 표 순서를 뒤집으면 결과 순서도 뒤집힌다 — 우연히 맞은 정렬이 아님을 확인
-    expect(matchTopics("밥값과 출장 처리", [표[2], 표[1], 표[0]]).map((t) => t.id)).toEqual(["trip", "meal"])
+  it("걸린 어절 원문을 함께 알려 준다 (출력의 '매칭어 ← 원문')", () => {
+    const [top] = rankTopics("법인 카드로 결제했어요", 표)
+    expect(top.hits).toEqual([{ trigger: "법인카드", kind: "strong", words: ["법인 카드로"] }])
+  })
+
+  it("동점을 표 순서가 아니라 매칭 글자 수로 가른다 — 표 순서를 뒤집어도 결과가 같다", () => {
+    const 동점표 = [fake("short", ["식대"]), fake("long", ["출장비"])]
+    expect(ids("식대랑 출장비 처리", 동점표)).toEqual(["long", "short"])
+    expect(ids("식대랑 출장비 처리", [동점표[1], 동점표[0]])).toEqual(["long", "short"])
+  })
+
+  it("글자 수까지 같으면 질문에서 먼저 나온 주제가 앞선다", () => {
+    const 동점표 = [fake("a", ["밥값"]), fake("b", ["식대"])]
+    expect(ids("식대랑 밥값", 동점표)).toEqual(["b", "a"])
+    expect(ids("밥값이랑 식대", 동점표)).toEqual(["a", "b"])
   })
 
   it(`아무리 많이 걸려도 상위 ${MAX_TOPICS}개까지만 돌려준다`, () => {
@@ -90,18 +179,90 @@ describe("matchTopics — 트리거 부분 문자열 매칭", () => {
     expect(matchTopics("연차수당은 언제 주나요", 표)).toEqual([])
   })
 
-  it("빈 질문은 0건 — 빈 문자열이 모든 주제에 걸리지 않는다", () => {
+  it("빈 질문·문장부호만 있는 질문은 0건 — 빈 문자열이 모든 주제에 걸리지 않는다", () => {
     expect(matchTopics("   ", 표)).toEqual([])
+    expect(matchTopics("?!.", 표)).toEqual([])
   })
 
-  it("빈 트리거가 표에 섞여도 전체 매칭이 되지 않는다", () => {
+  it("빈 트리거·빈 조각이 표에 섞여도 전체 매칭이 되지 않는다", () => {
     expect(matchTopics("아무 말", [fake("bad", [""], "빈트리거")])).toEqual([])
+    expect(matchTopics("직원 아무 말", [fake("bad2", ["+직원"], "빈조각")])).toEqual([])
+  })
+})
+
+describe("analyzeTopics — 강·약·맥락 트리거", () => {
+  const 표: Topic[] = [
+    fake("fee", ["강사료"], "강사료", { weakTriggers: ["원천징수", "3.3"], contextTriggers: ["세금"] }),
+    fake("car", ["업무용승용차"], "승용차", { weakTriggers: ["리스"], contextTriggers: ["감가상각", "비용처리", "회사 명의"] }),
+    fake("dep", ["감가상각"], "감가상각"),
+  ]
+
+  it("약 트리거 하나만으로는 주제를 띄우지 않고, 0건 안내용 목록(weakOnly)에만 남긴다", () => {
+    const r = analyzeTopics("배당금 원천징수 세율", 표)
+    expect(r.ranked).toEqual([])
+    expect(r.weakOnly.map((m) => m.topic.id)).toEqual(["fee"])
+  })
+
+  it("약 트리거 둘, 또는 약 트리거 + 맥락어면 띄운다", () => {
+    expect(analyzeTopics("3.3 원천징수", 표).ranked.map((m) => m.topic.id)).toEqual(["fee"])
+    expect(analyzeTopics("원천징수 세금 계산", 표).ranked.map((m) => m.topic.id)).toEqual(["fee"])
+  })
+
+  it("맥락어만으로는 둘이 걸려도 띄우지 않는다", () => {
+    const r = analyzeTopics("회사 명의로 조화 보냈는데 비용처리", 표)
+    expect(r.ranked).toEqual([])
+    expect(r.weakOnly).toEqual([]) // 맥락어는 "넓은 말만 걸린 주제" 안내에도 올리지 않는다
+  })
+
+  it("맥락어는 순위를 가른다 — 다른 주제의 강 트리거를 맥락어로 두면 그 말이 함께 나올 때 앞선다", () => {
+    // car = 강(업무용승용차) + 맥락(감가상각) > dep = 강(감가상각)
+    expect(ids("업무용승용차 감가상각 한도", 표)).toEqual(["car", "dep"])
+    // 강 트리거는 약 + 맥락보다 앞선다 — "리스 회계 사용권자산 감가상각"이 업무용승용차로 가지 않게
+    expect(ids("리스 감가상각", 표)).toEqual(["dep", "car"])
+  })
+
+  it("세기가 hits에 실린다", () => {
+    const [top] = analyzeTopics("원천징수 세금 계산", 표).ranked
+    expect(top.hits.map((h) => [h.trigger, h.kind])).toEqual([
+      ["원천징수", "weak"],
+      ["세금", "context"],
+    ])
   })
 })
 
 describe("TOPICS 불변식 — 내용이 아니라 형식만 본다", () => {
   it("표가 비어 있지 않다", () => {
     expect(TOPICS.length).toBeGreaterThan(0)
+  })
+
+  it(`대표어(앞 ${NO_MATCH_TRIGGERS_SHOWN}개)는 +가 없는 강 트리거다 — 0건 안내가 "그대로 넣으면 걸린다"고 약속하는 말이다`, () => {
+    for (const t of TOPICS) {
+      for (const s of t.triggers.slice(0, NO_MATCH_TRIGGERS_SHOWN)) {
+        expect(s, `${t.id}: 대표어 "${s}"에 +가 있습니다`).not.toContain("+")
+      }
+    }
+  })
+
+  it("같은 강 트리거가 두 주제에 있지 않다 — 있으면 동점을 표 밖의 요인이 가른다 (9차 리뷰: 접대비·차량 감가상각)", () => {
+    const owner = new Map<string, string>()
+    const dups: string[] = []
+    for (const t of TOPICS) {
+      for (const s of t.triggers) {
+        const key = s.replace(/\s+/g, "").toLowerCase()
+        const prev = owner.get(key)
+        if (prev && prev !== t.id) dups.push(`"${s}": ${prev} ↔ ${t.id}`)
+        owner.set(key, t.id)
+      }
+    }
+    expect(dups).toEqual([])
+  })
+
+  it("한 주제 안에서 같은 말이 강·약·맥락에 겹쳐 적히지 않는다", () => {
+    for (const t of TOPICS) {
+      const all = [...t.triggers, ...(t.weakTriggers ?? []), ...(t.contextTriggers ?? [])].map((s) => s.replace(/\s+/g, "").toLowerCase())
+      const dups = all.filter((v, i) => all.indexOf(v) !== i)
+      expect(dups, `${t.id}: 중복 트리거`).toEqual([])
+    }
   })
 
   it("id가 중복되지 않는다", () => {
@@ -144,6 +305,64 @@ describe("TOPICS 불변식 — 내용이 아니라 형식만 본다", () => {
 
   it("마지막 대조일이 YYYY-MM-DD 형식이다", () => {
     expect(TOPICS_VERIFIED_AT).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  })
+})
+
+/**
+ * 표의 **산문**이 원문보다 넓거나 좁게 적혀 있던 자리를 잠근다.
+ *
+ * 매칭 기대값이 아니다 — 트리거·점수·순위는 위쪽 가짜 표로만 본다. 여기서 보는 것은
+ * checks·note 문장이 조문의 요건 구조(한정·AND·OR·별도 한도)를 지우지 않는지다.
+ * 산문은 매칭에 쓰이지 않고 topic.ts가 출력에 그대로 싣기만 하므로, 이 단언이 깨지면
+ * 그것은 매처 회귀가 아니라 **표의 사실관계 회귀**다.
+ *
+ * 근거는 `.release-scratch/probes/r9-prose-cache/`의 오프라인 캐시 판본이다(2026-09-16 수집):
+ *   소득세법 제12조 3호 러목(MST 280405) · 국민연금법 시행령 제2조 4호(MST 272577)
+ *   법인세법 제27조의2 제3~5항(MST 280349) · 법인세법 시행령 제50조의2 제13·15항(MST 283635)
+ */
+describe("TOPICS 산문 — 조문의 요건 구조를 지우지 않는다", () => {
+  const 주제 = (id: string): Topic => {
+    const found = TOPICS.find((t) => t.id === id)
+    if (found === undefined) throw new Error(`주제 ${id}가 표에서 사라졌습니다`)
+    return found
+  }
+
+  it("식대 비과세 — 현물 식사는 사내급식·유사 제공일 때이고, 법인카드 결제만으로 단정하지 않는다", () => {
+    const t = 주제("meal-allowance-nontaxable")
+    const checks = t.checks.join("\n")
+    // 러목 앞부분의 한정을 문장에 남긴다 ("법인카드로 먹으면 비과세"로 읽히면 안 된다)
+    expect(checks).toContain("사내급식이나 이와 유사한 방법으로 제공받는 식사")
+    expect(checks).toContain("법인카드로 결제했다는 사실만으로 그 요건이 채워지지는 않는다")
+    // 20만원은 "식사 등을 제공받지 아니하는 근로자"의 식사대에만 붙는 한도다
+    expect(checks).toContain("식사를 제공받지 아니하는 근로자에 한정")
+    expect(checks).toContain("월 20만원")
+    const 러목 = t.articles.find((a) => a.law === "소득세법" && a.article === "제12조")?.note ?? ""
+    expect(러목).toContain("제3호 러목")
+    expect(러목).toContain("식사 기타 음식물을 제공받지 아니하는 자에 한정한다")
+  })
+
+  it("국민연금 60시간 미만 예외 — 나목에도 3개월 계속근로, 다목은 합산 60시간 + 그 사업장에서의 적용 희망", () => {
+    const checks = 주제("social-insurance-coverage").checks.join("\n")
+    expect(checks).toContain("3개월 이상 계속 근로하면서 사용자 동의를 받아 근로자 적용을 희망하는 사람(나목")
+    expect(checks).toContain("각 사업장의 1개월 소정근로시간 합이 60시간 이상인 사람이 60시간 미만인 그 사업장에서 적용을 희망")
+    // 네 갈래는 국민연금 시행령의 예외다 — 건강보험·고용보험 예외와 뭉뚱그리지 않는다
+    expect(checks).toContain("건강보험·고용보험에는 각각 다른 예외가 있다")
+  })
+
+  it("업무용승용차 — 400만원 축소는 감가상각비 한도와 처분손실 한도 둘 다에 걸린다", () => {
+    const t = 주제("business-vehicle-expense")
+    const checks = t.checks.join("\n")
+    expect(checks).toContain("처분손실 한도 800만원")
+    expect(checks).toContain("제4항 처분손실")
+    // 소규모법인 요건은 3개 AND, 그중 둘째 안이 임대업 주업 OR 수입비율이다
+    expect(checks).toContain("세 요건을 모두 갖춘 법인")
+    expect(checks).toContain("부동산 임대업이 주된 사업이거나")
+    expect(checks).toContain("상시근로자 5명 미만")
+    // 운행기록 미작성 기준(1,500만원→500만원)은 800/400과 다른 줄기다 — 섞이면 안 된다
+    expect(checks).toContain("1,500만원이 500만원")
+    const note = t.articles.find((a) => a.law === "법인세법" && a.article === "제27조의2")?.note ?? ""
+    expect(note).toContain("제4항이 처분손실")
+    expect(note).toContain("제3항·제4항의 800만원을 각각 400만원으로")
   })
 })
 
@@ -223,6 +442,16 @@ describe("handleFinTopic — 출력", () => {
     expect(text).toContain("기준일 2026-01-01")
   })
 
+  it("basis_date를 주면 예규 검색 인자에도 실린다 — 조문은 그 시점, 예규는 현재가 섞이지 않게 (9차 리뷰)", async () => {
+    const q = TOPICS[0].rulingQuery
+    expect(q, "첫 주제에 예규 검색어가 없습니다").not.toBeNull()
+    const text = (await handleFinTopic(null, { question: 확실한질문, basis_date: "2026-01-01" })).content[0].text
+    expect(text).toContain(`fin_ruling_search ${JSON.stringify({ query: q, basis_date: "2026-01-01" })}`)
+    // 기준일이 없으면 종전 표기 그대로 (README의 실측 출력)
+    const plain = (await handleFinTopic(null, { question: 확실한질문 })).content[0].text
+    expect(plain).toContain(`예규 검색어: "${q}" (fin_ruling_search)`)
+  })
+
   it("0건이면 isError가 아니고, 다음 수와 주제 목록을 안내한다", async () => {
     const res = await handleFinTopic(null, { question: "zzz 아무 데도 없는 말 qqq" })
     expect(res.isError).toBeUndefined()
@@ -233,12 +462,33 @@ describe("handleFinTopic — 출력", () => {
     for (const t of TOPICS) expect(text, `주제 목록에 ${t.name}이 없습니다`).toContain(t.name)
   })
 
-  it("0건은 '그런 제도가 없다'가 아니라 '이 표에 없다'라고 말한다 (판정이 아님)", async () => {
+  it("0건은 '그런 제도가 없다'도 '표에 주제가 없다'도 아니라고 말한다 (판정이 아님 — 9차 리뷰)", async () => {
     const text = (await handleFinTopic(null, { question: "zzz 아무 데도 없는 말 qqq" })).content[0].text
     expect(text).toContain("판정이 아닙니다")
-    expect(text).toContain("이 표에 그 주제가 없다")
+    // 표에 있는 주제를 다른 말로 물어도 0건이 난다 — "이 표에 그 주제가 없다"고 단정하면 거짓이다
+    expect(text).not.toContain("이 표에 그 주제가 없다")
+    expect(text).toContain("이 표에 주제가 없다는 뜻도 아닙니다")
     // fin_law_search의 0건도 "법이 없다"로 읽히면 안 된다는 경고가 함께 있어야 한다
     expect(text).toContain("그런 법령이 없다")
+  })
+
+  it("약 트리거 하나만 걸린 주제는 조문 없이 이름과 걸린 말만 0건 안내에 보여 준다", async () => {
+    // 실제 표의 약 트리거 중, 그 말 하나만으로 된 질문이 약 트리거 단독이 되는 것을 고른다 (표 내용에 기대지 않게)
+    const pick = TOPICS.flatMap((t) => (t.weakTriggers ?? []).map((w) => ({ t, w }))).find(
+      ({ t, w }) => rankTopics(w).length === 0 && analyzeTopics(w).weakOnly.some((m) => m.topic.id === t.id)
+    )
+    expect(pick, "약 트리거 단독 질문을 만들 수 없습니다 — 표의 weakTriggers 확인").toBeDefined()
+    const text = (await handleFinTopic(null, { question: pick!.w })).content[0].text
+    expect(text).toContain("매칭된 주제가 없습니다")
+    expect(text).toContain("넓은 말 하나만 걸린 주제")
+    expect(text).toContain(`  · ${pick!.t.name} (${pick!.w} ← "${pick!.w}" [약])`)
+    expect(articleArgs(text), "약 트리거만 걸렸는데 조문 인자를 냈습니다").toEqual([])
+  })
+
+  it("매칭어마다 질문에서 걸린 원문 어절을 함께 보인다 — 오탐을 읽는 쪽이 알아볼 수 있게", async () => {
+    const trigger = TOPICS[0].triggers[0]
+    const text = (await handleFinTopic(null, { question: `${trigger}를 회사에서 줬어요` })).content[0].text
+    expect(text).toContain(`■ 주제: ${TOPICS[0].name} (매칭어: ${trigger} ← "${trigger}를"`)
   })
 
   it("0건 안내가 사용자 질문 문장을 다른 도구의 인자로 넘기지 않는다", async () => {
