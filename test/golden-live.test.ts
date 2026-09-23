@@ -43,8 +43,9 @@ d("골든셋: fin_article", () => {
       // 시행령 위임조문 '본문' 동봉 (목록만이 아니라)
       expect(text).toContain("법인세법 시행령 제43조")
       expect(text).toContain("상여금")
-      // 예규 문서번호 표기 (법인46012-3683 / 법인세과-352 형식)
-      expect(text).toMatch(/[가-힣]+\d{2,5}-\d{2,4}/)
+      // 예규 문서번호 표기 (구형 법인46012-3683 / 신형 법인세과-352·법규과-1353 형식).
+      // 최신순(sort=ddes) 전환 후 상위는 신형 번호다 — 구형만 받던 정규식이 신형을 놓쳤다
+      expect(text).toMatch(/[가-힣]+(?:\d{2,5})?-\d{2,4}/)
       // 별표에 재무 핵심 표 노출
       expect(text).toContain("기준내용연수")
       // 조용한 실패 없음 (전체 성공 또는 실패 사유 명시)
@@ -80,7 +81,8 @@ d("골든셋: fin_article", () => {
       // 별표는 [현행 기준] 라벨
       expect(text).toContain("별표 [현행 기준")
       // 개정 예정 경고(현행 전용)가 기준일 응답에 붙지 않는다
-      expect(text).not.toContain("개정 예정 —")
+      expect(text).not.toContain("■ ⚠ 법령 개정 예정") // 줄 머리 (R3 항목 5에서 "법령 단위" 문구로 변경)
+      expect(text).not.toContain("개정 공포됨")
     }
   )
 

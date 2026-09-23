@@ -10,8 +10,19 @@ import type {
   DelegationItem,
 } from "./types.js"
 
-function normalizeWhitespace(text: string): string {
-  return (text || "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim()
+// \uBB38\uC790\uC5F4\uC774 \uC544\uB2CC \uAC12(\uBC30\uC5F4\u00B7\uAC1D\uCCB4)\uC774 \uC624\uBA74 ""\uB85C \u2014 `.replace is not a function` \uC608\uC678\uAC00
+// \uC601\uC5B4 TypeError \uADF8\uB300\uB85C \uC0AC\uC6A9\uC790\uC5D0\uAC8C \uB178\uCD9C\uB418\uB358 \uC790\uB9AC\uB2E4 (9\uCC28 \uB9AC\uBDF0: \uAE30\uC900\uBC95\uB839\uBAA9\uB85D.\uBC95\uB839\uBA85 \uBC30\uC5F4)
+function normalizeWhitespace(text: unknown): string {
+  return (typeof text === "string" ? text : "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim()
+}
+
+/** \uBB38\uC790\uC5F4 \uB610\uB294 \uBB38\uC790\uC5F4 \uBC30\uC5F4 \uD544\uB4DC \u2192 \uBE44\uC9C0 \uC54A\uC740 \uCCAB \uBB38\uC790\uC5F4 */
+function firstText(value: unknown): string {
+  for (const v of Array.isArray(value) ? value : [value]) {
+    const t = normalizeWhitespace(v)
+    if (t) return t
+  }
+  return ""
 }
 
 function normalizeDelegationTitle(title: string, joNum?: string): string {
@@ -138,8 +149,13 @@ export interface ThreeTierRow {
 }
 
 export interface ThreeTierRowSet {
-  /** 3단비교 색인의 기준이 되는 법령(모법) 이름 — 없으면 "" */
+  /** 3단비교 색인의 기준이 되는 법령(모법) 이름 — 없으면 "". 이 표(rows)가 이 법령 기준이다 */
   baseLawName: string
+  /**
+   * `기준법령목록`에 실린 기준법령 전체 (응답 순서). 하위법령 MST로 조회하면 여럿이 올 수 있고,
+   * 그때 표(rows)는 **첫 항목의 것**이다 — 목록에 모법이 있어도 표는 다른 법령일 수 있다.
+   */
+  baseLawNames: string[]
   /** 조회에 쓴 MST의 법령명 (시행령 MST로 부르면 시행령명이 온다) */
   queriedLawName: string
   rows: ThreeTierRow[]
@@ -149,7 +165,7 @@ function toRowItem(item: any, fallbackLawName: string): ThreeTierRowItem {
   const joCode = item?.조번호 ? convertToJO(String(item.조번호), String(item.조가지번호 || "00")) : ""
   const joNum = joCode ? formatJoNum(joCode) : ""
   return {
-    lawName: normalizeWhitespace(item?.법령명 || fallbackLawName || ""),
+    lawName: firstText(item?.법령명) || normalizeWhitespace(fallbackLawName),
     jo: joCode,
     joNum,
     title: normalizeDelegationTitle(item?.조제목 || "", joNum),
@@ -168,13 +184,24 @@ export function parseThreeTierRows(jsonData: any): ThreeTierRowSet {
   }
 
   const basicInfo = service.기본정보 || {}
-  // 기준법령명은 기본정보에 오지만(실측), 응답 형태가 바뀌어도 기준법령목록에서 건진다
-  const baseListFirst = (Array.isArray(service.기준법령목록) ? service.기준법령목록[0] : service.기준법령목록) || {}
-  const baseLawName = normalizeWhitespace(basicInfo.기준법령명 || baseListFirst.법령명 || "")
-  const queriedLawName = normalizeWhitespace(basicInfo.법령명 || "")
+  // 기준법령명은 `기본정보.기준법령명`에 온다 (2026-09-16 raw 38건 중 표가 있는 37건 전부).
+  // `기준법령목록`은 기준법령이 여럿이면 **필드마다 배열**로 온다 — 객체 배열이 아니다:
+  //   소득세법 시행령 286211 → { 법령명: ["법인세법","소득세법","지방세특례제한법"], 위임3단비교상세링크: [...] }
+  //   근로기준법 시행령 270551 → { 법령명: ["공휴일에 관한 법률","근로기준법"], ... }
+  // 표(위임조문삼단비교)는 목록 첫 항목의 것이다 (위 두 건 모두 기본정보.기준법령명 = 목록[0]).
+  // 표가 없는 응답(국세징수법 시행규칙 284983: 삼단비교존재여부 N)은 두 필드가 다 없다.
+  const baseLawNames: string[] = []
+  for (const entry of Array.isArray(service.기준법령목록) ? service.기준법령목록 : [service.기준법령목록]) {
+    for (const n of Array.isArray(entry?.법령명) ? entry.법령명 : [entry?.법령명]) {
+      const name = normalizeWhitespace(n)
+      if (name && !baseLawNames.includes(name)) baseLawNames.push(name)
+    }
+  }
+  const baseLawName = firstText(basicInfo.기준법령명) || baseLawNames[0] || ""
+  const queriedLawName = firstText(basicInfo.법령명)
 
   const rawArticles = service.위임조문삼단비교?.법률조문
-  if (!rawArticles) return { baseLawName, queriedLawName, rows: [] }
+  if (!rawArticles) return { baseLawName, baseLawNames, queriedLawName, rows: [] }
 
   const articleArray = Array.isArray(rawArticles) ? rawArticles : [rawArticles]
   const rows: ThreeTierRow[] = []
@@ -193,7 +220,7 @@ export function parseThreeTierRows(jsonData: any): ThreeTierRowSet {
     rows.push({ baseJo, baseJoNum: formatJoNum(baseJo), decrees, rules })
   }
 
-  return { baseLawName, queriedLawName, rows }
+  return { baseLawName, baseLawNames, queriedLawName, rows }
 }
 
 /**

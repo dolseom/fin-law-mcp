@@ -256,51 +256,64 @@ describe("fin_article — 약칭이 시행령으로 해소돼도 역방향으로
 })
 
 /**
- * 2026-09-06 실측 — 3단비교는 조회한 MST와 **무관한 법령**의 표를 돌려줄 때가 있다(18건 중 4건).
+ * 2026-09-06 실측 — 하위법령 MST로 부른 3단비교가 **다른 기준법령**의 표를 돌려줄 때가 있다(18건 중 4건).
  *   법인세법 시행령 283635 → 기준법령 「법인세법」 ✓ / 부가가치세법 시행령 283641 → 「부가가치세법」 ✓
  *   소득세법 시행령 286211 → 「법인세법」 ✗ / 소득세법·법인세법 시행규칙 → 「국세기본법」 ✗
- *   근로기준법 시행령 270551 → 「공휴일에 관한 법률」 ✗ / 국세징수법 시행규칙 284983 → 기준법령명 빈값 ✗
+ *   근로기준법 시행령 270551 → 「공휴일에 관한 법률」 ✗ / 국세징수법 시행규칙 284983 → 표 없음(존재여부 N) ✗
  *
  * "하위법령 질의면 기준법령이 모법인 것이 당연"이라는 전제가 깨지는 자리다. 그대로 두면
  * 법인세법 §24(기부금의 손금불산입)가 「소득세법 시행령」 §38(근로소득의 범위)의
  * "모법 위임 근거"로 본문까지 붙어 나간다 — 조번호만 겹친 무관 조문의 (a)형 오검증.
- * 기준법령명이 **빈** 응답도 같다(어느 법령의 표인지 모르는 채 조번호만 맞추게 된다).
+ *
+ * 9차 리뷰에서 원인이 규명됐다 — 기준법령이 여럿이면 `기준법령목록.법령명`이 배열로 오고 표는 첫 항목의
+ * 것이다. 목록에 모법이 있는 경우의 복구(모법 MST 재조회)는 article-crosslaw.test.ts가 본다.
+ * 이 블록은 **복구할 근거가 없을 때** 가드가 그대로 막는지를 본다.
  */
 describe("fin_article — 기준법령이 이 법령의 모법이 아니면 역방향을 렌더링하지 않는다", () => {
   const INCOME_DECREE_MST = "286211"
-  const INCOME_MST = "286000"
+  const INCOME_MST = "280405"
 
-  /** 소득세법 시행령 §38이 실린 행 — 기준(모법) 조문만 표마다 다르다 */
-  const rowsFor = (baseJo: string) => [
+  /** 소득세법 시행령 §38이 실린 행 — 실응답처럼 항목마다 법령명이 온다 */
+  const rowsFor = (baseJo: string, decreeLawName: string) => [
     {
       조번호: baseJo,
       조가지번호: "00",
       조제목: "",
       조내용: "",
-      시행령조문: { 조번호: "0038", 조가지번호: "00", 법령명: "", 조제목: "", 조내용: "" },
+      시행령조문: { 조번호: "0038", 조가지번호: "00", 법령명: decreeLawName, 조제목: "", 조내용: "" },
     },
   ]
 
-  /** 기준법령명은 실응답에서 `기준법령목록` 첫 행으로 온다 (기본정보.기준법령명은 실응답에 없음) */
-  const threeTier = (baseListName: string | null, baseJo: string) =>
+  /**
+   * 실응답 형태: 기준법령명은 `기본정보.기준법령명`에 오고(2026-09-16 raw 표 있는 37건 전부),
+   * `기준법령목록.법령명`은 기준법령이 하나면 문자열, 여럿이면 배열이다.
+   */
+  const threeTier = (baseName: string | null, baseList: string | string[] | null, rows: unknown[]) =>
     JSON.stringify({
       LspttnThdCmpLawXService: {
-        기본정보: { 법령ID: "003576", 법령명: "소득세법 시행령", 삼단비교존재여부: "Y" },
-        ...(baseListName ? { 기준법령목록: { 법령명: baseListName } } : {}),
-        위임조문삼단비교: { 법률조문: rowsFor(baseJo) },
+        기본정보: {
+          법령일련번호: INCOME_DECREE_MST,
+          법령ID: "003956",
+          법령명: "소득세법 시행령",
+          삼단비교존재여부: "Y",
+          ...(baseName ? { 기준법령명: baseName } : {}),
+        },
+        ...(baseList ? { 기준법령목록: { 법령명: baseList } } : {}),
+        위임조문삼단비교: { 법률조문: rows },
       },
     })
 
-  /** MST가 아니라 JO로 분기 — 가드가 무너지면 무관 법령 본문이 실제로 새어 나오게 둔다 */
-  const incomeStub = (threeTierJson: string): LawApiClient =>
+  /** MST별 3단비교 응답 — 모법 재조회가 일어나면 호출 MST가 기록된다 */
+  const incomeStub = (byMst: Record<string, string>, thdCalls: string[] = []): LawApiClient =>
     ({
       searchLaw: async (q: string) => {
         const n = asSearched(q)
-        if (n === "소득세법시행령") return lawXml("소득세법 시행령", INCOME_DECREE_MST, "003576", "대통령령")
-        if (n === "소득세법") return lawXml("소득세법", INCOME_MST, "003575", "법률")
+        if (n === "소득세법시행령") return lawXml("소득세법 시행령", INCOME_DECREE_MST, "003956", "대통령령")
+        if (n === "소득세법") return lawXml("소득세법", INCOME_MST, "001565", "법률")
         if (n === "법인세법") return lawXml("법인세법", PARENT_MST, "001563", "법률")
         return EMPTY_LAW_XML
       },
+      // MST가 아니라 JO로 분기 — 가드가 무너지면 무관 법령 본문이 실제로 새어 나오게 둔다
       fetchApi: async (p: { endpoint: string; extraParams?: Record<string, string> }) => {
         if (p.endpoint === "lawSearch.do") return EMPTY_RULING_XML
         const jo = p.extraParams?.JO
@@ -315,17 +328,25 @@ describe("fin_article — 기준법령이 이 법령의 모법이 아니면 역�
         }
         return '{"법령":{}}'
       },
-      getThreeTier: async () => threeTierJson,
+      getThreeTier: async (p: { mst?: string }) => {
+        thdCalls.push(p.mst || "")
+        return byMst[p.mst || ""] ?? '{"LspttnThdCmpLawXService":{"기본정보":{"삼단비교존재여부":"N"}}}'
+      },
       getAnnexes: async () => "{}",
       searchAdminRule: async () => '<?xml version="1.0"?><AdmRulSearch><totalCnt>0</totalCnt></AdmRulSearch>',
     }) as unknown as LawApiClient
 
-  const FOREIGN_BASE = threeTier("법인세법", "0024")
-  const NO_BASE = threeTier(null, "0024")
-  const OWN_BASE = threeTier("소득세법", "0020")
+  // 목록에 모법(소득세법)이 없는 다른 기준법령 표 — 모법 MST로 다시 받을 근거가 없다
+  const FOREIGN_UNLISTED = threeTier("법인세법", "법인세법", rowsFor("0024", "법인세법 시행령"))
+  // 기준법령명·목록이 모두 빈 표 — 모법 MST로 다시 받아도 기준법령을 확인할 수 없는 경우
+  const NO_BASE = threeTier(null, null, rowsFor("0024", "법인세법 시행령"))
+  const OWN_BASE = threeTier("소득세법", "소득세법", rowsFor("0020", "소득세법 시행령"))
 
   it("무관 법령(법인세법)의 조문이 「소득세법 시행령」의 '모법'으로 실리지 않는다", async () => {
-    const r = await handleFinArticle(incomeStub(FOREIGN_BASE), { law: "소득세법 시행령", article: "제38조" })
+    const r = await handleFinArticle(incomeStub({ [INCOME_DECREE_MST]: FOREIGN_UNLISTED }), {
+      law: "소득세법 시행령",
+      article: "제38조",
+    })
     const text = r.content[0].text
     expect(text).not.toContain("[모법]")
     expect(text).not.toContain("법인세법 제24조")
@@ -334,36 +355,65 @@ describe("fin_article — 기준법령이 이 법령의 모법이 아니면 역�
   })
 
   it("대신 '위임 없음'이 아니라 조회 미지원 고지를 내고 추측을 금지한다", async () => {
-    const r = await handleFinArticle(incomeStub(FOREIGN_BASE), { law: "소득세법 시행령", article: "제38조" })
+    const thdCalls: string[] = []
+    const r = await handleFinArticle(incomeStub({ [INCOME_DECREE_MST]: FOREIGN_UNLISTED }, thdCalls), {
+      law: "소득세법 시행령",
+      article: "제38조",
+    })
     const text = r.content[0].text
     expect(text).toContain("위임 조회 생략")
-    expect(text).toContain("「법인세법」 조문 기준의 표")
-    expect(text).toContain("모법(「소득세법」)이 아닙니다")
+    expect(text).toContain("「법인세법」 기준 표")
+    expect(text).toContain("모법(「소득세법」)이 없습니다")
     expect(text).toContain('"위임 없음"이 아니라 조회 미지원입니다')
     expect(text).toContain("LLM은 모법 조문을 추측하지 마세요")
+    // 목록에 모법이 없으면 모법 MST로 다시 받지 않는다 (근거 없는 호출 증가 방지)
+    expect(thdCalls).toEqual([INCOME_DECREE_MST])
   })
 
-  it("기준법령명이 빈 응답도 이름을 추측하지 않고 같은 고지를 낸다", async () => {
-    const r = await handleFinArticle(incomeStub(NO_BASE), { law: "소득세법 시행령", article: "제38조" })
+  it("모법 조문 번호를 같은 번호로 유도하지 않는다 (시행령 §38의 모법은 §38이 아니다)", async () => {
+    const r = await handleFinArticle(incomeStub({ [INCOME_DECREE_MST]: FOREIGN_UNLISTED }), {
+      law: "소득세법 시행령",
+      article: "제38조",
+    })
     const text = r.content[0].text
+    expect(text).not.toContain("해당 조문으로 fin_article")
+    expect(text).toContain("이 조문의 번호와 보통 다릅니다")
+  })
+
+  it("기준법령명이 빈 응답은 모법 MST로 다시 받아도 확인이 안 되면 이름을 추측하지 않고 고지한다", async () => {
+    const thdCalls: string[] = []
+    const r = await handleFinArticle(incomeStub({ [INCOME_DECREE_MST]: NO_BASE, [INCOME_MST]: NO_BASE }, thdCalls), {
+      law: "소득세법 시행령",
+      article: "제38조",
+    })
+    const text = r.content[0].text
+    expect(thdCalls).toEqual([INCOME_DECREE_MST, INCOME_MST])
     expect(text).toContain("기준법령명이 없어")
     expect(text).toContain('"위임 없음"이 아니라 조회 미지원입니다')
     expect(text).not.toContain("[모법]")
     expect(text).not.toContain("기부금")
   })
 
-  it("기준법령이 모법과 일치하면 종전대로 모법 조문이 나온다 (정상 경로 회귀)", async () => {
-    const r = await handleFinArticle(incomeStub(OWN_BASE), { law: "소득세법 시행령", article: "제38조" })
+  it("기준법령이 모법과 일치하면 종전대로 모법 조문이 나온다 (정상 경로 회귀 — 재조회 없음)", async () => {
+    const thdCalls: string[] = []
+    const r = await handleFinArticle(incomeStub({ [INCOME_DECREE_MST]: OWN_BASE }, thdCalls), {
+      law: "소득세법 시행령",
+      article: "제38조",
+    })
     const text = r.content[0].text
     expect(text).toContain("■ 모법 위임 근거")
     expect(text).toContain("[모법] 소득세법 제20조")
     expect(text).toContain("소득세법 20조 본문")
     expect(text).not.toContain("위임 조회 생략")
+    expect(thdCalls).toEqual([INCOME_DECREE_MST])
   })
 
   it("조회한 시행령 조문 본문은 세 경우 모두 그대로 나온다", async () => {
-    for (const tier of [FOREIGN_BASE, NO_BASE, OWN_BASE]) {
-      const r = await handleFinArticle(incomeStub(tier), { law: "소득세법 시행령", article: "제38조" })
+    for (const tier of [FOREIGN_UNLISTED, NO_BASE, OWN_BASE]) {
+      const r = await handleFinArticle(incomeStub({ [INCOME_DECREE_MST]: tier, [INCOME_MST]: NO_BASE }), {
+        law: "소득세법 시행령",
+        article: "제38조",
+      })
       const text = r.content[0].text
       expect(text).toContain("■ 소득세법 시행령 제38조")
       expect(text).toContain("소득세법 시행령 38조 본문")

@@ -13,15 +13,29 @@
 
 import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
-import { findLaws, resolvedLawMatches, sameLawFamily, lawTierOf, type LawInfo, type LawTier } from "../lib/law-search.js"
+import {
+  findLaws,
+  findRepealedLaw,
+  resolvedLawMatches,
+  sameLawFamily,
+  lawTierOf,
+  type LawInfo,
+  type LawTier,
+} from "../lib/law-search.js"
 import { formatFetchFailure, classifyErrorCode } from "../lib/errors.js"
-import { resolveVersionAt } from "../lib/historical-utils.js"
+import { resolveVersionAt, type VersionAtResult } from "../lib/historical-utils.js"
 import { buildJO } from "../lib/law-parser.js"
 import { cleanHtml, flattenContent, groupMokByReset } from "../lib/article-parser.js"
-import { parseThreeTierDelegation, parseThreeTierRows, type ThreeTierRowSet } from "../lib/three-tier-parser.js"
-import { isAdminRuleLikeName, findAdminRule, stripTrailingParen } from "./admin-rule-citation.js"
+import {
+  parseThreeTierDelegation,
+  parseThreeTierRows,
+  type ThreeTierRowItem,
+  type ThreeTierRowSet,
+} from "../lib/three-tier-parser.js"
+import { isAdminRuleLikeName, findAdminRule, stripTrailingParen, parseDeletedArticle } from "./admin-rule-citation.js"
+import { LATEST_FIRST_SORT, isLatestFirst, readTotalCnt } from "./ruling-search.js"
 import { formatAnnexNo } from "./annex.js"
-import { extractTag, toArray } from "../lib/xml-parser.js"
+import { toArray } from "../lib/xml-parser.js"
 import {
   type SectionResult,
   failed,
@@ -32,7 +46,8 @@ import {
   parseUpcomingVersions,
   formatYmd,
   isFutureDate,
-  AUTHORITY_FOOTER,
+  isCalendarBasisDate,
+  BASIS_DATE_CALENDAR_MESSAGE,
   SOURCE_FOOTER,
 } from "../lib/fin-common.js"
 
@@ -49,11 +64,11 @@ export const FinArticleInputSchema = z.object({
   basis_date: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/, "기준일은 YYYY-MM-DD 형식이어야 합니다")
+    .refine(isCalendarBasisDate, BASIS_DATE_CALENDAR_MESSAGE)
     .optional()
     .describe("기준일 (YYYY-MM-DD). 생략 시 현행"),
   include_rulings: z.boolean().default(true).describe("관련 국세청 예규 검색 포함 여부 (기본 true)"),
 })
-export type FinArticleInput = z.infer<typeof FinArticleInputSchema>
 
 // MCP tools/list 노출용 JSON Schema (zod와 수동 동기화)
 export const FIN_ARTICLE_TOOL = {
@@ -75,11 +90,37 @@ export const FIN_ARTICLE_TOOL = {
   annotations: { readOnlyHint: true, idempotentHint: true },
 } as const
 
-/** "제26조"/"26"/"제10조의2" → 표시용 "제26조"·"제10조의2" */
-function normalizeArticleLabel(input: string): string {
-  const m = input.trim().match(/^제?\s*(\d+)\s*조?(?:의\s*(\d+))?$/)
-  if (!m) return input.trim()
-  return m[2] ? `제${m[1]}조의${m[2]}` : `제${m[1]}조`
+interface ArticleInput {
+  /** 조 단위 표기 "제26조"·"제10조의2" — 본문 JO·위임 매핑·링크가 모두 이것을 쓴다 */
+  label: string
+  /** 조 뒤에 붙어 온 항·호·목 등 세부 표기 ("제1항", "제1호" …). 없으면 "" */
+  detail: string
+}
+
+/**
+ * "제26조"/"26"/"제10조의2"/"제26조제1항"/"26조 1항"/"제26조(과다경비 등의 손금불산입)" → 조 단위.
+ *
+ * 전에는 완전 일치만 받아서 "제26조제1항"이 정규화되지 않고 그대로 라벨이 됐다. 그 라벨은
+ * 3단비교의 "제26조"와 안 맞아 **실존하는 위임을 "(위임 조문 없음)"으로 단정**했고(9차 리뷰
+ * B4, 라이브 재현: 법인세법 제26조제1항), "제10조의2제3항"은 JO 변환에서 가지번호가 잘려
+ * **제10조 본문**이 제10조의2로 나갔다. 위임 매핑은 조 단위이므로 조로 접고 세부는 따로 둔다.
+ *
+ * 해석할 수 없으면 null — 조 표기가 없는 숫자열("1항")을 조로 읽거나, 조가 둘 이상인
+ * 입력("제26조 및 제27조")의 앞 조만 조회하면 요청과 다른 조문을 답하게 된다.
+ * 행정규칙 번호("제9-5조")도 null이다 (호출측이 원문 그대로 표시한다).
+ */
+function parseArticleInput(input: string): ArticleInput | null {
+  const s = input.trim()
+  const m = s.match(/^§?\s*제?\s*(\d+)\s*(조)?(?:\s*의\s*(\d+))?/)
+  if (!m) return null
+  const label = m[3] ? `제${m[1]}조의${m[3]}` : `제${m[1]}조`
+  // 조문 제목 괄호는 세부 표기가 아니다 — 떼고 본다
+  const rest = s.slice(m[0].length).replace(/^\s*\([^)]*\)/, "").trim()
+  if (!rest) return { label, detail: "" }
+  // "조" 없이 숫자 뒤에 무언가 붙으면("1항", "26-5") 조 번호인지 알 수 없다
+  if (!m[2]) return null
+  if (/^-/.test(rest) || /\d+\s*조/.test(rest)) return null
+  return { label, detail: rest }
 }
 
 // ── ② 조문 본문 렌더링 (article-detail.ts 검증 로직 이식 — 목 누락 방지 포함) ──
@@ -141,6 +182,21 @@ function renderArticleUnits(lawData: any): string {
     }
   }
   return out.trim()
+}
+
+/**
+ * 조 전체가 삭제된 자리표시 조문이면 삭제 표기("<2001.12.31>", 없으면 "")를, 아니면 null.
+ * 판정은 fin_verify와 같은 parseDeletedArticle — 한쪽만 알면 verify는 ⚠삭제 조문인데
+ * fin_article은 같은 조문에 표지 없이 위임·예규를 붙여 "살아 있는 조문"으로 읽힌다.
+ * 항이 딸려 있으면 살아 있는 조문이다 (항 하나만 삭제된 "② 삭제"는 조문 삭제가 아니다)
+ */
+function deletedArticleStamp(unit: any): string | null {
+  const content = unit?.조문내용
+  const text = typeof content === "string" ? content : Array.isArray(content) ? content.map(String).join(" ") : ""
+  if (!text) return null
+  const hang = unit?.항
+  if (hang !== undefined && hang !== null && hang !== "" && !(Array.isArray(hang) && hang.length === 0)) return null
+  return parseDeletedArticle(text)
 }
 
 // ── ③ 예규 검색 (ntsCgmExpc — 목록만. 본문은 fin_nts_ruling) ──────────────
@@ -234,6 +290,79 @@ async function adminRuleNotice(
   }
 }
 
+/**
+ * 현행 법령 DB에 없는 이름이 **연혁 법령**(폐지·개칭 전)인지 확인한다 (9차 리뷰 B5).
+ *
+ * findLaws는 현행만 찾는다. 그래서 「증권거래법」(2009-02-04 타법폐지)을 basis_date=2005-01-01로
+ * 물어도 "[LAW_NOT_FOUND] … ✗없음"이 나갔다 — 실존했던 법령을 없다고 단정하는 (b)형이고,
+ * 같은 서버의 fin_verify는 findRepealedLaw로 "폐지·연혁 법령 (환각 아님)"을 이미 구분한다.
+ *
+ *  - 연혁 법령 + basis_date → 그 시점 시행본을 해소해 조회를 잇는다 ({ law })
+ *  - basis_date 없음 · 기준일에 이미 폐지 → 사실대로 고지 ({ text })
+ *  - 연혁에도 없음 → null (호출측의 기존 ✗없음 판정)
+ *  - 연혁 조회 실패·시행본 해소 실패 → ⚠판정불가 ({ text, isError }) — 실패를 null로
+ *    돌리면 호출측이 ✗없음을 찍는다 (adminRuleNotice와 같은 함정)
+ */
+async function historicLawFallback(
+  apiClient: LawApiClient,
+  lookupName: string,
+  rawName: string,
+  articleLabel: string,
+  efYd: string | undefined,
+  signal: AbortSignal
+): Promise<{ text: string; isError?: boolean } | { law: LawInfo; basisNote: string } | null> {
+  const { law: repealed, lookupFailed, reason } = await findRepealedLaw(apiClient, lookupName, undefined, signal)
+  if (lookupFailed) {
+    return {
+      text:
+        `[${classifyErrorCode(reason || "")}] "${rawName}" — 현행 법령 DB 0건이고, 연혁(폐지·개칭 전) 법령 조회는 **실패**했습니다 — ⚠판정불가 (✗없음이 아님).\n` +
+        `사유: ${reason ?? "사유 미상"}\n` +
+        `💡 잠시 후 재시도하거나 fin_verify로 법령 실존을 확인하세요.\n` +
+        `⚠️ LLM은 이 결과를 "존재하지 않는 법령"으로 단정하지 마세요.`,
+      isError: true,
+    }
+  }
+  // pickRepealed는 접두 일치도 받는다 — 조문 본문을 내줄 경로라 종류(본법·시행령)까지 맞춘다
+  if (!repealed || !resolvedLawMatches(lookupName, repealed.lawName)) return null
+
+  if (!efYd) {
+    return {
+      text:
+        `[LAW_HISTORIC] "${rawName}" — 현행 법령에는 없고 **연혁 법령 「${repealed.lawName}」**(폐지·개칭 등으로 현행이 아님)으로 확인됩니다 — ✗없음이 아닙니다.\n` +
+        `연혁 목록의 가장 늦은 시행일: ${repealed.effectiveDate ? formatYmd(repealed.effectiveDate) : "미상"} (폐지·개칭이 반영된 날일 수 있습니다).\n` +
+        `💡 그 시점 조문은 basis_date(YYYY-MM-DD)를 지정해 다시 요청하세요 — 기준일 시행본에서 ${articleLabel} 조문을 찾습니다.\n` +
+        `⚠️ LLM은 현행 법령의 같은 번호 조문으로 대신하거나 내용을 추측하지 마세요.`,
+    }
+  }
+
+  const { slice, reason: why } = await resolveVersionAt(apiClient, repealed.lawName, efYd, undefined, signal)
+  if (!slice) {
+    return {
+      text:
+        `[BASIS_DATE_UNRESOLVED] "${rawName}" — 현행에는 없는 연혁 법령 「${repealed.lawName}」이지만, ${formatYmd(efYd)} 시점 시행본을 확정하지 못했습니다 — ⚠판정불가 (없음이 아님).\n` +
+        `사유: ${why}\n` +
+        `💡 기준일을 바꿔 다시 요청하세요. LLM은 과거 조문을 추측하지 마세요.`,
+      isError: true,
+    }
+  }
+  // 기준일 이하 가장 늦은 슬라이스가 폐지 행이면 그날부터 효력이 없다
+  // (실측 2026-09-16: 증권거래법 eflaw 최신 행 = 2009-02-04 시행 "타법폐지").
+  // "폐지제정"은 구법 폐지와 동명 신법 제정이 한 행이라 폐지가 아니다 (historical-utils 참고)
+  if (/폐지/.test(slice.rrCls) && !/폐지제정/.test(slice.rrCls)) {
+    return {
+      text:
+        `[LAW_REPEALED] "${rawName}" — 연혁 법령 「${repealed.lawName}」은 기준일 ${formatYmd(efYd)}에 **이미 폐지**된 상태입니다 ` +
+        `(${formatYmd(slice.efYd)} 시행 ${slice.rrCls}) — 그 날짜에 시행 중인 조문이 없습니다.\n` +
+        `💡 폐지 전 조문은 ${formatYmd(slice.efYd)} 이전 날짜를 basis_date로 지정하세요.\n` +
+        `⚠️ LLM은 이 법령의 조문을 기준일 당시 유효한 규정으로 쓰지 마세요.`,
+    }
+  }
+  return {
+    law: { ...repealed, mst: slice.mst, effectiveDate: slice.efYd, status: "연혁" },
+    basisNote: slice.efYd === efYd ? "" : ` (해당일 시행본 없음 → 직전 개정본 ${formatYmd(slice.efYd)} 시행 기준으로 조회)`,
+  }
+}
+
 // ── 역방향 위임 해소 (시행령·시행규칙 조문 → 모법 조문) ──────────────────
 //
 // 법제처 3단비교는 **기준법령(모법) 조번호로만 색인**된다 — 시행령 MST로 호출해도
@@ -261,6 +390,28 @@ interface ReverseHit {
   siblings: string[]
 }
 
+/**
+ * 모법 MST로 3단비교 표를 다시 받는다 — 하위법령 MST가 다른 기준법령의 표를 줬을 때.
+ * 모법 이름(guessBaseLawName)은 **조회어로만** 쓴다: 받은 표의 기준법령명이 그 이름과
+ * 일치하는지 호출측이 다시 확인하므로 추측한 이름이 기준법령인 양 실리지 않는다.
+ */
+async function fetchParentThreeTier(
+  apiClient: LawApiClient,
+  parentName: string,
+  signal: AbortSignal
+): Promise<{ rowSet?: ThreeTierRowSet; failure?: string }> {
+  try {
+    // 인자는 아래 본문 동봉의 findLaws와 같게 — 같은 캐시 키라 모법 해소가 한 번으로 끝난다
+    const parents = await findLaws(apiClient, parentName, undefined, 3, 100, signal)
+    const parent = parents.find((l) => resolvedLawMatches(parentName, l.lawName))
+    if (!parent) return { failure: `모법 「${parentName}」을 법령 검색에서 정확히 찾지 못함` }
+    const jsonText = await apiClient.getThreeTier({ mst: parent.mst, knd: "2", signal })
+    return { rowSet: parseThreeTierRows(JSON.parse(jsonText)) }
+  } catch (e) {
+    return { failure: e instanceof Error ? e.message : String(e) }
+  }
+}
+
 async function renderReverseDelegation(params: {
   apiClient: LawApiClient
   law: LawInfo
@@ -268,41 +419,63 @@ async function renderReverseDelegation(params: {
   articleLabel: string
   rowSet: ThreeTierRowSet
   outerSignal: AbortSignal
+  /** 도구 deadline — 모법 표 재조회로 늘어난 시간만큼 본문 동봉 예산을 줄인다 */
+  deadlineAt: number
 }): Promise<string> {
-  const { apiClient, law, tier, articleLabel, rowSet, outerSignal } = params
+  const { apiClient, law, tier, articleLabel, outerSignal, deadlineAt } = params
+  let rowSet = params.rowSet
 
   // 이름이 시행령·시행규칙이 아닌데 기준법령이 다르다 = 어느 열을 뒤져야 할지 모른다.
   // 추측해서 아무 열이나 대조하면 다시 무관 조문이 "위임"으로 실린다 — 생략+고지.
+  // 기준법령의 조문 번호는 이 조문 번호와 다르다 — "해당 조문"이라고 쓰면 같은 번호로 유도한다
   if (tier === "본법") {
     return (
       `(위임 조회 생략 — 법제처 3단비교는 「${rowSet.baseLawName}」 조문 기준으로만 색인되어 ` +
       `「${law.lawName}」 ${articleLabel}의 위임 관계는 이 응답에서 확정할 수 없습니다.\n` +
-      `💡 「${rowSet.baseLawName}」의 해당 조문으로 fin_article을 호출하세요.\n` +
+      `💡 이 조문을 위임한 「${rowSet.baseLawName}」 조문을 알면 그 조문으로 fin_article을 호출해 정방향 위임 목록에서 확인하세요 ` +
+      `(조문 번호는 이 조문의 번호와 다를 수 있습니다).\n` +
       `⚠️ LLM은 위임 조문을 추측하지 마세요 — "위임 없음"이 아니라 조회 미지원입니다)`
     )
   }
 
   // 하위법령 입력이라 해서 응답의 기준법령이 이 법령의 **모법**이라는 보장은 없다.
-  // 법제처 3단비교는 조회한 MST와 **무관한 법령**의 표를 돌려줄 때가 있다
+  // 법제처 3단비교는 하위법령 MST로 부르면 **다른 기준법령의 표**를 돌려줄 때가 있다
   // (2026-09-06 raw 실측 18건 중 4건 어긋남. 괄호 안은 법률조문 배열 원본 행 수):
   //   법인세법 시행령 283635 → 「법인세법」(499) ✓ / 부가가치세법 시행령 283641 → 「부가가치세법」(189) ✓
   //   소득세법 시행령 286211 → 「법인세법」(499) ✗ / 소득세법 시행규칙 286379 → 「국세기본법」(216) ✗
   //   법인세법 시행규칙 287787 → 「국세기본법」(216) ✗ / 근로기준법 시행령 270551 → 「공휴일에 관한 법률」(5) ✗
-  // 그 표에서 조번호만 맞춰 뒤지면 무관 법령의 조문이 "모법 위임 근거"로 확신형으로 실린다
+  // 원인(9차 리뷰 규명): 그 하위법령을 위임한 기준법령이 여럿이면 `기준법령목록`이 배열로 오고
+  // 표는 **첫 항목**의 것이다 — 소득세법 시행령 → ["법인세법","소득세법","지방세특례제한법"].
+  // 그 표에서 조번호만 맞춰 뒤지면 다른 법령의 조문이 "모법 위임 근거"로 확신형으로 실린다
   // (실측: 「소득세법 시행령」 §38(근로소득의 범위)에 법인세법 §24(기부금의 손금불산입)).
-  // 기준법령명이 **빈** 경우도 같은 확정 불가다 — 어느 법령의 표인지 모르는 채 조번호만
-  // 맞추게 되므로, 이름을 추측해(guessBaseLawName) 진짜 기준법령인 양 쓰면 안 된다
-  // (실측: 국세징수법 시행규칙 284983은 기준법령명이 빈 채로 온다).
+  // 그래서 목록에 모법이 있으면 **모법 MST로 한 번 더** 받는다 (리뷰어 실측: 5건 모두 모법 MST
+  // 표에 자기 위임이 온전히 있음 — 351·231·250·60·11건). 기준법령명이 비었거나 표 자체가
+  // 없는 응답(국세징수법 시행규칙 284983: 삼단비교존재여부 N)도 같다. 목록에 모법이 없으면
+  // 다시 받을 근거가 없으니 생략+고지를 유지한다.
   const expectedBase = guessBaseLawName(law.lawName)
-  if (!rowSet.baseLawName || !resolvedLawMatches(expectedBase, rowSet.baseLawName)) {
-    const cause = rowSet.baseLawName
-      ? `응답은 「${rowSet.baseLawName}」 조문 기준의 표여서 이 법령의 모법(「${expectedBase}」)이 아닙니다`
-      : `응답에 기준법령명이 없어 어느 법령 기준의 표인지 확정할 수 없습니다`
+  const isParentTable = (rs: ThreeTierRowSet) => !!rs.baseLawName && resolvedLawMatches(expectedBase, rs.baseLawName)
+  const firstBaseName = rowSet.baseLawName
+  let refetchFailure = ""
+  if (!isParentTable(rowSet)) {
+    const listed = rowSet.baseLawNames.some((n) => resolvedLawMatches(expectedBase, n))
+    if (listed || !rowSet.baseLawName) {
+      const r = await fetchParentThreeTier(apiClient, expectedBase, outerSignal)
+      if (r.rowSet) rowSet = r.rowSet
+      else refetchFailure = r.failure || "사유 미상"
+    }
+  }
+  if (!isParentTable(rowSet)) {
+    const cause = refetchFailure
+      ? `${firstBaseName ? `응답은 「${firstBaseName}」 기준 표여서` : "응답에 기준법령 표가 없어"} 모법 「${expectedBase}」 기준 표를 다시 조회했으나 **실패**했습니다(${refetchFailure}) — "없음"이 아니라 확인 불가입니다`
+      : rowSet !== params.rowSet
+        ? `모법 「${expectedBase}」 MST로 다시 조회한 표도 ${rowSet.baseLawName ? `「${rowSet.baseLawName}」 기준이어서` : "기준법령명이 없어"} 모법 기준 표를 확보하지 못했습니다`
+        : `응답은 「${firstBaseName}」 기준 표이고, 기준법령목록(${rowSet.baseLawNames.map((n) => `「${n}」`).join("·") || "없음"})에 이 법령의 모법(「${expectedBase}」)이 없습니다`
     return (
       `(위임 조회 생략 — 「${law.lawName}」 ${articleLabel}의 모법 위임 근거를 확정할 수 없습니다. ${cause}.\n` +
-      `법제처 3단비교가 조회한 법령과 무관한 표를 돌려주는 경우가 있어(실측), ` +
+      `법제처 3단비교는 하위법령으로 조회하면 다른 기준법령의 표를 돌려주는 경우가 있어(실측), ` +
       `조번호만 같은 **다른 법령의 조문**이 "모법"으로 실리는 것을 막기 위해 생략했습니다.\n` +
-      `💡 「${expectedBase}」의 해당 조문으로 fin_article을 호출하면 정방향 위임 목록을 볼 수 있습니다.\n` +
+      `💡 이 조문을 위임한 「${expectedBase}」 조문을 알면 그 조문으로 fin_article을 호출해 정방향 위임 목록에서 확인하세요 ` +
+      `(모법 조문 번호는 이 조문의 번호와 보통 다릅니다).\n` +
       `⚠️ LLM은 모법 조문을 추측하지 마세요 — "위임 없음"이 아니라 조회 미지원입니다)`
     )
   }
@@ -311,28 +484,70 @@ async function renderReverseDelegation(params: {
   const baseName = rowSet.baseLawName
   const siblingTier = tier === "시행령" ? "시행규칙" : "시행령"
   const target = articleLabel.replace(/\s+/g, "")
+  const sameNo = (i: ThreeTierRowItem) => !!i.joNum && i.joNum.replace(/\s+/g, "") === target
 
-  // 열별 법령명 폴백 — 법제처는 같은 열에서도 법령명을 비워 보내는 행이 있다(실측)
+  // 열별 법령명 폴백 — 법제처는 같은 열에서도 법령명을 비워 보내는 행이 있다(실측).
+  // 열에서 아무 이름이나 집으면 특례규정·직제 같은 다른 하위법령 이름이 붙는다 —
+  // 같은 법령 계열의 짝(「소득세법 시행규칙」 ↔ 「소득세법 시행령」)이 열에 있을 때만 쓴다
+  const familySibling = `${expectedBase} ${siblingTier}`
   const siblingLawName =
     rowSet.rows
       .flatMap((r) => (siblingTier === "시행규칙" ? r.rules : r.decrees))
       .map((i) => i.lawName)
-      .find((n) => n) || ""
+      .find((n) => n && resolvedLawMatches(familySibling, n)) || ""
 
-  // 이 조문을 위임한 모법 조문 수집 (같은 모법 조문이 여러 행에 걸치면 하나로 묶는다)
-  const hitMap = new Map<string, ReverseHit>()
+  // 이 조문을 위임한 모법 조문 수집 (같은 모법 조문이 여러 행에 걸치면 하나로 묶는다).
+  //
+  // ⚠ 조번호만 보면 안 된다 — 모법 표의 시행령 열에는 **다른 하위법령**의 조문도 섞여 온다
+  // (9차 리뷰 B1, raw 실측: 조세특례제한법 표의 시행령 열에 「농ㆍ축산ㆍ임ㆍ어업용 기자재 …
+  // 특례규정」 31건·「외국인관광객 등에 대한 … 특례규정」 4건, 국세기본법 표에 「국무조정실과
+  // 그 소속기관 직제」 6건). 조번호만 맞추면 「국세기본법 시행령」 §18에 직제 §18의 모법인
+  // 국세기본법 §67(조세심판원)이 [모법]으로 실린다 — 리뷰어 전수 계산 38개 조문 중 33개 노출.
+  // 그래서 항목의 법령명이 조회한 하위법령과 일치하는 것만 인정한다.
+  //
+  // 법령명이 **빈** 항목은 그것만으로는 소속을 알 수 없다. raw 실측으로는 빈 항목마다 같은
+  // (모법 조문, 조번호)에 이름 있는 짝이 있었다(법인세법 64·소득세법 46·조특법 120건 전부) —
+  // 짝이 우리 법령뿐이면 우리 것이고(그 행의 짝 조문도 함께 보여준다), 짝이 다른 법령이면
+  // 그 법령 것이다. 짝이 없는 빈 항목만 "소속 미확인"으로 고지한다 (오검증보다 누락 고지)
+  const own = (i: ThreeTierRowItem) => !!i.lawName && resolvedLawMatches(law.lawName, i.lawName)
+  const byBase = new Map<string, { baseJoNum: string; own: boolean; foreign: boolean; rows: typeof rowSet.rows }>()
   for (const row of rowSet.rows) {
-    const mine = tier === "시행령" ? row.decrees : row.rules
-    if (!mine.some((i) => i.joNum && i.joNum.replace(/\s+/g, "") === target)) continue
-    const hit = hitMap.get(row.baseJo) || { baseJo: row.baseJo, baseJoNum: row.baseJoNum, siblings: [] }
-    for (const s of siblingTier === "시행규칙" ? row.rules : row.decrees) {
-      if (!s.joNum) continue
-      const label = `${s.lawName || siblingLawName} ${s.joNum}${s.title ? ` (${s.title})` : ""}`.trim()
-      if (!hit.siblings.includes(label)) hit.siblings.push(label)
+    const candidates = (tier === "시행령" ? row.decrees : row.rules).filter(sameNo)
+    if (candidates.length === 0) continue
+    const b = byBase.get(row.baseJo) || { baseJoNum: row.baseJoNum, own: false, foreign: false, rows: [] }
+    if (candidates.some(own)) b.own = true
+    if (candidates.some((i) => i.lawName && !own(i))) b.foreign = true
+    b.rows.push(row)
+    byBase.set(row.baseJo, b)
+  }
+  const hitMap = new Map<string, ReverseHit>()
+  for (const [baseJo, b] of byBase) {
+    if (!b.own) continue
+    const hit: ReverseHit = { baseJo, baseJoNum: b.baseJoNum, siblings: [] }
+    for (const row of b.rows) {
+      const candidates = (tier === "시행령" ? row.decrees : row.rules).filter(sameNo)
+      // 이 행의 항목이 우리 것이 확실할 때만 짝을 싣는다 — 이름 빈 행은 같은 모법 조문에 다른 법령 짝이 없을 때만
+      if (!candidates.some(own) && (b.foreign || candidates.some((i) => i.lawName))) continue
+      for (const s of siblingTier === "시행규칙" ? row.rules : row.decrees) {
+        if (!s.joNum) continue
+        const label = `${s.lawName || siblingLawName || "(법령명 미표기)"} ${s.joNum}${s.title ? ` (${s.title})` : ""}`
+        if (!hit.siblings.includes(label)) hit.siblings.push(label)
+      }
     }
-    hitMap.set(row.baseJo, hit)
+    hitMap.set(baseJo, hit)
   }
   const hits = [...hitMap.values()].sort((a, b) => a.baseJo.localeCompare(b.baseJo))
+  const unowned = [...byBase.entries()]
+    .filter(([, b]) => !b.own && !b.foreign)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([, b]) => b.baseJoNum)
+  // 모법 조문 번호는 나열하지 않는다 — 번호가 보이면 "소속 미확인"이라고 적어도 위임 근거로 읽힌다
+  // (검수 결정 9/17. 실데이터에서는 이 경우가 0건이라 잃는 정보가 없다)
+  const unownedNote =
+    unowned.length > 0
+      ? `\n※ 3단비교에 법령명이 비어 있는 같은 번호(${articleLabel}) 매핑 ${unowned.length}건은 어느 하위법령 조문인지 **소속을 확인할 수 없어 싣지 않았습니다** ` +
+        `— 위임 근거 없음이 아니라 소속 미확인입니다`
+      : ""
 
   const self = `「${law.lawName}」 ${articleLabel}`
   const notice =
@@ -343,19 +558,25 @@ async function renderReverseDelegation(params: {
     return (
       `(${self} — 이 조문을 위임한 모법 조문을 3단비교에서 찾지 못했습니다 — ` +
       `위임 매핑 미발견이지 "위임 근거 없음"이 아닙니다.\n` +
-      `💡 「${baseName}」 조문으로 fin_article을 호출하면 정방향 위임 목록을 볼 수 있습니다.\n` +
-      `⚠️ LLM은 모법 조문을 추측하지 마세요)\n${notice}`
+      `💡 이 조문을 위임한 「${baseName}」 조문을 알면 그 조문으로 fin_article을 호출해 정방향 위임 목록에서 확인하세요 ` +
+      `(모법 조문 번호는 이 조문의 번호와 보통 다릅니다).\n` +
+      `⚠️ LLM은 모법 조문을 추측하지 마세요)\n${notice}${unownedNote}`
     )
   }
 
   // 모법 조문 본문 동봉 — 상위 REVERSE_BODY_LIMIT건. 정방향 bodyMap과 같은 방식이다
-  // (모법 MST를 findLaws로 해소하고, 정확 일치가 없으면 목록 표시로 폴백)
+  // (모법 MST를 findLaws로 해소하고, 정확 일치가 없으면 목록 표시로 폴백).
+  // 예산은 도구 deadline 안쪽으로 줄인다 — 모법 표를 다시 받느라 시간을 썼으면 본문을
+  // 기다리다 위임 목록까지 통째로 "시간초과"가 되는 것보다 목록만 내는 쪽이 낫다
+  const BODY_DEADLINE_MARGIN_MS = 500
+  const bodyBudget = Math.min(REVERSE_BODY_MS, deadlineAt - Date.now() - BODY_DEADLINE_MARGIN_MS)
   const bodyMap = new Map<string, string>()
-  const needBody = hits.slice(0, REVERSE_BODY_LIMIT)
+  const needBody = bodyBudget > 0 ? hits.slice(0, REVERSE_BODY_LIMIT) : []
   const bodyAborter = new AbortController()
   const onOuterAbort = () => bodyAborter.abort()
   outerSignal.addEventListener("abort", onOuterAbort, { once: true })
   const fetchBodies = (async () => {
+    if (needBody.length === 0) return
     const baseLaws = await findLaws(apiClient, baseName, undefined, 3, 100, bodyAborter.signal)
     // 정확 일치가 없으면 본문을 붙이지 않는다 — 엉뚱한 법령의 조문을 "모법 본문"으로
     // 동봉하는 것이 이 수정이 막으려는 바로 그 오류다
@@ -387,13 +608,14 @@ async function renderReverseDelegation(params: {
       bodyTimer = setTimeout(() => {
         bodyAborter.abort()
         r(undefined)
-      }, REVERSE_BODY_MS)
+      }, Math.max(0, bodyBudget))
     }),
   ]).catch(() => {})
   clearTimeout(bodyTimer)
   outerSignal.removeEventListener("abort", onOuterAbort)
 
-  let out = `${notice}\n\n`
+  // 소속 미확인 고지는 위에 둔다 — 모법 본문이 길면 섹션 예산 절단에 끝부분이 잘린다
+  let out = `${notice}${unownedNote}\n\n`
   for (const h of hits) {
     out += `[모법] ${baseName} ${h.baseJoNum}\n`
     const body = bodyMap.get(h.baseJo)
@@ -407,7 +629,8 @@ async function renderReverseDelegation(params: {
     const causes: string[] = []
     const overflow = hits.length - needBody.length
     const failedCount = needBody.length - bodyMap.size
-    if (overflow > 0) causes.push(`${overflow}건은 상위 ${REVERSE_BODY_LIMIT}건 상한 초과(응답 시간 예산)`)
+    if (bodyBudget <= 0) causes.push(`${overflow}건은 도구 응답 시간 예산 소진으로 본문 조회를 생략 — "본문 없음"이 아님`)
+    else if (overflow > 0) causes.push(`${overflow}건은 상위 ${REVERSE_BODY_LIMIT}건 상한 초과(응답 시간 예산)`)
     if (failedCount > 0) causes.push(`${failedCount}건은 조회 실패·시간 초과 — "본문 없음"이 아님`)
     out += `\n※ 모법 조문 본문 ${missing}건은 조문 번호만 표시했습니다 (${causes.join(" / ")}). 본문은 fin_article("${baseName}", "<조번호>")로 조회하세요`
   }
@@ -433,7 +656,10 @@ export async function handleFinArticle(
   }
   const input = parsed.data
   const deadlineAt = Date.now() + DEADLINE_MS
-  const articleLabel = normalizeArticleLabel(input.article)
+  const articleInput = parseArticleInput(input.article)
+  // 해석 못 한 표기는 원문 그대로 둔다 — 행정규칙 안내("제9-5조")는 원문 표기가 맞다.
+  // 법령 조문 조회로 넘어가기 전에 아래에서 거절한다
+  const articleLabel = articleInput?.label ?? input.article.trim()
   const efYd = input.basis_date ? input.basis_date.replace(/-/g, "") : undefined
 
   // ① 단계의 행정규칙 폴백에도 도구 deadline을 건다 — 이게 없으면 6초 예산을
@@ -449,47 +675,60 @@ export async function handleFinArticle(
   // (Claude 리뷰 중요 7 — fin_law_search는 같은 입력의 괄호를 떼고 찾는다)
   const lawLookup = stripTrailingParen(input.law)
   let law: LawInfo
+  // 연혁 법령(폐지·개칭 전)으로 확정됐는가 — 그때는 기준일 시행본까지 이미 해소돼 있다
+  let historic = false
+  let basisNote = ""
   try {
     const laws = await findLaws(apiClient, lawLookup, undefined, 5)
-    if (laws.length === 0) {
-      const notice = await adminRuleNotice(apiClient, input.law, articleLabel, lookupAborter.signal)
-      if (notice) return { content: [{ type: "text", text: notice }] }
-      return {
-        content: [
-          {
-            type: "text",
-            text: `[LAW_NOT_FOUND] "${input.law}" 법령을 찾지 못했습니다 (정상 조회 후 0건 — ✗없음).\n💡 법령명을 확인하거나 fin_law_search로 먼저 검색하세요.\n⚠️ LLM은 조문 내용을 추측하지 마세요.`,
-          },
-        ],
-        isError: true,
-      }
-    }
     // 정확 매칭 우선(부분매칭 함정 방어: "지방세법"→지방교부세법)
     const exact = laws.find((l) => resolvedLawMatches(lawLookup, l.lawName))
-    if (!exact) {
+    if (exact) {
+      law = exact
+    } else {
       // LIKE 검색이 이름만 비슷한 법령을 물어와도 실제 대상이 행정규칙일 수 있다
       // (0건일 때만 확인하면 노이즈 1건에 폴백이 꺼진다 — 잔여②와 같은 함정)
       const notice = await adminRuleNotice(apiClient, input.law, articleLabel, lookupAborter.signal)
       if (notice) return { content: [{ type: "text", text: notice }] }
-      // 정확 일치가 없으면 조문 본문을 주지 않는다 — 경고를 붙여도 LLM이 본문을
-      // 그대로 인용하면 무관한 법령의 조문이 검토서에 실린다
-      // ("국조법" → 「국정감사 및 조사에 관한 법률」 실측, Opus I-d)
-      const candidates = laws.slice(0, 5).map((l) => `  · ${l.lawName} [${l.lawType}]${l.status === "연혁" ? " ⚠연혁" : ""}`).join("\n")
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `[LAW_AMBIGUOUS] "${input.law}"과 정확히 일치하는 법령이 없습니다 — ⚠판정불가 (없음이 아님).\n` +
-              `조문 본문은 생략했습니다. 아래 후보 중 의도한 법령의 **정확한 명칭**으로 다시 요청하세요.\n\n` +
-              `검색된 유사 법령:\n${candidates}\n\n` +
-              `⚠️ LLM은 위 후보의 조문 내용을 추측하지 마세요. 약칭을 썼다면 정식 명칭으로 바꿔 재시도하세요.`,
-          },
-        ],
-        isError: true,
+      // 연혁 법령도 같은 함정이다 — 「특별소비세법」은 이름이 비슷한 「개별소비세법」이 걸려도
+      // 연혁으로 실존한다. 0건일 때만 보면 노이즈 1건에 확인이 꺼진다
+      const hist = await historicLawFallback(apiClient, lawLookup, input.law, articleLabel, efYd, lookupAborter.signal)
+      if (hist && "text" in hist) {
+        return { content: [{ type: "text", text: hist.text }], ...(hist.isError ? { isError: true } : {}) }
+      }
+      if (hist) {
+        law = hist.law
+        historic = true
+        basisNote = hist.basisNote
+      } else if (laws.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `[LAW_NOT_FOUND] "${input.law}" 법령을 찾지 못했습니다 (현행·연혁 모두 정상 조회 후 0건 — ✗없음).\n💡 법령명을 확인하거나 fin_law_search로 먼저 검색하세요.\n⚠️ LLM은 조문 내용을 추측하지 마세요.`,
+            },
+          ],
+          isError: true,
+        }
+      } else {
+        // 정확 일치가 없으면 조문 본문을 주지 않는다 — 경고를 붙여도 LLM이 본문을
+        // 그대로 인용하면 무관한 법령의 조문이 검토서에 실린다
+        // ("국조법" → 「국정감사 및 조사에 관한 법률」 실측, Opus I-d)
+        const candidates = laws.slice(0, 5).map((l) => `  · ${l.lawName} [${l.lawType}]${l.status === "연혁" ? " ⚠연혁" : ""}`).join("\n")
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `[LAW_AMBIGUOUS] "${input.law}"과 정확히 일치하는 법령이 없습니다 — ⚠판정불가 (없음이 아님).\n` +
+                `조문 본문은 생략했습니다. 아래 후보 중 의도한 법령의 **정확한 명칭**으로 다시 요청하세요.\n\n` +
+                `검색된 유사 법령:\n${candidates}\n\n` +
+                `⚠️ LLM은 위 후보의 조문 내용을 추측하지 마세요. 약칭을 썼다면 정식 명칭으로 바꿔 재시도하세요.`,
+            },
+          ],
+          isError: true,
+        }
       }
     }
-    law = exact
   } catch (e) {
     return {
       content: [{ type: "text", text: formatFetchFailure("법령 검색", e) }],
@@ -500,12 +739,44 @@ export async function handleFinArticle(
     clearTimeout(lookupTimer)
   }
 
+  // 법령으로 확정된 뒤에만 조문 표기를 거절한다 — 행정규칙·연혁 안내는 원문 표기로 충분하다.
+  // 조로 못 접는 표기를 그대로 두면 buildJO가 앞 숫자만 떼어 **다른 조문**을 답한다
+  // ("부칙 제3조" → 본칙 제3조, "제26조 및 제27조" → 제26조만)
+  if (!articleInput) {
+    return {
+      content: [
+        {
+          type: "text",
+          text:
+            `[INVALID_PARAMETER] fin_article: 조문 번호 "${input.article}"를 조 단위로 해석하지 못했습니다 — ` +
+            `조문 1개를 "제26조"·"제10조의2"·"제26조제1항" 형태로 지정하세요.\n` +
+            `💡 여러 조문은 조문마다 따로 호출하세요. 부칙은 이 도구가 조회하지 않고, 별표는 fin_annex를 쓰세요.\n` +
+            `⚠️ LLM은 조문 번호를 추측해 바꾸지 마세요.`,
+        },
+      ],
+      isError: true,
+    }
+  }
+
   // ── ①-b 기준일 버전 해소 ──
   // 현행 MST에 과거 efYd만 붙이면 법제처는 빈 응답을 준다(실측) — 기준일 시점에
   // 시행 중이던 버전의 MST를 먼저 확보해야 그 시점 조문이 나온다.
-  let basisNote = ""
-  if (efYd) {
-    const { slice, reason } = await resolveVersionAt(apiClient, law.lawName, efYd)
+  // (연혁 법령은 historicLawFallback이 같은 해소를 이미 했다)
+  if (efYd && !historic) {
+    // 이 해소에도 남은 도구 예산을 건다 — signal 없이 부르면 ①의 lookupTimer는 위 finally에서
+    // 이미 해제됐고 ②의 aborter는 아직 없어서, 이 한 호출만 deadline 밖에 놓인다:
+    // 동시성 세마포어 대기에는 상한이 없고(api-client drfFetch), 콜당 3초 × 3시도 + backoff는
+    // 6초 예산을 넘겨도 아무도 끊지 못한다(DRF_RETRY). 취소는 resolveVersionAt 안에서 reason으로
+    // 돌아오므로 결과는 "조문 없음"이 아니라 ⚠판정불가다 (연혁 경로는 lookupAborter가 같은 일을 한다)
+    const basisAborter = new AbortController()
+    const basisTimer = setTimeout(() => basisAborter.abort(), Math.max(0, deadlineAt - Date.now()))
+    let resolved: VersionAtResult
+    try {
+      resolved = await resolveVersionAt(apiClient, law.lawName, efYd, undefined, basisAborter.signal)
+    } finally {
+      clearTimeout(basisTimer)
+    }
+    const { slice, reason } = resolved
     if (slice) {
       law = { ...law, mst: slice.mst, effectiveDate: slice.efYd, status: slice.efYd === law.effectiveDate ? law.status : "연혁" }
       basisNote =
@@ -536,10 +807,27 @@ export async function handleFinArticle(
   // deadline 도달 시 진행 중 업스트림 호출을 함께 취소 — 백그라운드 쿼터 소모 방지 (Opus I3)
   const aborter = new AbortController()
   const abortOnDeadline = () => aborter.abort()
+  // 조문 섹션이 "조회는 됐는데 그 번호 조문이 없음"으로 끝났을 때의 결과 객체 — 조회 실패와 문구가
+  // 달라야 한다. 실패용 꼬리("없음이 아니라 확인 불가")를 붙이면 "(✗없음)"과 한 줄에 모순으로
+  // 나갔다 (9차 리뷰 I1). 플래그가 아니라 객체 동일성으로 본다 — deadline 뒤에 늦게 끝난
+  // 조회가 플래그를 세우면 "시간초과" 결과가 "없음"으로 읽힌다
+  let absentResult: SectionResult | undefined
+  // 조 전체가 삭제된 조문이었을 때의 결과 객체와 삭제 표기 — 판정 방식은 absentResult와 같다
+  let deletedResult: SectionResult | undefined
+  let deletedStamp = ""
 
   const articleP: Promise<SectionResult> = (async () => {
     const extraParams: Record<string, string> = { MST: law.mst, JO: buildJO(articleLabel) }
-    if (efYd) extraParams.efYd = efYd
+    // efYd는 기준일이 아니라 **해소한 시행본의 시행일**이어야 한다 — 기준일이 시행일과 다르면
+    // (basisNote "직전 개정본 … 시행 기준으로 조회") 법제처가 HTML 오류를 준다.
+    // 실측 2026-09-17: 법인세법 MST 212775 + efYd=20200315 → HTML / efYd=20200101 → 정상,
+    // 증권거래법 MST 59091 + efYd=20050101 → HTML / efYd=20040401 → 정상, 검수자: 근로기준법
+    // MST 150421 + efYd=20180101 → "일치하는 법령이 없습니다" / efYd=20140701 → 정상.
+    // 기준일이 시행일과 같은 날(2020-01-01 등)로만 재면 통과해 보인다.
+    // ⚠ 기준일 모드에서 lawService에 efYd를 넘기는 곳은 이 한 곳이다 — 위임 본문 동봉(정방향·역방향)은
+    // 기준일 모드에서 3단비교 자체를 생략하고, 연혁 법령(historicLawFallback)도 law.effectiveDate에
+    // 시행본 시행일을 넣어 이 경로로 합류한다
+    if (efYd) extraParams.efYd = law.effectiveDate || efYd
     // 현행 조회는 target=law — 법제처가 efYd 없는 eflaw lawService를 HTML 오류로 돌려주기
     // 시작했다 (2026-08-30 실측: eflaw+MST+JO는 HTML, 같은 파라미터의 law는 정상,
     // eflaw+efYd 동반도 정상). eflaw는 기준일(efYd) 조회에만 쓴다
@@ -557,7 +845,23 @@ export async function handleFinArticle(
     const firstArticle = units.find((u: any) => u.조문여부 === "조문")
     if (firstArticle?.조문제목) joTitleForRulings = String(firstArticle.조문제목)
     const body = renderArticleUnits(lawData)
-    if (!body) return failed(`${articleLabel} 조문 없음 — 조문 번호를 확인하세요 (✗없음)`)
+    if (!body) {
+      // 기준일 조회는 **그 시행본**에 없다는 뜻일 뿐이다 — 조문 번호는 전부개정·신설·삭제로
+      // 바뀌므로 현행 번호로 옛 조문의 부존재를 단정하면 안 된다
+      absentResult = failed(
+        efYd
+          ? `${formatYmd(law.effectiveDate || efYd)} 시행본에서 ${articleLabel} 조문을 찾지 못했습니다 (정상 조회 후 0건). ` +
+              `그 시점에는 신설 전이거나 삭제·이동된 조문일 수 있습니다 — 전부개정 등으로 조문 번호가 달랐을 수 있으니 현행 번호로 부존재를 단정하지 마세요`
+          : `「${law.lawName}」 현행본에 ${articleLabel} 조문이 없습니다 (정상 조회 후 0건 — ✗없음). 조문 번호를 확인하세요`
+      )
+      return absentResult
+    }
+    const stamp = firstArticle ? deletedArticleStamp(firstArticle) : null
+    if (stamp !== null) {
+      deletedStamp = stamp
+      deletedResult = { status: "성공" as const, text: body }
+      return deletedResult
+    }
     return { status: "성공" as const, text: body }
   })().catch((e) => failed(e instanceof Error ? e.message : String(e)))
 
@@ -595,6 +899,7 @@ export async function handleFinArticle(
           articleLabel,
           rowSet,
           outerSignal: aborter.signal,
+          deadlineAt,
         }),
       }
     }
@@ -703,6 +1008,8 @@ export async function handleFinArticle(
   })().catch((e) => failed(e instanceof Error ? e.message : String(e)))
 
   const annexP: Promise<SectionResult> = (async () => {
+    // 별표 목록은 현행 법령 기준이다 — 현행에 없는 연혁 법령에 "없음"을 찍으면 별표가 없던 법령으로 읽힌다
+    if (historic) return { status: "성공" as const, text: "(연혁 법령 — 별표 목록은 현행 법령만 조회되어 생략. \"별표 없음\"이 아님)" }
     const jsonText = await apiClient.getAnnexes({ lawName: law.lawName, knd: "1", signal: aborter.signal }) // 1=별표만 (서식 노이즈 제외)
     const acc: AnnexItem[] = []
     findAnnexItems(JSON.parse(jsonText), acc, law.lawName)
@@ -725,45 +1032,81 @@ export async function handleFinArticle(
       return { status: "성공" as const, text: "" }
     }
     const xml = await apiClient.searchLaw(law.lawName, undefined, 20, "eflaw", aborter.signal)
+    // 시행일이 지난 "시행예정" 행은 parseUpcomingVersions가 거르고 같은 시행일은 하나로 접는다
     const ups = parseUpcomingVersions(xml, law.lawName)
     if (ups.length === 0) return { status: "성공" as const, text: "" }
+    const anc = (list: string[]) =>
+      list.length === 0 ? "" : `(공포 ${formatYmd(list[0])}${list.length > 1 ? ` 외 ${list.length - 1}건` : ""})`
     return {
       status: "성공" as const,
-      text: ups.map((u) => `${formatYmd(u.시행일자)} 시행 개정 공포됨(공포 ${formatYmd(u.공포일자)})`).join(" · "),
+      text: ups.map((u) => `${formatYmd(u.시행일자)} 시행 개정 공포됨${anc(u.공포일자)}`).join(" · "),
     }
   })().catch((e) => failed(e instanceof Error ? e.message : String(e)))
 
-  const [articleR, threeTierR, annexR, upcomingR] = await Promise.all([
-    withDeadline(articleP, deadlineAt, abortOnDeadline),
-    withDeadline(threeTierP, deadlineAt, abortOnDeadline),
-    withDeadline(annexP, deadlineAt, abortOnDeadline),
-    withDeadline(upcomingP, deadlineAt, abortOnDeadline),
-  ])
-
-  // ── ③ 예규 검색 (조문 제목 확보 후) ──
-  let rulingsR: SectionResult = { status: "성공", text: "(검색 생략 — include_rulings=false)" }
-  let rulingQuery = ""
-  if (input.include_rulings) {
-    rulingQuery = rulingQueryFromTitle(joTitleForRulings, `${law.lawName} ${articleLabel}`)
-    rulingsR = await withDeadline(
+  // ── ③ 예규 검색 (조문 제목 확보 직후 — 나머지 섹션과 병렬) ──
+  // 종전에는 4섹션 Promise.all이 끝난 **뒤에** 예규 검색을 시작해, 3단비교가 느리면(deadline 근처)
+  // 예규 섹션도 함께 "도구 deadline 초과"로 빠졌다 (R3 라이브: 조특법 시행령 §27 cold 6회 중 2회).
+  // 예규에 필요한 것은 조문 제목(articleR)뿐이므로 조문 섹션이 끝나는 즉시 시작한다
+  const articleD = withDeadline(articleP, deadlineAt, abortOnDeadline)
+  const rulingsP: Promise<SectionResult> = articleD.then(async (articleDone): Promise<SectionResult> => {
+    if (!input.include_rulings) return { status: "성공", text: "(검색 생략 — include_rulings=false)" }
+    if (articleDone === deletedResult) {
+      // 삭제 조문은 제목이 없어 검색어가 "법령명 제N조"로 폴백된다 — 걸리는 예규는 삭제 전 조문이나
+      // 번호만 같은 다른 조문에 관한 것이라 "이 조문의 예규 후보"로 내면 오독된다
+      return {
+        status: "성공",
+        text: "(검색 생략 — 삭제된 조문이라 조문 제목이 없고, 번호로 찾은 예규는 삭제 전 조문에 관한 것이어서 현행 근거로 쓸 수 없습니다. 삭제 전 예규는 fin_ruling_search로 직접 찾으세요)",
+      }
+    }
+    const rulingQuery = rulingQueryFromTitle(joTitleForRulings, `${law.lawName} ${articleLabel}`)
+    return withDeadline(
       (async () => {
         const queries = ladderQueries(rulingQuery)
         for (let qi = 0; qi < queries.length; qi++) {
           const q = queries[qi]
           // 오류는 즉시 실패로 (사다리는 0건에만 — 오류를 0건으로 위장 금지)
+          // sort 없이 부르면 법제처 기본 정렬(안건명 가나다순)의 앞 3건이 온다 — 그것을 "상위 3건"이라
+          // 부르면 오래된 해석이 대표처럼 읽힌다. fin_ruling_search와 같은 일자 내림차순을 요청한다
+          // (ruling-search.ts LATEST_FIRST_SORT — ntsCgmExpc 포함 4도메인 라이브 확인)
           const xml = await apiClient.fetchApi({
             endpoint: "lawSearch.do",
             target: "ntsCgmExpc",
             type: "XML",
-            extraParams: { query: q, display: "3" },
+            extraParams: { query: q, display: "3", sort: LATEST_FIRST_SORT },
             expectedRoot: "CgmExpc",
             signal: aborter.signal,
           })
-          const total = extractTag(xml, "totalCnt")
+          const total = readTotalCnt(xml)
           const items = parseNtsRulings(xml, 3)
           if (items.length === 0) continue
           const ladderNote = qi > 0 ? ` — 검색어 축약: "${rulingQuery}" → "${q}"` : ""
-          let out = `${total || items.length}건 중 상위 ${items.length}건 (검색어: "${q}"${ladderNote})\n`
+          // 총건수는 응답의 totalCnt로만 말한다 — 종전 폴백(`total || items.length`)은 태그가
+          // 없거나 숫자가 아닌 응답에서 **받은 수를 총수로** 써서, 42건짜리 검색을 "3건 중 3건"
+          // 으로 적어 "이게 전부"로 읽히게 했다. totalCnt가 받은 수보다 작은 응답도 총수로
+          // 믿을 수 없다 (계약은 ruling-search.ts readTotalCnt와 같다 — 지어낸 0/받은 수 금지)
+          // 총수 확인과 정렬 확인은 별개다 — 전체를 다 받았다는 것은 "빠진 게 없다"는 뜻일 뿐
+          // 받은 순서가 일자 내림차순이라는 뜻이 아니다. 종전 `allReturned || …`는 전체 2건이
+          // 오름차순으로 와도 "최신 2건"이라 적었다.
+          //
+          // ⚠ 여기서 ruling-search의 assessLatestFirst를 쓰면 안 된다 — 그쪽의 "전부 받았고 일자를
+          // 전부 읽었으면 최신순" 근거는 **호출부가 일자순으로 재정렬한다**는 전제 위에 있다
+          // (nts-ruling.ts는 판정 뒤 items.sort로 재정렬한다). 이 섹션은 받은 순서를 그대로
+          // 표시하므로 근거는 "받은 순서가 내림차순인가" 하나뿐이다. 일자를 못 읽은 항목이 있으면
+          // 그 항목의 위치를 확인할 수 없어 isLatestFirst가 false다 (ruling-search.ts 계약)
+          const allReturned = total !== undefined && total === items.length
+          const latestFirst = isLatestFirst(items.map((r) => r.date))
+          const countPart =
+            total !== undefined && total >= items.length
+              ? `${total}건 중 `
+              : `총건수 미확인(${
+                  total === undefined ? "응답에 totalCnt 없음" : `totalCnt ${total}건 < 받은 ${items.length}건`
+                }) — `
+          const orderPart = latestFirst
+            ? `최신 ${items.length}건`
+            : allReturned
+              ? `전체 ${items.length}건(받은 순서 그대로 — 일자순 정렬 미확인)`
+              : `${items.length}건(일자순 정렬 미확인)`
+          let out = `${countPart}${orderPart} (검색어: "${q}"${ladderNote})\n`
           out += items.map((r) => `  · ${r.docNo} (${r.date}) ${r.title}`).join("\n")
           // 축약이 일어났으면 검색어가 조문 제목이 아니라 그 일부(일반 명사)다 —
           // "과다경비 등의 손금불산입" → "손금불산입"이면 지급이자·접대비 손금불산입
@@ -783,23 +1126,64 @@ export async function handleFinArticle(
       deadlineAt,
       abortOnDeadline
     )
-  }
+  })
+
+  const [articleR, threeTierR, annexR, upcomingR, rulingsR] = await Promise.all([
+    articleD,
+    withDeadline(threeTierP, deadlineAt, abortOnDeadline),
+    withDeadline(annexP, deadlineAt, abortOnDeadline),
+    withDeadline(upcomingP, deadlineAt, abortOnDeadline),
+    rulingsP,
+  ])
+  const articleDeleted = articleR === deletedResult
 
   // ── 조립 (부분 실패 계약) ──
+  // 삭제 조문에는 위임 목록을 싣지 않는다 — 3단비교에 남은 매핑은 삭제 전 관계일 수 있어
+  // "삭제된 조문의 위임"이 현행 근거로 읽힌다 (fin_verify는 같은 조문을 ⚠삭제 조문으로 판정한다)
+  const deletedLabel = `삭제된 조문${deletedStamp ? `(삭제 ${deletedStamp})` : ""}`
+  const delegationR: SectionResult = articleDeleted
+    ? {
+        status: "성공",
+        text:
+          `(위임 조회 생략 — ${deletedLabel}입니다. 3단비교에 남은 매핑은 삭제 전 관계일 수 있어 현행 위임 근거로 쓸 수 없습니다. ` +
+          `삭제 전 조문과 위임은 basis_date로 삭제 이전 날짜를 지정해 조회하세요)`,
+      }
+    : threeTierR
   const sections: Array<{ name: string; r: SectionResult; budget: number; hint: string }> = [
     { name: "조문", r: articleR, budget: BUDGET_ARTICLE, hint: "www.law.go.kr 원문" },
-    { name: "위임", r: threeTierR, budget: BUDGET_DELEGATION, hint: "법제처 3단비교 원문" },
+    { name: "위임", r: delegationR, budget: BUDGET_DELEGATION, hint: "법제처 3단비교 원문" },
     { name: "예규", r: rulingsR, budget: BUDGET_RULINGS, hint: "fin_nts_ruling" },
     { name: "별표", r: annexR, budget: BUDGET_ETC, hint: "fin_annex" },
   ]
-  const failedNames = sections.filter((s) => s.r.status !== "성공").map((s) => `${s.name}(${s.r.status}: ${s.r.reason})`)
-  const overall = failedNames.length === 0 ? "전체 성공" : `부분 성공 — 실패 섹션: ${failedNames.join(", ")}`
+  const articleAbsent = articleR === absentResult
+  const failedNames = sections
+    .filter((s) => s.r.status !== "성공" && !(s.name === "조문" && articleAbsent))
+    .map((s) => `${s.name}(${s.r.status}: ${s.r.reason})`)
+  const overallParts = [
+    ...(articleAbsent ? [efYd ? "조문 미발견(기준일 시행본)" : "조문 없음(✗)"] : []),
+    ...(failedNames.length > 0 ? [`실패 섹션: ${failedNames.join(", ")}`] : []),
+  ]
+  // 삭제 조문은 조회 실패가 아니다 — 그래도 첫 줄에서 바로 보이게 한다
+  const overall =
+    overallParts.length === 0
+      ? articleDeleted
+        ? `조회 성공 — ⚠${deletedLabel}`
+        : "전체 성공"
+      : `부분 성공 — ${[...(articleDeleted ? [`⚠${deletedLabel}`] : []), ...overallParts].join(" / ")}`
 
   const basisLine = input.basis_date ? `[기준일: ${input.basis_date} 시행 기준${basisNote}]` : `[기준: 현행]`
   // 기준일 헤더 아래 현행 데이터가 무고지로 섞이면 "헤더는 기준일, 내용은 현행"인
   // 조용한 거짓이 된다 (실사용 시뮬레이션 차단 지적) — 섹션별 기준을 상단에 못박는다
   const basisScope = efYd
     ? `※ 기준일 조회 범위: 조문 본문·시행일자만 ${input.basis_date} 시행본입니다. 위임(3단비교)·개정 예정은 법제처가 현행 기준만 제공하여 생략했고, [현행 기준] 표시 섹션은 현행 데이터입니다`
+    : ""
+  const historicScope = historic
+    ? `※ 「${law.lawName}」은 현행 법령 DB에 없는 **연혁 법령**(폐지·개칭 전)입니다 — 아래 조문은 기준일 시행본이며 현행 규정이 아닙니다`
+    : ""
+  // 조 단위로 접었다는 사실을 남긴다 — 위임 매핑은 조 단위라 항·호에 한정된 위임만 골라낼 수 없다
+  const detailScope = articleInput.detail
+    ? `※ 요청 표기 "${input.article.trim()}" → 조 단위(${articleLabel})로 조회했습니다 — 본문은 조 전체이고, 위임(3단비교)은 조 단위 매핑이라 ` +
+      `${articleInput.detail}에 해당하는 위임만 골라내지 못합니다. ${articleInput.detail}의 위임 여부는 아래 본문의 "대통령령으로 정하는" 등 문구로 확인하세요`
     : ""
   // 기준일 조회에서는 그 시점 시행본이 **정상 결과**다 — 경고를 붙이면 정상을 이상으로 읽게 된다
   // (fin_law_search는 basisMode에서 이미 억제한다: law-search.ts의 formatLawLine).
@@ -808,25 +1192,38 @@ export async function handleFinArticle(
   // "폐지" 딱지를 보여주면 개정 대비 검토를 막는 (b)형이 된다.
   // 여기서 status가 "연혁"인 것은 위 resolveVersionAt이 시행본을 갈아끼우며 덮어쓴 값이고
   // 폐지를 뜻하지 않는다 (기준일 없는 현행 조회에서만 폐지·과거본을 의미한다).
-  const statusMark = efYd
-    ? isFutureDate(law.effectiveDate || "")
-      ? " 📅시행예정"
-      : ""
-    : law.status === "연혁"
-      ? " ⚠연혁(폐지·과거본)"
-      : ""
+  // 연혁 법령은 기준일 조회에서도 표시한다 — 위 억제는 "현행 법령의 과거 시행본"이 정상 결과라서이고,
+  // 법령 자체가 현행에 없다는 사실은 기준일과 무관하게 알려야 한다
+  const statusMark = historic
+    ? " ⚠연혁 법령(현행 아님)"
+    : efYd
+      ? isFutureDate(law.effectiveDate || "")
+        ? " 📅시행예정"
+        : ""
+      : law.status === "연혁"
+        ? " ⚠연혁(폐지·과거본)"
+        : ""
   const publicUrl = `https://www.law.go.kr/법령/${law.lawName}/${articleLabel}`
+  // 이 주소는 법령명·조문만 담아 **현행본**을 연다 — 기준일 조회에서 표시 없이 주면
+  // 기준일 시행본의 원문인 것처럼 읽힌다 (9차 리뷰 I4)
+  const linkLabel = historic
+    ? `원문(현행 법령 주소 형식 — 연혁 법령은 열리지 않을 수 있고 ${input.basis_date} 시행본이 아님)`
+    : efYd
+      ? `원문(현행본 링크 — ${input.basis_date} 시행본이 아님)`
+      : "원문"
 
   const sec = (s: { name: string; r: SectionResult; budget: number; hint: string }, header: string): string => {
+    if (s.name === "조문" && articleAbsent) {
+      return efYd ? `${header}\n  ⚠ 기준일 시행본에서 미발견: ${s.r.reason}` : `${header}\n  ✗ 없음: ${s.r.reason}`
+    }
     if (s.r.status !== "성공") return `${header}\n  ⚠ 조회 실패(${s.r.status}): ${s.r.reason} — "없음"이 아니라 확인 불가입니다.`
     return `${header}\n${truncateWithHint(s.r.text, s.budget, s.hint)}`
   }
 
   const text = [
-    `${basisLine} ${overall}`,
-    basisScope,
+    ...[`${basisLine} ${overall}`, basisScope, historicScope, detailScope].filter(Boolean),
     ``,
-    sec({ ...sections[0] }, `■ ${law.lawName} ${articleLabel}${statusMark}`),
+    sec({ ...sections[0] }, `■ ${law.lawName} ${articleLabel}${statusMark}${articleDeleted ? ` ⚠${deletedLabel}${efYd ? " — 기준일 시행본 기준" : ""}` : ""}`),
     ``,
     sec({ ...sections[1] }, delegationHeader),
     ``,
@@ -836,12 +1233,15 @@ export async function handleFinArticle(
     ``,
     sec({ ...sections[3] }, `■ 별표${efYd ? " [현행 기준 — 기준일 별표 조회는 법제처 미지원]" : ""}`),
     ``,
-    `■ 법령 정보 — 시행일자 ${law.effectiveDate || "미상"} · 원문: ${encodeURI(publicUrl)}`,
+    `■ 법령 정보 — 시행일자 ${law.effectiveDate || "미상"} · ${linkLabel}: ${encodeURI(publicUrl)}`,
     upcomingR.status === "성공"
       ? upcomingR.text
-        ? `■ ⚠ 개정 예정 — ${upcomingR.text}. 개정 이후 기준 검토는 basis_date로 해당 시행일을 지정`
+        ? // 법령 단위 예고다 — 공포된 개정이 이 조문을 바꾸는지는 알 수 없다. 조문 바로 아래에
+          // "개정 예정"만 쓰면 조문 개정으로 읽힌다 (R3 라이브: 법인세법 §26에 §21 개정의 2028 시행이 붙음)
+          `■ ⚠ 법령 개정 예정(「${law.lawName}」 법령 단위 — 이 조문 해당 여부는 부칙·개정문 확인) — ${upcomingR.text}. ` +
+          `개정 이후 기준 검토는 basis_date로 해당 시행일을 지정`
         : ``
-      : `■ 개정 예정 여부 — ⚠ 확인 실패(${upcomingR.reason}). "개정 없음"으로 단정하지 말 것`,
+      : `■ 법령 개정 예정 여부 — ⚠ 확인 실패(${upcomingR.reason}). "개정 없음"으로 단정하지 말 것`,
     ``,
     `※ 전거 서열: 이 응답의 조문(법률·시행령·시행규칙)이 1차 근거 — 예규는 행정해석(구속력 없음), 상충 시 조문 우선`,
     SOURCE_FOOTER,
