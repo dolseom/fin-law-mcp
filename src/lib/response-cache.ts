@@ -59,7 +59,13 @@ export class ResponseCache {
     return this.ttlMs > 0
   }
 
-  get(key: string): string | undefined {
+  /**
+   * @param accept **지금 호출의** 가드. 키가 요청 URL뿐이라 같은 URL을 더 느슨한 조건으로
+   *   요청한 호출이 담아 둔 본문이 남아 있을 수 있다 (fetchApi의 expectedRoot·expectedJsonKey는
+   *   URL에 들어가지 않는다). 거부하면 적중으로 세지 않고 **미스로 돌려 그 항목을 버린다** —
+   *   호출측이 네트워크로 회복해야 한다
+   */
+  get(key: string, accept?: (value: string) => boolean): string | undefined {
     if (!this.enabled) return undefined
     const hit = this.map.get(key)
     if (!hit) {
@@ -67,6 +73,12 @@ export class ResponseCache {
       return undefined
     }
     if (hit.expiresAt <= this.now()) {
+      this.map.delete(key)
+      this.bytes -= hit.bytes
+      this.misses++
+      return undefined
+    }
+    if (accept && !accept(hit.value)) {
       this.map.delete(key)
       this.bytes -= hit.bytes
       this.misses++

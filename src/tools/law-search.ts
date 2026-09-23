@@ -16,11 +16,12 @@ import { extractTag } from "../lib/xml-parser.js"
 import { isAdminRuleName, isAdminRuleLikeName, findAdminRule, stripTrailingParen, type AdminRuleMatch } from "./admin-rule-citation.js"
 import {
   FIN_MINISTRY_CODES,
-  FIN_LAW_NAMES,
   TOPIC_LAW_HINTS,
   compactName,
   isFinLaw,
   isFutureDate,
+  isCalendarBasisDate,
+  BASIS_DATE_CALENDAR_MESSAGE,
   ladderQueries,
   SOURCE_FOOTER,
 } from "../lib/fin-common.js"
@@ -31,6 +32,7 @@ export const FinLawSearchInputSchema = z.object({
   basis_date: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/, "기준일은 YYYY-MM-DD 형식이어야 합니다")
+    .refine(isCalendarBasisDate, BASIS_DATE_CALENDAR_MESSAGE)
     .optional()
     .describe("기준일 (YYYY-MM-DD) — 해당 시점 시행 중이던 법령으로 검색"),
 })
@@ -321,5 +323,3 @@ export async function handleFinLawSearch(
   }
 }
 
-/** 재무 법령 사전 노출 (도구 설명·디버깅용) */
-export const FIN_LAW_DICTIONARY = FIN_LAW_NAMES

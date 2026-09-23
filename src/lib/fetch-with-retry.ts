@@ -8,10 +8,14 @@
  * URL에서 민감 정보(API 키) 마스킹 — 에러 메시지/로그 노출 방지.
  * 법제처 API는 ?OC=KEY 쿼리 파라미터로 키를 받으므로 해당 값만 *** 처리.
  * 추가 방어로 일반적인 키 파라미터 이름들도 마스킹.
+ *
+ * XML 본문에서 그대로 꺼낸 링크는 `&`가 `&amp;`로 온다 — `…&amp;OC=KEY&amp;…`에서는 OC 앞 글자가
+ * `;`라 `[?&]` 경계만 보면 키가 그대로 남는다 (Codex 9차: fin_annex·fin_nts_ruling 원문 링크).
+ * `;`도 경계로 보고, 값은 `&`·공백·따옴표·꺾쇠에서 끊는다 (메시지 속 URL 뒤 문장까지 삼키지 않게).
  */
 export function maskSensitiveUrl(url: string): string {
   if (!url) return url
-  return url.replace(/([?&](?:oc|apikey|api_key|authkey|auth_key|key)=)[^&]+/gi, "$1***")
+  return url.replace(/([?&;](?:oc|apikey|api_key|authkey|auth_key|key)=)[^&\s"'<>]+/gi, "$1***")
 }
 
 export interface FetchWithRetryOptions extends RequestInit {
@@ -30,12 +34,34 @@ export interface FetchWithRetryOptions extends RequestInit {
    * true여도 빈 본문은 여전히 일시 장애로 재시도한다.
    */
   allowHtmlBody?: boolean
+  /**
+   * Retry-After 대기 상한(ms). 서버가 이보다 오래 쉬라고 하면 재시도하지 않고 그 응답을 그대로 돌려준다.
+   *
+   * 상한이 없으면 429 + `Retry-After: 30`에 30초를 자다가 도구 deadline(취소)에 끊겨, 호출측에는
+   * 원인(한도 초과) 대신 "요청 취소됨·타임아웃"만 남았다 (Codex 9차: fin_ping이 429를 타임아웃으로 분류).
+   * 서버가 30초 쉬라는데 그 전에 다시 두드리는 재시도도 한도를 악화시킬 뿐이다.
+   */
+  maxRetryAfterMs?: number
+  /**
+   * 재시도 직전 게이트 — false면 재시도하지 않고 마지막 응답(오류 본문이면 그 오류)으로 끝낸다.
+   * status는 재시도 사유가 된 HTTP 상태(네트워크 오류는 null). api-client가 429 재시도를
+   * 분당 호출 한도에 계상하는 데 쓴다.
+   */
+  beforeRetry?: (status: number | null) => boolean
+  /**
+   * 콜당 timeout에 걸린 시도를 재시도할지 (기본 true — 종전 동작).
+   * 콜당 timeout을 도구 deadline에 가깝게 길게 잡은 호출(3단비교 5초 / deadline 6초)은
+   * timeout 뒤 재시도가 deadline 안에 끝날 수 없어 쿼터만 쓴다 — false면 timeout 오류를 바로 올린다.
+   * 404·429·빈 본문 같은 빠른 실패의 재시도는 이 값과 무관하게 retries대로 한다
+   */
+  retryOnTimeout?: boolean
 }
 
 const DEFAULT_TIMEOUT = 30000
 const DEFAULT_RETRIES = 3
 const DEFAULT_RETRY_DELAY = 1000
 const DEFAULT_RETRY_ON = [429, 503, 504]
+const DEFAULT_MAX_RETRY_AFTER_MS = 10_000
 
 /**
  * 법제처 API가 200으로 빈 본문/HTML(점검·과부하 페이지)을 반환하는 간헐 장애 감지.
@@ -82,6 +108,9 @@ export async function fetchWithRetry(
     retryDelay = DEFAULT_RETRY_DELAY,
     retryOn = DEFAULT_RETRY_ON,
     allowHtmlBody = false,
+    maxRetryAfterMs = DEFAULT_MAX_RETRY_AFTER_MS,
+    beforeRetry,
+    retryOnTimeout = true,
     signal: outerSignal,
     ...fetchOptions
   } = options
@@ -134,11 +163,11 @@ export async function fetchWithRetry(
               lastError = new Error(
                 `법제처 API 비정상 응답(${bad === "empty" ? "빈 본문" : "HTML 페이지"}) - ${maskSensitiveUrl(url)}`
               )
-              if (attempt < retries) {
+              if (attempt < retries && (!beforeRetry || beforeRetry(response.status))) {
                 await sleep(getRetryDelay(response, retryDelay, attempt), outerSignal)
                 continue
               }
-              throw lastError // 재시도 소진 — 불량 응답을 정상으로 반환하지 않는다
+              throw lastError // 재시도 소진·게이트 거부 — 불량 응답을 정상으로 반환하지 않는다
             }
           }
         }
@@ -147,6 +176,12 @@ export async function fetchWithRetry(
 
       // Retryable error - check if we have retries left
       if (attempt < retries) {
+        // 서버가 상한보다 오래 쉬라고 했으면 기다리지 않고 그 응답(429 등)을 그대로 넘긴다 —
+        // 호출측 상태 코드 분류가 "한도 초과"를 말할 수 있어야 한다
+        // 게이트는 상한 확인 뒤에만 부른다 — 어차피 재시도하지 않을 응답에 한도 토큰을 쓰지 않게
+        const serverWait = retryAfterMs(response)
+        if (serverWait !== null && serverWait > maxRetryAfterMs) return response
+        if (beforeRetry && !beforeRetry(response.status)) return response
         const delay = getRetryDelay(response, retryDelay, attempt)
         await sleep(delay, outerSignal)
         continue
@@ -165,6 +200,7 @@ export async function fetchWithRetry(
             throw new Error(`요청 취소됨(도구 deadline) - ${maskSensitiveUrl(url)}`)
           }
           lastError = new Error(`Request timeout after ${timeout}ms for ${maskSensitiveUrl(url)}`)
+          if (!retryOnTimeout) break // 재시도가 deadline 안에 끝날 수 없는 호출 — 바로 올린다
         } else {
           // fetch 네이티브 에러 메시지에도 URL이 포함될 수 있음
           const masked = maskSensitiveUrl(error.message)
@@ -173,28 +209,30 @@ export async function fetchWithRetry(
       }
 
       // Retry on network errors
-      if (attempt < retries) {
+      if (attempt < retries && (!beforeRetry || beforeRetry(null))) {
         const delay = getRetryDelay(null, retryDelay, attempt)
         await sleep(delay, outerSignal)
         continue
       }
+      break // 재시도 소진·게이트 거부 — 마지막 오류를 던진다
     }
   }
 
   throw lastError || new Error("Request failed after retries")
 }
 
+/** Retry-After 헤더(초 단위)를 ms로 — 없거나 읽을 수 없으면 null */
+function retryAfterMs(response: Response | null): number | null {
+  const retryAfter = response?.headers.get("Retry-After")
+  if (!retryAfter) return null
+  const seconds = Number(retryAfter)
+  return !isNaN(seconds) && seconds > 0 ? seconds * 1000 : null
+}
+
 /** Retry-After 헤더 우선, 없으면 exponential backoff + jitter */
 function getRetryDelay(response: Response | null, retryDelay: number, attempt: number): number {
-  if (response) {
-    const retryAfter = response.headers.get("Retry-After")
-    if (retryAfter) {
-      const seconds = Number(retryAfter)
-      if (!isNaN(seconds) && seconds > 0) {
-        return seconds * 1000
-      }
-    }
-  }
+  const serverWait = retryAfterMs(response)
+  if (serverWait !== null) return serverWait
   const baseDelay = retryDelay * Math.pow(2, attempt)
   return baseDelay + Math.random() * baseDelay * 0.5
 }

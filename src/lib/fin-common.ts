@@ -237,21 +237,36 @@ export function isFinLaw(lawName: string): boolean {
 
 export interface UpcomingVersion {
   시행일자: string
-  공포일자: string
+  /** 이 시행일에 걸린 공포본의 공포일자 (최근 → 과거, 중복 제거) */
+  공포일자: string[]
 }
 
+/**
+ * ⚠ `현행연혁코드=시행예정`만 믿으면 안 된다 — 법제처는 **시행일이 이미 지난 행**에도
+ * 시행예정 코드를 남기고, 공포본마다 슬라이스를 따로 둬 같은 시행일이 여러 행으로 온다.
+ * 실측(2026-09-16, 소득세법 시행령 display 20): 현행 시행일 2026-07-01인데 "2026-07-01 시행
+ * 예정" 4행 + 2027-01-01 6행 + 2028-01-01 1행 → 이미 시행된 개정이 "개정 예정"으로 4번 나열됐다.
+ * 그래서 시행일이 오늘(KST)보다 뒤인 행만 남기고(fin_law_search의 📅시행예정과 같은 기준),
+ * 같은 시행일은 하나로 접는다.
+ */
 export function parseUpcomingVersions(xml: string, lawName: string): UpcomingVersion[] {
   const blocks = xml.match(/<law [\s\S]*?<\/law>/g) || []
   const target = compactName(lawName)
-  const out: UpcomingVersion[] = []
+  const byDate = new Map<string, Set<string>>()
   for (const b of blocks) {
     const name = extractTag(b, "법령명한글")
     if (compactName(name) !== target) continue
     if (extractTag(b, "현행연혁코드") !== "시행예정") continue
-    out.push({ 시행일자: extractTag(b, "시행일자"), 공포일자: extractTag(b, "공포일자") })
+    const efYd = extractTag(b, "시행일자")
+    if (!isFutureDate(efYd)) continue
+    const set = byDate.get(efYd) || new Set<string>()
+    const ancYd = extractTag(b, "공포일자")
+    if (ancYd) set.add(ancYd)
+    byDate.set(efYd, set)
   }
-  out.sort((a, b) => (a.시행일자 < b.시행일자 ? -1 : 1))
-  return out
+  return [...byDate.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([efYd, set]) => ({ 시행일자: efYd, 공포일자: [...set].sort().reverse() }))
 }
 
 export function formatYmd(yyyymmdd: string): string {
@@ -262,10 +277,51 @@ export function formatYmd(yyyymmdd: string): string {
 export const AUTHORITY_FOOTER =
   "※ 전거 서열(높음→낮음): 법령 조문(법률·시행령·시행규칙) > 대법원 판례 > 심판례·유권해석 > 예규(행정해석 — 구속력 없음). 상충 시 상위 전거 우선"
 
-/** YYYYMMDD → 오늘 이후면 true (시행예정 판정) */
+/**
+ * YYYYMMDD가 달력에 실재하는 날짜인가 — 형식만 맞고 존재하지 않는 값을 거른다.
+ *
+ * 문자열 비교만 하면 "20261345"·"20270229"가 오늘보다 커서 "시행예정"이 된다. 그런 값이 왔다는
+ * 것은 시행일 태그를 잘못 읽었다는 뜻이라(응답 형식 변경·다른 태그 혼입) 시행예정의 근거로 쓸 수
+ * 없다. Date.UTC 왕복 비교라 윤년도 정확하다 (ruling-search.ts isSortableDate와 같은 방식).
+ * ⚠ Date.UTC는 0~99년을 1900년대로 옮기므로 그 범위의 연도는 왕복에서 걸려 false가 된다 —
+ *   법령 시행일에 나올 수 없는 값이라 그대로 둔다.
+ */
+function isRealYmd(yyyymmdd: string): boolean {
+  if (!/^\d{8}$/.test(yyyymmdd)) return false
+  const y = Number(yyyymmdd.slice(0, 4))
+  const m = Number(yyyymmdd.slice(4, 6))
+  const d = Number(yyyymmdd.slice(6, 8))
+  const probe = new Date(Date.UTC(y, m - 1, d))
+  return probe.getUTCFullYear() === y && probe.getUTCMonth() === m - 1 && probe.getUTCDate() === d
+}
+
+/** basis_date 달력 검증 거절 문구 — 5개 도구(article·law_search·ruling_search·topic·verify) 공통 */
+export const BASIS_DATE_CALENDAR_MESSAGE = "기준일이 달력에 없는 날짜입니다 (예: 2024-02-30·2023-02-29·2026-13-01) — 실제 날짜를 YYYY-MM-DD로 지정하세요"
+
+/**
+ * basis_date(YYYY-MM-DD) 달력 검증 — zod `.refine`용.
+ *
+ * 스키마가 형식 regex만 봐서 2024-02-30·2026-13-01이 통과해 법제처 efYd로 그대로 나갔다
+ * (improvement-candidates B3). 형식이 틀린 값은 true를 돌려 각 스키마의 기존 형식 메시지
+ * 한 줄만 나가게 하고(중복 오류 방지), 형식이 맞는 값만 isRealYmd(윤년 포함)로 거른다.
+ */
+export function isCalendarBasisDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return true
+  return isRealYmd(value.replace(/-/g, ""))
+}
+
+/**
+ * YYYYMMDD → 오늘(한국 시간) 이후면 true (시행예정 판정).
+ * 법령 시행일은 KST 날짜다 — 호스트 로컬 시간대로 "오늘"을 잡으면 UTC 서버에서
+ * 1월 1일 0시~9시(KST)에 당일 시행 법령이 "시행예정"으로 보인다 (9차 리뷰 I2)
+ *
+ * 형식 검사만으로는 부족하다 — 달력에 없는 날짜는 오늘보다 "큰" 문자열이라 전부 시행예정이 됐다.
+ * 소비자 셋 다 이 false를 "시행예정이 아니다"로 읽으면 맞다: parseUpcomingVersions(:261)는 그 행을
+ * 개정 예정 목록에서 빼고, fin_law_search(law-search.ts:120)와 fin_article(article.ts:1194)은
+ * 📅시행예정 딱지를 붙이지 않는다 — 셋 다 "읽을 수 없는 시행일로 예정을 단정하지 않는다"가 맞다.
+ */
 export function isFutureDate(yyyymmdd: string): boolean {
-  if (!/^\d{8}$/.test(yyyymmdd || "")) return false
-  const now = new Date()
-  const today = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`
+  if (!isRealYmd(yyyymmdd || "")) return false
+  const today = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10).replace(/-/g, "")
   return yyyymmdd > today
 }

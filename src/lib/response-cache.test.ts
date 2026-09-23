@@ -47,6 +47,29 @@ describe("ResponseCache — TTL·상한·비활성", () => {
     expect(c.enabled).toBe(false)
     expect(c.get("a")).toBeUndefined()
   })
+
+  /**
+   * 키가 URL뿐이라 같은 URL을 **더 느슨한 조건**으로 요청한 호출이 담은 본문이 남아 있을 수 있다
+   * (api-client의 expectedRoot·expectedJsonKey는 URL에 들어가지 않는다). 지금 호출의 가드가
+   * 거부하면 적중으로 세지 않고 항목을 버려, 호출측이 네트워크로 회복하게 한다
+   */
+  it("accept가 거부한 적중은 미스로 돌리고 항목을 버린다", () => {
+    const c = new ResponseCache({ ttlMs: 60_000 })
+    c.set("u1", "wrong-root")
+    expect(c.get("u1", (v) => v === "good")).toBeUndefined()
+    expect(c.stats(), "거부한 적중이 hit으로 세졌다").toMatchObject({ hits: 0, misses: 1, entries: 0 })
+    // 버린 뒤 새 본문을 담으면 종전대로 적중한다
+    c.set("u1", "good")
+    expect(c.get("u1", (v) => v === "good")).toBe("good")
+    expect(c.stats().hits).toBe(1)
+  })
+
+  it("accept가 없으면 종전과 같다 — 기존 호출부 호환", () => {
+    const c = new ResponseCache({ ttlMs: 60_000 })
+    c.set("u1", "body")
+    expect(c.get("u1")).toBe("body")
+    expect(c.stats().hits).toBe(1)
+  })
 })
 
 describe("isCacheableBody — 장애 응답은 담지 않는다", () => {

@@ -9,13 +9,26 @@ import { fetchWithRetry } from "./fetch-with-retry.js"
 // (2026-07-19 행위시법 골드셋 R1에서 19콜 중 10콜 관측, 수초 내 자연 회복 —
 // lsHistory 페이징 연속 조회에서 특히 빈발). DRF 엔드포인트는 고정이라
 // 영구 404가 사실상 없으므로 404를 재시도 대상에 포함한다.
-// 재시도 2회·콜당 timeout 3초 (PRD 04 운영 계약 — 콜 하나가 도구 deadline 6초를 다 먹지 않게)
-const DRF_RETRY = { retryOn: [404, 429, 503, 504], retries: 2, timeout: 3000 }
+// 재시도 2회·콜당 timeout 3초 (PRD 04 운영 계약 — 콜 하나가 도구 deadline 6초를 다 먹지 않게).
+// Retry-After 상한도 같은 3초 — 서버가 그보다 오래 쉬라고 하면 기다리다 deadline에 끊기지 않고
+// 429를 그대로 올려 "한도 초과"로 보고한다 (Codex 9차: 429가 타임아웃으로 분류됨)
+const DRF_RETRY = { retryOn: [404, 429, 503, 504], retries: 2, timeout: 3000, maxRetryAfterMs: 3000 }
+// 3단비교(thdCmp)만 콜당 timeout 5초 — 정상 응답이 2.15~2.28초로 3초와 여유가 0.7초뿐이라,
+// 느린 응답은 3초에 끊겨 처음부터 다시 받다가 도구 deadline 6초에 위임·예규가 함께 빠졌다
+// (R3 라이브 2026-09-24: 조특법 시행령 §27 cold 6회 중 2회). 5초 timeout 뒤의 재시도는
+// deadline 안에 끝날 수 없으므로 timeout은 재시도하지 않는다(retryOnTimeout=false).
+// 404·429·빈 본문 같은 빠른 실패의 재시도(retries 2)는 다른 호출과 같다. 다른 호출의 계약은 불변
+const DRF_THREE_TIER_RETRY = { ...DRF_RETRY, timeout: 5000, retryOnTimeout: false }
 import { getLawApiBaseUrl } from "./law-url-config.js"
 import { createTokenBucket, createDailyCap, createSemaphore, type TokenBucket, type DailyCap, type Semaphore } from "./rate-limit.js"
 import { createResponseCacheFromEnv, isCacheableBody, type ResponseCache, type ResponseCacheStats } from "./response-cache.js"
 
 const LAW_API_BASE = getLawApiBaseUrl()
+
+/** 행정규칙 본문이 끝까지 왔는가 — 정상 본문은 `</AdmRulService>`로 끝난다 (2026-09-16 실측) */
+function isCompleteAdmRulBody(text: string): boolean {
+  return /<\/\s*AdmRulService\s*>\s*$/.test(text.trimEnd())
+}
 
 export class LawApiClient {
   private defaultApiKey: string
@@ -53,12 +66,49 @@ export class LawApiClient {
     if (!v2.ok) throw new Error(`RATE_LIMITED: 일일 호출 한도 초과 — ${v2.retryAfterSec}초 후 재시도하세요.`)
   }
 
-  /** 모든 DRF 호출의 단일 관문 — 동시 실행 상한(세마포어) + rate limit 게이트를 거친다 */
-  private async drfFetch(url: string, opts: Parameters<typeof fetchWithRetry>[1] = DRF_RETRY): Promise<Response> {
+  /**
+   * 재시도 게이트 — **429 재시도만** 분당·일일 한도 토큰을 쓴다. 토큰이 없으면 재시도하지 않고
+   * 429를 그대로 올린다 (호출측에서 "한도 초과" ⚠).
+   *
+   * 서버가 이미 "너무 많다"고 한 뒤의 재시도가 토큰 없이 나가면 로컬 한도가 그 순간 사실상 3배로
+   * 풀린다 (Codex 9차). 404·503·빈 본문 재시도는 계상하지 않는다 — DRF의 버스트 간헐 404(19콜 중
+   * 10콜 관측) 회복이 재시도의 존재 이유라, 보수적 로컬 한도(30/분)에 계상하면 정확히 그 상황에서
+   * 뒤따르는 조회가 RATE_LIMITED ⚠로 바뀐다. 서버가 404를 한도에 세는지는 정보 부족.
+   */
+  private allowRetry(status: number | null): boolean {
+    if (status !== 429) return true
+    if (!this.bucket.take(1).ok) return false
+    return this.dailyCap.take(1).ok
+  }
+
+  /**
+   * 모든 DRF 호출의 단일 관문 — 동시 실행 상한(세마포어) + rate limit 게이트를 거친다
+   * @param cacheOpts.bypassCache 캐시 **읽기**를 건너뛴다 (fin_ping 전용). 캐시 적중은 네트워크를 타지
+   *   않으므로 진단이 그걸 "통신 성공"으로 보고하면 거짓 성공이다 (Codex 9차 P1). 받은 정상 응답은 담는다
+   * @param cacheOpts.complete 캐시 판정 가드 — **호출부가 응답에 거는 가드와 같은 함수**를 넘긴다.
+   *   거부(false 반환 또는 throw)하면 ① 그 본문을 담지 않고 ② 같은 URL의 기존 적중도 쓰지 않는다.
+   *   가드를 여기에 복제해 적으면 저장 계약과 반환 계약이 갈라진다 — 한 함수를 두 곳에 건다.
+   *   오류는 여기서 올리지 않는다(거부만 한다) — 호출부의 같은 가드가 기존 한국어 메시지로 던진다
+   */
+  private async drfFetch(
+    url: string,
+    opts: Parameters<typeof fetchWithRetry>[1] = DRF_RETRY,
+    cacheOpts: { bypassCache?: boolean; complete?: (text: string) => boolean | void } = {}
+  ): Promise<Response> {
     const signal = opts?.signal as AbortSignal | undefined
+    const accepts = (text: string): boolean => {
+      if (!cacheOpts.complete) return true
+      try {
+        return cacheOpts.complete(text) !== false
+      } catch {
+        return false // 가드가 던지는 것도 "거부"다 — 오류 자체는 호출부에서 같은 가드가 올린다
+      }
+    }
     // 캐시 적중은 세마포어·rate limit 앞에서 처리한다 — 나가지 않는 호출이
-    // 동시성 슬롯과 분당 토큰을 먹으면 캐시의 의미가 없다
-    const cached = this.cache.get(url)
+    // 동시성 슬롯과 분당 토큰을 먹으면 캐시의 의미가 없다.
+    // 캐시 키는 URL뿐이므로 적중도 지금 호출의 가드로 다시 본다 — 더 느슨한 조건의
+    // 호출(expectedRoot 없는 fetchApi 등)이 담아 둔 본문을 검증 없이 재사용하면 안 된다
+    const cached = cacheOpts.bypassCache ? undefined : this.cache.get(url, accepts)
     if (cached !== undefined) return new Response(cached, { status: 200 })
     const release = await this.semaphore.acquire()
     try {
@@ -66,13 +116,13 @@ export class LawApiClient {
       // 결과를 쓰지도 못하면서 쿼터만 소모한다 (Codex 리뷰 중요 4)
       if (signal?.aborted) throw new Error("요청 취소됨(도구 deadline) — 대기 중 취소되어 호출하지 않음")
       this.gate() // 토큰 소모는 실제 호출 직전 — 세마포어 대기 중 소모하지 않는다
-      const res = await fetchWithRetry(url, opts)
+      const res = await fetchWithRetry(url, { ...opts, beforeRetry: (status) => this.allowRetry(status) })
       // 오류 응답은 담지 않는다 — 일시 장애를 TTL 동안 고정하면 "조용한 실패"가 된다.
       // 본문을 한 번 읽어 캐시에 넣고 같은 내용의 새 Response를 돌려준다
       // (호출부는 .text()만 쓴다 — clone()은 큰 응답에서 메모리를 두 배로 쓴다)
       if (!res.ok || !this.cache.enabled) return res
       const text = await res.text()
-      if (isCacheableBody(text)) this.cache.set(url, text)
+      if (isCacheableBody(text) && accepts(text)) this.cache.set(url, text)
       return new Response(text, { status: res.status, statusText: res.statusText })
     } finally {
       release()
@@ -189,8 +239,16 @@ export class LawApiClient {
    * 법령 검색
    * @param display 결과 개수 (기본값 법제처 API default, 짧은 법령명("상법" 등) 정확 매칭 찾으려면 큰 값 권장)
    * @param target "law"=현행법령(기본), "eflaw"=시행일 기준(시행예정 포함)
+   * @param options.bypassCache 캐시 적중을 쓰지 않고 실제로 호출한다 — fin_ping 통신 진단 전용
    */
-  async searchLaw(query: string, apiKey?: string, display?: number, target: "law" | "eflaw" = "law", signal?: AbortSignal): Promise<string> {
+  async searchLaw(
+    query: string,
+    apiKey?: string,
+    display?: number,
+    target: "law" | "eflaw" = "law",
+    signal?: AbortSignal,
+    options: { bypassCache?: boolean } = {}
+  ): Promise<string> {
     const normalizedQuery = normalizeLawSearchText(query)
     const aliasResolution = resolveLawAlias(normalizedQuery)
     const finalQuery = aliasResolution.canonical
@@ -206,14 +264,22 @@ export class LawApiClient {
     if (display && display > 0) params.append("display", String(display))
 
     const url = `${LAW_API_BASE}/lawSearch.do?${params.toString()}`
-    const response = await this.drfFetch(url, signal ? { ...DRF_RETRY, signal } : DRF_RETRY)
+    // 같은 가드를 캐시(저장·적중)와 반환에 건다 — 가드가 거부할 본문이 캐시에 담기면
+    // 일시 장애가 TTL 동안 같은 실패로 고정된다 (r1-boundaries 재현)
+    const guard = (text: string): void => {
+      this.checkEmptyResponse(text, "법령 검색")
+      this.checkHtmlError(text, "법령 검색 결과를 받지 못했습니다")
+      // 조건 없이 항상 검증한다 — 위에서 type을 XML로 고정했으므로 가드가 꺼지는 모드가 없다
+      this.assertXmlRoot(text, ["LawSearch"], "법령 검색")
+    }
+    const response = await this.drfFetch(url, signal ? { ...DRF_RETRY, signal } : DRF_RETRY, {
+      bypassCache: options.bypassCache,
+      complete: guard,
+    })
     await this.throwIfError(response, "searchLaw")
 
     const text = await response.text()
-    this.checkEmptyResponse(text, "법령 검색")
-    this.checkHtmlError(text, "법령 검색 결과를 받지 못했습니다")
-    // 조건 없이 항상 검증한다 — 위에서 type을 XML로 고정했으므로 가드가 꺼지는 모드가 없다
-    this.assertXmlRoot(text, ["LawSearch"], "법령 검색")
+    guard(text)
     return text
   }
 
@@ -241,14 +307,17 @@ export class LawApiClient {
     if (params.efYd) apiParams.append("efYd", String(params.efYd))
 
     const url = `${LAW_API_BASE}/lawService.do?${apiParams.toString()}`
-    const response = await this.drfFetch(url)
+    const guard = (text: string): void => {
+      this.checkHtmlError(text, params.jo
+        ? `법령 조문(${params.jo})을 찾을 수 없습니다. MST/lawId와 조문번호를 확인해주세요.`
+        : "법령을 찾을 수 없습니다. MST 또는 법령명을 확인해주세요.")
+    }
+    const response = await this.drfFetch(url, DRF_RETRY, { complete: guard })
     await this.throwIfError(response, "getLawText")
 
     const text = await response.text()
 
-    this.checkHtmlError(text, params.jo
-      ? `법령 조문(${params.jo})을 찾을 수 없습니다. MST/lawId와 조문번호를 확인해주세요.`
-      : "법령을 찾을 수 없습니다. MST 또는 법령명을 확인해주세요.")
+    guard(text)
 
     return text
   }
@@ -302,10 +371,27 @@ export class LawApiClient {
     if (params.lawId) apiParams.append("ID", String(params.lawId))
 
     const url = `${LAW_API_BASE}/lawService.do?${apiParams.toString()}`
-    const response = await this.drfFetch(url, params.signal ? { ...DRF_RETRY, signal: params.signal } : DRF_RETRY)
+    // 종전에는 가드가 없어 200 + 루트가 다른 JSON·HTML 본문이 TTL 동안 캐시되고 소비자
+    // (article.ts JSON.parse → parseThreeTierRows)에서 매번 같은 실패로 터졌다 (r2-cache §6).
+    // 정상 루트 근거: .release-scratch/probes/r9-raw/thd-*.json 38건(2026-09-16 knd=2 실응답)이
+    // 전부 최상위 키 LspttnThdCmpLawXService 하나였다 — 위임 표가 없는 법령(thd-284983)도
+    // 같은 루트에 기본정보만 담겨 온다(정상 0건 → 통과·캐시). parseThreeTierRows도 이 키가
+    // 없으면 throw하므로, 그런 본문은 캐시에 담지 않고 확인 실패로 돌린다
+    const guard = (text: string): void => {
+      this.checkEmptyResponse(text, "3단비교 조회")
+      this.checkHtmlError(text, "3단비교 조회")
+      this.assertJsonKey(text, "LspttnThdCmpLawXService", "3단비교 조회")
+    }
+    const response = await this.drfFetch(
+      url,
+      params.signal ? { ...DRF_THREE_TIER_RETRY, signal: params.signal } : DRF_THREE_TIER_RETRY,
+      { complete: guard }
+    )
     await this.throwIfError(response, "getThreeTier")
 
-    return await response.text()
+    const text = await response.text()
+    guard(text)
+    return text
   }
 
   /**
@@ -336,10 +422,6 @@ export class LawApiClient {
     if (params.display) apiParams.append("display", params.display)
 
     const url = `${LAW_API_BASE}/lawSearch.do?${apiParams.toString()}`
-    const response = await this.drfFetch(url, params.signal ? { ...DRF_RETRY, signal: params.signal } : DRF_RETRY)
-    await this.throwIfError(response, "searchAdminRule")
-
-    const text = await response.text()
     // 200 + 오류 본문(<error>…</error> 등)이 "행정규칙 0건"으로 읽히는 것을 막는다 (Codex 8차 중요).
     // 이 경로에만 가드가 없어서, 법제처가 200으로 오류 XML을 주면
     //  ① abolished-laws의 연혁 조회(nw=2)에서 parseAdmrulHistoryXml이 빈 배열을 내고
@@ -347,14 +429,26 @@ export class LawApiClient {
     //  ② admin-rule-citation이 그 null을 "폐지 이력도 없음"으로 읽어 실존·폐지 규칙에
     //     하드 ✗ NOT_FOUND를 찍었다 (현행 검색만 정상 0건인 조합에서 재현).
     // findAdminRule(tools/admin-rule-citation.ts)에만 있던 같은 가드를 클라이언트로 올려
-    // 두 소비자가 모두 ⚠(판정불가)로 흐르게 한다
-    this.checkEmptyResponse(text, "행정규칙 검색")
-    this.checkHtmlError(text, "행정규칙 검색 결과를 받지 못했습니다")
-    // 정상 검색 응답의 루트는 AdmRulSearch (2026-08-19 실호출 확인 — findAdminRule의 같은 상수).
-    // ⚠ 정상 0건(<AdmRulSearch><totalCnt>0</totalCnt></AdmRulSearch>)은 루트가 맞으므로
-    // 여기서 걸리지 않는다 — 네거티브 캐시는 그대로 살아 있어야 한다.
-    // 조건 없이 항상 검증한다 — 위에서 type을 XML로 고정했으므로 가드가 꺼지는 모드가 없다
-    this.assertXmlRoot(text, ["AdmRulSearch"], "행정규칙 검색")
+    // 두 소비자가 모두 ⚠(판정불가)로 흐르게 한다.
+    // 이 가드는 캐시 저장·적중 판정에도 그대로 쓰인다 (drfFetch cacheOpts.complete)
+    const guard = (text: string): void => {
+      this.checkEmptyResponse(text, "행정규칙 검색")
+      this.checkHtmlError(text, "행정규칙 검색 결과를 받지 못했습니다")
+      // 정상 검색 응답의 루트는 AdmRulSearch (2026-08-19 실호출 확인 — findAdminRule의 같은 상수).
+      // ⚠ 정상 0건(<AdmRulSearch><totalCnt>0</totalCnt></AdmRulSearch>)은 루트가 맞으므로
+      // 여기서 걸리지 않는다 — 네거티브 캐시는 그대로 살아 있어야 한다.
+      // 조건 없이 항상 검증한다 — 위에서 type을 XML로 고정했으므로 가드가 꺼지는 모드가 없다
+      this.assertXmlRoot(text, ["AdmRulSearch"], "행정규칙 검색")
+    }
+    const response = await this.drfFetch(
+      url,
+      params.signal ? { ...DRF_RETRY, signal: params.signal } : DRF_RETRY,
+      { complete: guard }
+    )
+    await this.throwIfError(response, "searchAdminRule")
+
+    const text = await response.text()
+    guard(text)
     return text
   }
 
@@ -372,12 +466,31 @@ export class LawApiClient {
     })
 
     const url = `${LAW_API_BASE}/lawService.do?${apiParams.toString()}`
-    // 본문이 크다(실측 213~405KB) — 도구 deadline을 전파해 상한 이후 조회를 끊는다
-    const response = await this.drfFetch(url, signal ? { ...DRF_RETRY, signal } : DRF_RETRY)
+    // 200 + 오류 본문(<error>…)이 소비자에서 "별표 0건 (정상 조회 결과 없음)"·"후속 규정 자동 추출 실패"로
+    // 읽혔다 — XML 고정만 되고 루트 가드가 없던 경로 (Codex 9차 M3). searchAdminRule과 같은 가드를 건다.
+    // 정상 본문 루트는 AdmRulService (2026-09-16 실측: 조사사무처리규정 388KB, 닫는 태그로 끝남).
+    // 종전에는 이 넷 중 **닫는 태그 확인만** 캐시 판정(complete)에 걸려 있어, 닫는 태그가 있는
+    // 오류 본문(루트가 다르거나 HTML)은 담긴 뒤 아래에서 throw됐다 — 전부 같은 가드로 묶는다
+    const guard = (text: string): void => {
+      this.checkEmptyResponse(text, "행정규칙 본문 조회")
+      this.checkHtmlError(text, "행정규칙을 찾을 수 없습니다. ID를 확인해주세요")
+      this.assertXmlRoot(text, ["AdmRulService"], "행정규칙 본문 조회")
+      // 본문이 크다(수백 KB) — 전송이 중간에 끊기면 앞부분만 파싱되어 별표·서식 목록이 일부만 나오는데
+      // 건수는 그것이 전부인 것처럼 보인다. checkAdminRuleArticle(admin-rule-citation)에만 있던
+      // 닫는 태그 확인을 클라이언트로 올려 모든 소비자가 확인 실패(⚠)로 받게 한다
+      if (!isCompleteAdmRulBody(text)) {
+        throw new Error(`행정규칙 본문 조회 - 중간에 끊긴 응답(닫는 태그 없음)입니다 — "0건"이 아니라 확인 실패로 처리하세요.`)
+      }
+    }
+    // 본문이 크다(실측 213~405KB) — 도구 deadline을 전파해 상한 이후 조회를 끊는다.
+    // 가드가 거부할 본문은 캐시에 담지 않는다 (TTL 동안 같은 실패로 고정되지 않게)
+    const response = await this.drfFetch(url, signal ? { ...DRF_RETRY, signal } : DRF_RETRY, {
+      complete: guard,
+    })
     await this.throwIfError(response, "getAdminRule")
 
     const text = await response.text()
-    this.checkHtmlError(text, "행정규칙을 찾을 수 없습니다. ID를 확인해주세요")
+    guard(text)
 
     return text
   }
@@ -416,23 +529,31 @@ export class LawApiClient {
     }
 
     const url = `${LAW_API_BASE}/lawSearch.do?${apiParams.toString()}`
-    const response = await this.drfFetch(url, params.signal ? { ...DRF_RETRY, signal: params.signal } : DRF_RETRY)
+    const guard = (text: string): void => {
+      // 법제처는 별표 API 미신청 계정에 200 + HTML("미신청된 목록/본문에 대한 접근입니다")을 준다.
+      // 가드가 없으면 JSON.parse 실패가 "응답 형식 이상 — 법제처 장애"로 오진되어 신규 사용자가
+      // 원인(OPEN API 별표 종류 미신청)을 못 찾는다 (Opus 리뷰 개선 5)
+      this.checkEmptyResponse(text, "별표 조회")
+      if (/<!doctype\s+html|<html[\s>]/i.test(text)) {
+        throw new Error(
+          "별표 조회 - API가 HTML 페이지를 반환했습니다. 법제처 OPEN API 신청에 '별표·서식'이 포함되지 않았거나 일시 장애일 수 있습니다 (open.law.go.kr에서 신청 범위 확인)."
+        )
+      }
+      // 200 + 정상 형식의 오류 JSON({"error":…})이 파서에서 "별표 0건"으로 읽히던 자리
+      // (Codex 7차 중요) — 최상위 키를 확인해 확인 실패로 돌린다.
+      // 루트 키는 target에 따라 다르다 (licbyl→licBylSearch — 소문자 l, 2026-09-24 라이브 확인, ordinbyl·admbyl→각자)
+      this.assertAnnexJsonRoot(text, target)
+    }
+    // 이 가드가 거부할 본문은 캐시에도 담지 않는다 — 담으면 미신청·일시 장애가 TTL 동안 고정된다
+    const response = await this.drfFetch(
+      url,
+      params.signal ? { ...DRF_RETRY, signal: params.signal } : DRF_RETRY,
+      { complete: guard }
+    )
     await this.throwIfError(response, "getAnnexes")
 
     const text = await response.text()
-    // 법제처는 별표 API 미신청 계정에 200 + HTML("미신청된 목록/본문에 대한 접근입니다")을 준다.
-    // 가드가 없으면 JSON.parse 실패가 "응답 형식 이상 — 법제처 장애"로 오진되어 신규 사용자가
-    // 원인(OPEN API 별표 종류 미신청)을 못 찾는다 (Opus 리뷰 개선 5)
-    this.checkEmptyResponse(text, "별표 조회")
-    if (/<!doctype\s+html|<html[\s>]/i.test(text)) {
-      throw new Error(
-        "별표 조회 - API가 HTML 페이지를 반환했습니다. 법제처 OPEN API 신청에 '별표·서식'이 포함되지 않았거나 일시 장애일 수 있습니다 (open.law.go.kr에서 신청 범위 확인)."
-      )
-    }
-    // 200 + 정상 형식의 오류 JSON({"error":…})이 파서에서 "별표 0건"으로 읽히던 자리
-    // (Codex 7차 중요) — 최상위 키를 확인해 확인 실패로 돌린다.
-    // 루트 키는 target에 따라 다르다 (licbyl→LicBylSearch, ordinbyl·admbyl→각자)
-    this.assertAnnexJsonRoot(text, target)
+    guard(text)
     return text
   }
 
@@ -501,10 +622,19 @@ export class LawApiClient {
     })
 
     const url = `${LAW_API_BASE}/lawSearch.do?${apiParams.toString()}`
-    const response = await this.drfFetch(url)
+    // 빈 응답·HTML·루트 가드가 하나도 없어 200 오류 본문이 fin_law_search에서 "자치법규(조례) — 0건"으로
+    // 나갔다 (Codex 9차 M3). 정상 루트는 0건일 때도 OrdinSearch (2026-09-16 실측: 247건·0건 모두)
+    const guard = (text: string): void => {
+      this.checkEmptyResponse(text, "자치법규 검색")
+      this.checkHtmlError(text, "자치법규 검색 결과를 받지 못했습니다")
+      this.assertXmlRoot(text, ["OrdinSearch"], "자치법규 검색")
+    }
+    const response = await this.drfFetch(url, DRF_RETRY, { complete: guard })
     await this.throwIfError(response, "searchOrdinance")
 
-    return await response.text()
+    const text = await response.text()
+    guard(text)
+    return text
   }
 
   /**
@@ -520,11 +650,14 @@ export class LawApiClient {
     if (jo) apiParams.append("JO", jo)
 
     const url = `${LAW_API_BASE}/lawService.do?${apiParams.toString()}`
-    const response = await this.drfFetch(url)
+    const guard = (text: string): void => {
+      this.checkHtmlError(text, "자치법규를 찾을 수 없습니다. ordinSeq를 확인해주세요")
+    }
+    const response = await this.drfFetch(url, DRF_RETRY, { complete: guard })
     await this.throwIfError(response, "getOrdinance")
 
     const text = await response.text()
-    this.checkHtmlError(text, "자치법규를 찾을 수 없습니다. ordinSeq를 확인해주세요")
+    guard(text)
 
     return text
   }
@@ -593,32 +726,43 @@ export class LawApiClient {
     }
 
     const url = `${LAW_API_BASE}/${params.endpoint}?${apiParams.toString()}`
+    // ⚠ expectedRoot·expectedJsonKey는 **URL에 들어가지 않는다** — 캐시 키(URL)가 같아도
+    // 호출마다 가드 강도가 다르다. 그래서 이 가드를 저장뿐 아니라 적중 판정에도 넘긴다:
+    // 느슨한 호출(historical-utils.ts:196 eflaw, expectedRoot 없음)이 담은 본문을 엄격한
+    // 호출(tools/law-search.ts:155 같은 URL + expectedRoot)이 검증 없이 쓰면 안 된다
+    const guard = (text: string): void => {
+      // type=HTML 응답은 HTML이 정상 — checkHtmlError(XML/JSON 응답에 HTML이 오면 에러) 우회
+      if (params.type !== "HTML") {
+        this.checkEmptyResponse(text, `fetchApi(${params.target})`)
+        this.checkHtmlError(text, "API 응답 오류 - 파라미터를 확인해주세요")
+      }
+      // 검색 XML은 루트 검증 — 정상 형식 오류 XML의 "0건" 위장 방지
+      if (params.type === "XML" && params.expectedRoot) {
+        this.assertXmlRoot(text, [params.expectedRoot], `fetchApi(${params.target})`)
+      }
+      // JSON도 같은 가드가 필요하다 — 법제처는 조회 실패 시 빈 본문이 아니라
+      // 루트 키가 다른 짧은 JSON(예: {"Law":{...}} 42바이트)을 200으로 돌려준다.
+      // 이걸 그대로 파싱하면 `?.법령`이 undefined가 되어 "조문 없음(✗)"으로 위장된다
+      // (Opus B-1: basis_date를 준 fin_verify가 모든 인용을 ✗로 판정하던 원인)
+      if (params.type === "JSON" && params.expectedJsonKey) {
+        this.assertJsonKey(text, params.expectedJsonKey, `fetchApi(${params.target})`)
+      }
+    }
     // type=HTML(lsHistory 등)은 HTML 본문이 정상 — 빈본문/HTML 재시도 휴리스틱이
     // 정상 응답마다 재시도를 소진(요청 4배 증폭 + ~7s 지연)하지 않도록 허용 플래그
-    const response = await this.drfFetch(url, {
-      ...DRF_RETRY,
-      ...(params.type === "HTML" ? { allowHtmlBody: true } : {}),
-      ...(params.signal ? { signal: params.signal } : {}),
-    })
+    const response = await this.drfFetch(
+      url,
+      {
+        ...DRF_RETRY,
+        ...(params.type === "HTML" ? { allowHtmlBody: true } : {}),
+        ...(params.signal ? { signal: params.signal } : {}),
+      },
+      { complete: guard }
+    )
     await this.throwIfError(response, `fetchApi(${params.target})`)
 
     const text = await response.text()
-    // type=HTML 응답은 HTML이 정상 — checkHtmlError(XML/JSON 응답에 HTML이 오면 에러) 우회
-    if (params.type !== "HTML") {
-      this.checkEmptyResponse(text, `fetchApi(${params.target})`)
-      this.checkHtmlError(text, "API 응답 오류 - 파라미터를 확인해주세요")
-    }
-    // 검색 XML은 루트 검증 — 정상 형식 오류 XML의 "0건" 위장 방지
-    if (params.type === "XML" && params.expectedRoot) {
-      this.assertXmlRoot(text, [params.expectedRoot], `fetchApi(${params.target})`)
-    }
-    // JSON도 같은 가드가 필요하다 — 법제처는 조회 실패 시 빈 본문이 아니라
-    // 루트 키가 다른 짧은 JSON(예: {"Law":{...}} 42바이트)을 200으로 돌려준다.
-    // 이걸 그대로 파싱하면 `?.법령`이 undefined가 되어 "조문 없음(✗)"으로 위장된다
-    // (Opus B-1: basis_date를 준 fin_verify가 모든 인용을 ✗로 판정하던 원인)
-    if (params.type === "JSON" && params.expectedJsonKey) {
-      this.assertJsonKey(text, params.expectedJsonKey, `fetchApi(${params.target})`)
-    }
+    guard(text)
 
     return text
   }
