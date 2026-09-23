@@ -46,6 +46,7 @@ body:
       label: 어떤 도구가 쓰였나요 (아는 만큼만)
       description: AI 화면에 표시된 도구 이름입니다. 모르면 전부 비워 두세요
       options:
+        - label: "fin_topic (질문 → 확인할 사실·조문 후보)"
         - label: "fin_article (조문 조회)"
         - label: "fin_law_search (법령 검색)"
         - label: "fin_ruling_search (예규·판례·재결 검색)"
