@@ -36,6 +36,7 @@ import { isAdminRuleLikeName, findAdminRule, stripTrailingParen, parseDeletedArt
 import { LATEST_FIRST_SORT, isLatestFirst, readTotalCnt } from "./ruling-search.js"
 import { formatAnnexNo } from "./annex.js"
 import { toArray } from "../lib/xml-parser.js"
+import { pickArticleUnit, unitJoLabel } from "../lib/article-unit.js"
 import {
   type SectionResult,
   failed,
@@ -124,64 +125,179 @@ function parseArticleInput(input: string): ArticleInput | null {
 }
 
 // ── ② 조문 본문 렌더링 (article-detail.ts 검증 로직 이식 — 목 누락 방지 포함) ──
-function renderArticleUnits(lawData: any): string {
-  const rawUnits = lawData?.조문?.조문단위
-  const units: any[] = toArray(rawUnits)
-  let out = ""
-  for (const unit of units) {
-    if (unit.조문여부 !== "조문") continue
-    const joNum = unit.조문번호 || ""
-    const joBranch = unit.조문가지번호 || ""
-    const joTitle = unit.조문제목 || ""
-    const displayNum = joBranch && joBranch !== "0" ? `제${joNum}조의${joBranch}` : `제${joNum}조`
 
-    let bodyFirst = ""
-    if (unit.조문내용) bodyFirst = cleanHtml(flattenContent(unit.조문내용)).trim()
-    // 조문내용이 이미 "제N조(제목)"로 시작하면 헤더 중복 출력 방지
-    if (!bodyFirst.replace(/\s+/g, "").startsWith(displayNum.replace(/\s+/g, ""))) {
-      out += `${displayNum}${joTitle ? ` (${joTitle})` : ""}\n`
+// 요청 조문번호 대조(pickArticleUnit)는 fin_verify와 같은 규칙이라 lib/article-unit.ts로 공유한다 (외부 검토 B4)
+
+interface RenderedUnit {
+  /** 조 헤더 줄 + 조문내용 (항 이전) */
+  head: string
+  /** 항별 렌더링 (호·목·단서 포함). no = 항 번호(① → 1), 못 읽으면 null */
+  hangs: Array<{ no: number | null; text: string }>
+}
+
+/** 항번호 표기 → 숫자 ("①"·"(99)"·"제2항"). 못 읽으면 null */
+function hangNumberOf(raw: unknown): number | null {
+  const s = String(raw ?? "").replace(/[\s().]/g, "")
+  if (!s) return null
+  const c = s.codePointAt(0)!
+  if (c >= 0x2460 && c <= 0x2473) return c - 0x2460 + 1 // ①-⑳
+  if (c >= 0x3251 && c <= 0x325f) return c - 0x3251 + 21 // ㉑-㉟
+  if (c >= 0x32b1 && c <= 0x32bf) return c - 0x32b1 + 36 // ㊱-㊿
+  const m = s.match(/^제?(\d+)항?$/)
+  return m ? parseInt(m[1], 10) : null
+}
+
+function renderUnitParts(unit: any): RenderedUnit {
+  const displayNum = unitJoLabel(unit) ?? `제${unit.조문번호 || ""}조`
+  const joTitle = unit.조문제목 || ""
+
+  let head = ""
+  let bodyFirst = ""
+  if (unit.조문내용) bodyFirst = cleanHtml(flattenContent(unit.조문내용)).trim()
+  // 조문내용이 이미 "제N조(제목)"로 시작하면 헤더 중복 출력 방지
+  if (!bodyFirst.replace(/\s+/g, "").startsWith(displayNum.replace(/\s+/g, ""))) {
+    head += `${displayNum}${joTitle ? ` (${joTitle})` : ""}\n`
+  }
+  if (bodyFirst) head += `${bodyFirst}\n`
+  const hangs: RenderedUnit["hangs"] = []
+  if (unit.항) {
+    const hangList = Array.isArray(unit.항) ? unit.항 : [unit.항]
+    // 번호 필드와 본문이 같은 번호로 시작하는 중복("1. 1. 인건비", "(①) ①…") 방지:
+    // 본문이 이미 그 번호로 시작하면 번호를 덧붙이지 않는다
+    const numbered = (rawNum: unknown, content: string, decorate: (n: string) => string): string => {
+      const n = String(rawNum ?? "").trim()
+      const c = content.trim()
+      if (!n) return c
+      const bare = n.replace(/[.()]/g, "")
+      if (bare && c.replace(/^[\s(]*/, "").startsWith(bare)) return c
+      return `${decorate(n)} ${c}`
     }
-    if (bodyFirst) out += `${bodyFirst}\n`
-    if (unit.항) {
-      const hangList = Array.isArray(unit.항) ? unit.항 : [unit.항]
-      // 번호 필드와 본문이 같은 번호로 시작하는 중복("1. 1. 인건비", "(①) ①…") 방지:
-      // 본문이 이미 그 번호로 시작하면 번호를 덧붙이지 않는다
-      const numbered = (rawNum: unknown, content: string, decorate: (n: string) => string): string => {
-        const n = String(rawNum ?? "").trim()
-        const c = content.trim()
-        if (!n) return c
-        const bare = n.replace(/[.()]/g, "")
-        if (bare && c.replace(/^[\s(]*/, "").startsWith(bare)) return c
-        return `${decorate(n)} ${c}`
-      }
+    for (const hang of hangList) {
+      let out = ""
       const renderMok = (mokList: any[]) => {
         for (const mok of mokList) {
           const mokContent = flattenContent(mok.목내용)
           if (mokContent) out += `      ${numbered(mok.목번호, cleanHtml(mokContent), (n) => n)}\n`
         }
       }
-      for (const hang of hangList) {
-        const hangContent = flattenContent(hang.항내용)
-        if (hangContent) out += `  ${numbered(hang.항번호, cleanHtml(hangContent), (n) => `(${n})`)}\n`
+      const hangContent = flattenContent(hang.항내용)
+      if (hangContent) out += `  ${numbered(hang.항번호, cleanHtml(hangContent), (n) => `(${n})`)}\n`
 
-        const hoList = hang.호 ? (Array.isArray(hang.호) ? hang.호 : [hang.호]) : []
-        // 법제처 JSON은 목을 호가 아닌 항 레벨 형제 배열로 주는 경우가 있다 (목 45개 누락 사고의 원인)
-        const hangMokList = hang.목 ? (Array.isArray(hang.목) ? hang.목 : [hang.목]) : []
-        const mokGroups = groupMokByReset(hangMokList)
-        const alignable = hoList.length > 0 && mokGroups.length === hoList.length
+      const hoList = hang.호 ? (Array.isArray(hang.호) ? hang.호 : [hang.호]) : []
+      // 법제처 JSON은 목을 호가 아닌 항 레벨 형제 배열로 주는 경우가 있다 (목 45개 누락 사고의 원인)
+      const hangMokList = hang.목 ? (Array.isArray(hang.목) ? hang.목 : [hang.목]) : []
+      const mokGroups = groupMokByReset(hangMokList)
+      const alignable = hoList.length > 0 && mokGroups.length === hoList.length
 
-        for (let i = 0; i < hoList.length; i++) {
-          const ho = hoList[i]
-          const hoContent = flattenContent(ho.호내용)
-          if (hoContent) out += `    ${numbered(ho.호번호, cleanHtml(hoContent), (n) => (n.endsWith(".") ? n : `${n}.`))}\n`
-          if (ho.목) renderMok(Array.isArray(ho.목) ? ho.목 : [ho.목])
-          if (alignable) renderMok(mokGroups[i])
-        }
-        if (!alignable && hangMokList.length > 0) renderMok(hangMokList)
+      for (let i = 0; i < hoList.length; i++) {
+        const ho = hoList[i]
+        const hoContent = flattenContent(ho.호내용)
+        if (hoContent) out += `    ${numbered(ho.호번호, cleanHtml(hoContent), (n) => (n.endsWith(".") ? n : `${n}.`))}\n`
+        if (ho.목) renderMok(Array.isArray(ho.목) ? ho.목 : [ho.목])
+        if (alignable) renderMok(mokGroups[i])
+      }
+      if (!alignable && hangMokList.length > 0) renderMok(hangMokList)
+      // 항번호 필드가 없으면 본문 첫 글자(①)로 읽는다
+      hangs.push({ no: hangNumberOf(hang.항번호) ?? hangNumberOf(String(hangContent ?? "").trim().charAt(0)), text: out })
+    }
+  }
+  return { head, hangs }
+}
+
+const joinUnit = (r: RenderedUnit): string => (r.head + r.hangs.map((h) => h.text).join("")).trim()
+
+/**
+ * 위임·모법 본문 동봉용 — **요청 조문과 번호가 같은 조문단위 1개**만 렌더링한다.
+ * 일치가 없거나 여럿이면 "" (호출측은 목록 표시로 폴백한다). 번호 대조가 없으면 JO를 무시한
+ * 응답의 다른 조문이 "시행령 본문"으로 동봉된다 — 조문 본문 섹션과 같은 결함(B4)
+ */
+function renderArticleUnits(lawData: any, joLabel: string): string {
+  const label = parseArticleInput(joLabel)?.label
+  const pick = label ? pickArticleUnit(lawData, label) : { kind: "none" as const }
+  return pick.kind === "match" ? joinUnit(renderUnitParts(pick.unit)) : ""
+}
+
+/** 세부 표기("제99항"·"99항"·"②"·"제2항제3호")에서 항 번호. 항 지정이 없으면 null */
+function detailHangNumber(detail: string): number | null {
+  const s = detail.replace(/\s+/g, "")
+  const m = s.match(/^제?(\d+)항/)
+  if (m) return parseInt(m[1], 10)
+  const first = s.charAt(0)
+  return first && /[①-⑳㉑-㉟㊱-㊿]/.test(first) ? hangNumberOf(first) : null
+}
+
+interface ArticleBody {
+  text: string
+  /** 예산 절단 여부 — true면 헤더가 "전체 성공"이면 안 된다 (외부 검토 B3) */
+  truncated: boolean
+  fullLength: number
+  shownLength: number
+  /** 요청 항을 우선 실었는가 (조 전체 대신) */
+  detailFirst: boolean
+  /** 우선 실은 항 번호 — "제2항제3호" 요청이면 제2항 전체(호·단서 포함)를 싣는다 */
+  detailHang?: number
+}
+
+/**
+ * 조문 본문을 예산에 맞춘다 (외부 검토 B3).
+ *
+ * 전에는 조 전체를 앞에서부터 잘랐다 — 요청이 "제1조제99항"이어도 앞부분만 실려 뒤쪽 항의
+ * 예외가 빠졌고, 성공 판정은 절단 전에 끝나 헤더가 "전체 성공"이었다.
+ *  - 절단되면 truncated=true (헤더에 "본문 일부 절단(n자 중 m자)")
+ *  - 요청 항을 구조(항번호)로 찾으면 조 머리 + 그 항(호·목·단서 포함)만 싣는다
+ *  - 항 지정 없이 잘렸으면, 잘린 첫 항을 지정한 재조회가 **실제로 예산 안에 들어올 때만** 인자 예시를 준다
+ */
+function composeArticleBody(
+  parts: RenderedUnit,
+  detail: string,
+  budget: number,
+  hint: string,
+  retry: (hangNo: number) => string
+): ArticleBody {
+  const full = joinUnit(parts)
+  if (full.length <= budget) return { text: full, truncated: false, fullLength: full.length, shownLength: full.length, detailFirst: false }
+  // 안내문 자리 — 항만 실은 본문 뒤에 붙는 고지가 예산을 넘지 않게
+  const NOTICE_RESERVE = 300
+  const hangOnly = (no: number): string | null => {
+    const hit = parts.hangs.filter((h) => h.no === no)
+    if (hit.length !== 1) return null
+    const t = (parts.head + hit[0].text).trim()
+    return t.length <= budget - NOTICE_RESERVE ? t : null
+  }
+
+  const wanted = detailHangNumber(detail)
+  if (wanted !== null) {
+    const t = hangOnly(wanted)
+    if (t !== null) {
+      return {
+        text:
+          `${t}\n… (조 전체 ${full.length.toLocaleString()}자가 예산 ${budget.toLocaleString()}자를 넘어 ` +
+          `요청한 제${wanted}항만 실었습니다 — 다른 항은 생략, 전체는 ${hint})`,
+        truncated: true,
+        fullLength: full.length,
+        shownLength: t.length,
+        detailFirst: true,
+        detailHang: wanted,
       }
     }
   }
-  return out.trim()
+
+  const cutText = truncateWithHint(full, budget, hint)
+  const noticeAt = cutText.lastIndexOf("\n… (예산")
+  const shown = noticeAt >= 0 ? noticeAt : Math.min(full.length, budget)
+  // 잘린 지점 뒤에서 시작하는 첫 항 — 그 항을 지정한 재조회가 예산 안에 들어오면 인자 예시를 준다
+  let offset = parts.head.length
+  let firstOmitted: number | null = null
+  for (const h of parts.hangs) {
+    // 끝 줄바꿈은 절단 때 지워지므로 빼고 잰다 — 다 실린 항을 "잘린 항"으로 예시하지 않게
+    if (offset + h.text.trimEnd().length > shown && h.no !== null && h.no !== wanted) {
+      firstOmitted = h.no
+      break
+    }
+    offset += h.text.length
+  }
+  const retryNote = firstOmitted !== null && hangOnly(firstOmitted) !== null ? `\n💡 뒤쪽 항은 항을 지정해 다시 조회하면 그 항을 우선 싣습니다 — 예: ${retry(firstOmitted)}` : ""
+  return { text: cutText + retryNote, truncated: true, fullLength: full.length, shownLength: shown, detailFirst: false }
 }
 
 /**
@@ -593,7 +709,7 @@ async function renderReverseDelegation(params: {
             signal: bodyAborter.signal,
             expectedJsonKey: "법령",
           })
-          const body = renderArticleUnits(JSON.parse(jt)?.법령)
+          const body = renderArticleUnits(JSON.parse(jt)?.법령, h.baseJoNum)
           if (body) bodyMap.set(h.baseJo, body)
         } catch {
           /* 개별 조문 실패는 목록 표시로 폴백 (부분 실패 계약) */
@@ -638,9 +754,58 @@ async function renderReverseDelegation(params: {
 }
 
 // ── 메인 핸들러 ─────────────────────────────────────────────────────────
+/**
+ * p가 끝나기 전에 signal이 abort되면 취소 오류로 끝낸다. 하위 호출이 signal을 존중하지 않아도
+ * (세마포어 대기·signal 미전달 경로) 핸들러는 deadline·호출 취소 시점에 돌아온다.
+ * 메시지의 "취소됨"은 classifyErrorCode가 TIMEOUT으로 분류하는 표지다.
+ * abort 직후 잠깐(ABORT_GRACE_MS) 기다린다 — signal을 존중하는 하위 호출은 그 안에 자기 판정
+ * (연혁 경로의 [BASIS_DATE_UNRESOLVED] 등)으로 끝나고, 그 문구가 일반 취소 문구보다 정확하다
+ */
+const ABORT_GRACE_MS = 100
+function untilAborted<T>(p: Promise<T>, signal: AbortSignal, why: () => string): Promise<T> {
+  if (signal.aborted) {
+    p.catch(() => {}) // 이미 시작된 p의 거절이 처리되지 않은 거절로 새지 않게
+    return Promise.reject(new Error(why()))
+  }
+  return new Promise<T>((resolve, reject) => {
+    let grace: ReturnType<typeof setTimeout> | undefined
+    const onAbort = () => {
+      grace = setTimeout(() => reject(new Error(why())), ABORT_GRACE_MS)
+    }
+    signal.addEventListener("abort", onAbort, { once: true })
+    const settle = () => {
+      signal.removeEventListener("abort", onAbort)
+      clearTimeout(grace)
+    }
+    p.then(
+      (v) => {
+        settle()
+        resolve(v)
+      },
+      (e) => {
+        settle()
+        reject(e)
+      }
+    )
+  })
+}
+
+/** 호출자 취소(MCP 요청 취소)를 도구 내부 aborter에 잇는다. 해제 함수를 돌려준다 */
+function linkAbort(parent: AbortSignal | undefined, child: AbortController): () => void {
+  if (!parent) return () => {}
+  if (parent.aborted) {
+    child.abort()
+    return () => {}
+  }
+  const onAbort = () => child.abort()
+  parent.addEventListener("abort", onAbort, { once: true })
+  return () => parent.removeEventListener("abort", onAbort)
+}
+
 export async function handleFinArticle(
   apiClient: LawApiClient,
-  rawInput: unknown
+  rawInput: unknown,
+  ctx: { signal?: AbortSignal } = {}
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   const parsed = FinArticleInputSchema.safeParse(rawInput)
   if (!parsed.success) {
@@ -667,6 +832,13 @@ export async function handleFinArticle(
   // controller 생성보다 앞서 실행된다)
   const lookupAborter = new AbortController()
   const lookupTimer = setTimeout(() => lookupAborter.abort(), Math.max(0, deadlineAt - Date.now()))
+  // 첫 검색부터 deadline·호출 취소 안에 둔다 (외부 검토 I4: findLaws에 signal이 없어 첫 검색이
+  // 6.6초 지연되면 핸들러도 6.6초 뒤에야 돌아왔고, 호출자가 취소해도 요청이 계속 나갔다)
+  const unlinkLookup = linkAbort(ctx.signal, lookupAborter)
+  const abortWhy = () =>
+    ctx.signal?.aborted
+      ? "요청 취소됨(호출자 취소) — 이후 조회를 하지 않음"
+      : `요청 취소됨(도구 deadline) — ${DEADLINE_MS / 1000}초 예산 안에 응답이 없어 중단`
 
   // ── ① 법령 확정 ──
   // 조회·일치 판정은 괄호를 뗀 이름으로 — "법인세법(법률 제19193호로 개정된 것)"을
@@ -679,7 +851,11 @@ export async function handleFinArticle(
   let historic = false
   let basisNote = ""
   try {
-    const laws = await findLaws(apiClient, lawLookup, undefined, 5)
+    const laws = await untilAborted(
+      findLaws(apiClient, lawLookup, undefined, 5, 100, lookupAborter.signal),
+      lookupAborter.signal,
+      abortWhy
+    )
     // 정확 매칭 우선(부분매칭 함정 방어: "지방세법"→지방교부세법)
     const exact = laws.find((l) => resolvedLawMatches(lawLookup, l.lawName))
     if (exact) {
@@ -687,11 +863,19 @@ export async function handleFinArticle(
     } else {
       // LIKE 검색이 이름만 비슷한 법령을 물어와도 실제 대상이 행정규칙일 수 있다
       // (0건일 때만 확인하면 노이즈 1건에 폴백이 꺼진다 — 잔여②와 같은 함정)
-      const notice = await adminRuleNotice(apiClient, input.law, articleLabel, lookupAborter.signal)
+      const notice = await untilAborted(
+        adminRuleNotice(apiClient, input.law, articleLabel, lookupAborter.signal),
+        lookupAborter.signal,
+        abortWhy
+      )
       if (notice) return { content: [{ type: "text", text: notice }] }
       // 연혁 법령도 같은 함정이다 — 「특별소비세법」은 이름이 비슷한 「개별소비세법」이 걸려도
       // 연혁으로 실존한다. 0건일 때만 보면 노이즈 1건에 확인이 꺼진다
-      const hist = await historicLawFallback(apiClient, lawLookup, input.law, articleLabel, efYd, lookupAborter.signal)
+      const hist = await untilAborted(
+        historicLawFallback(apiClient, lawLookup, input.law, articleLabel, efYd, lookupAborter.signal),
+        lookupAborter.signal,
+        abortWhy
+      )
       if (hist && "text" in hist) {
         return { content: [{ type: "text", text: hist.text }], ...(hist.isError ? { isError: true } : {}) }
       }
@@ -737,6 +921,7 @@ export async function handleFinArticle(
   } finally {
     // 타이머 잔존 방지 — 이후 단계는 자체 aborter를 쓴다
     clearTimeout(lookupTimer)
+    unlinkLookup()
   }
 
   // 법령으로 확정된 뒤에만 조문 표기를 거절한다 — 행정규칙·연혁 안내는 원문 표기로 충분하다.
@@ -770,11 +955,17 @@ export async function handleFinArticle(
     // 돌아오므로 결과는 "조문 없음"이 아니라 ⚠판정불가다 (연혁 경로는 lookupAborter가 같은 일을 한다)
     const basisAborter = new AbortController()
     const basisTimer = setTimeout(() => basisAborter.abort(), Math.max(0, deadlineAt - Date.now()))
+    const unlinkBasis = linkAbort(ctx.signal, basisAborter)
     let resolved: VersionAtResult
     try {
-      resolved = await resolveVersionAt(apiClient, law.lawName, efYd, undefined, basisAborter.signal)
+      resolved = await untilAborted(
+        resolveVersionAt(apiClient, law.lawName, efYd, undefined, basisAborter.signal),
+        basisAborter.signal,
+        abortWhy
+      ).catch((e): VersionAtResult => ({ reason: e instanceof Error ? e.message : String(e) }))
     } finally {
       clearTimeout(basisTimer)
+      unlinkBasis()
     }
     const { slice, reason } = resolved
     if (slice) {
@@ -807,6 +998,8 @@ export async function handleFinArticle(
   // deadline 도달 시 진행 중 업스트림 호출을 함께 취소 — 백그라운드 쿼터 소모 방지 (Opus I3)
   const aborter = new AbortController()
   const abortOnDeadline = () => aborter.abort()
+  // 호출자 취소도 진행 중 섹션 호출을 함께 끊는다 (I4) — 해제는 섹션 수집 직후
+  const unlinkSections = linkAbort(ctx.signal, aborter)
   // 조문 섹션이 "조회는 됐는데 그 번호 조문이 없음"으로 끝났을 때의 결과 객체 — 조회 실패와 문구가
   // 달라야 한다. 실패용 꼬리("없음이 아니라 확인 불가")를 붙이면 "(✗없음)"과 한 줄에 모순으로
   // 나갔다 (9차 리뷰 I1). 플래그가 아니라 객체 동일성으로 본다 — deadline 뒤에 늦게 끝난
@@ -815,6 +1008,10 @@ export async function handleFinArticle(
   // 조 전체가 삭제된 조문이었을 때의 결과 객체와 삭제 표기 — 판정 방식은 absentResult와 같다
   let deletedResult: SectionResult | undefined
   let deletedStamp = ""
+  // 반환 조문이 요청 조문과 다를 때의 결과 객체 (B4) — 판정 방식은 absentResult와 같다
+  let mismatchResult: SectionResult | undefined
+  // 정상 조문의 결과 객체와 항별 렌더링 — 조립 단계에서 예산 절단·요청 항 우선에 쓴다 (B3)
+  let articleParts: { result: SectionResult; parts: RenderedUnit } | undefined
 
   const articleP: Promise<SectionResult> = (async () => {
     const extraParams: Record<string, string> = { MST: law.mst, JO: buildJO(articleLabel) }
@@ -841,11 +1038,9 @@ export async function handleFinArticle(
     })
     const lawData = JSON.parse(jsonText)?.법령
     if (!lawData) return failed("법령 데이터 없음 (기준일이 시행일과 안 맞을 수 있음)")
-    const units: any[] = toArray(lawData?.조문?.조문단위)
-    const firstArticle = units.find((u: any) => u.조문여부 === "조문")
-    if (firstArticle?.조문제목) joTitleForRulings = String(firstArticle.조문제목)
-    const body = renderArticleUnits(lawData)
-    if (!body) {
+    // 요청 조문과 번호가 같은 조문단위만 쓴다 (외부 검토 B4) — 조문 제목(예규 검색어)·삭제 판정도 그 단위에서
+    const pick = pickArticleUnit(lawData, articleLabel)
+    if (pick.kind === "none") {
       // 기준일 조회는 **그 시행본**에 없다는 뜻일 뿐이다 — 조문 번호는 전부개정·신설·삭제로
       // 바뀌므로 현행 번호로 옛 조문의 부존재를 단정하면 안 된다
       absentResult = failed(
@@ -856,13 +1051,28 @@ export async function handleFinArticle(
       )
       return absentResult
     }
-    const stamp = firstArticle ? deletedArticleStamp(firstArticle) : null
+    if (pick.kind !== "match") {
+      // "없음"이 아니다 — 응답은 왔지만 요청 조문의 근거로 확정할 수 없다. 본문은 싣지 않는다
+      mismatchResult = failed(
+        `[ARTICLE_MISMATCH] 확인 불가(반환 조문 불일치) — 요청 ${articleLabel}, ` +
+          (pick.kind === "mismatch"
+            ? `응답 ${[...new Set(pick.returned)].slice(0, 5).join("·")}`
+            : `응답에 같은 번호 조문 ${pick.count}개(확정 불가)`) +
+          `. 응답 본문은 ${articleLabel}의 근거가 아니어서 싣지 않았습니다 — 잠시 후 재시도하거나 www.law.go.kr 원문을 확인하세요`
+      )
+      return mismatchResult
+    }
+    const unit = pick.unit
+    if (unit.조문제목) joTitleForRulings = String(unit.조문제목)
+    const parts = renderUnitParts(unit)
+    const result: SectionResult = { status: "성공" as const, text: joinUnit(parts) }
+    articleParts = { result, parts }
+    const stamp = deletedArticleStamp(unit)
     if (stamp !== null) {
       deletedStamp = stamp
-      deletedResult = { status: "성공" as const, text: body }
-      return deletedResult
+      deletedResult = result
     }
-    return { status: "성공" as const, text: body }
+    return result
   })().catch((e) => failed(e instanceof Error ? e.message : String(e)))
 
   const threeTierP: Promise<SectionResult> = (async () => {
@@ -960,7 +1170,7 @@ export async function handleFinArticle(
                     signal: bodyAborter.signal,
                     expectedJsonKey: "법령",
                   })
-                  const body = renderArticleUnits(JSON.parse(jt)?.법령)
+                  const body = renderArticleUnits(JSON.parse(jt)?.법령, d.joNum!)
                   if (body) bodyMap.set(`${d.type}|${d.joNum!}`, body)
                 } catch {
                   /* 개별 조문 실패는 목록 표시로 폴백 (부분 실패 계약) */
@@ -1058,6 +1268,10 @@ export async function handleFinArticle(
         text: "(검색 생략 — 삭제된 조문이라 조문 제목이 없고, 번호로 찾은 예규는 삭제 전 조문에 관한 것이어서 현행 근거로 쓸 수 없습니다. 삭제 전 예규는 fin_ruling_search로 직접 찾으세요)",
       }
     }
+    if (articleDone === mismatchResult) {
+      // 반환 조문이 요청 조문과 달라 조문 제목을 확정할 수 없다 — 번호로 찾은 예규를 이 조문의 후보로 내지 않는다
+      return { status: "성공", text: "(검색 생략 — 반환 조문이 요청 조문과 달라 조문 제목을 확정하지 못했습니다. 예규는 fin_ruling_search로 직접 찾으세요)" }
+    }
     const rulingQuery = rulingQueryFromTitle(joTitleForRulings, `${law.lawName} ${articleLabel}`)
     return withDeadline(
       (async () => {
@@ -1135,6 +1349,7 @@ export async function handleFinArticle(
     withDeadline(upcomingP, deadlineAt, abortOnDeadline),
     rulingsP,
   ])
+  unlinkSections()
   const articleDeleted = articleR === deletedResult
 
   // ── 조립 (부분 실패 계약) ──
@@ -1156,6 +1371,28 @@ export async function handleFinArticle(
     { name: "별표", r: annexR, budget: BUDGET_ETC, hint: "fin_annex" },
   ]
   const articleAbsent = articleR === absentResult
+  const articleMismatch = articleR === mismatchResult
+  // 조문 본문은 여기서 예산에 맞춘다 — 성공 판정(첫 줄)이 절단 여부를 알아야 한다 (B3: 절단 전에
+  // 성공을 계산해 잘린 본문이 "전체 성공"으로 나갔다). 객체 동일성은 absentResult와 같은 이유다
+  const articleBody =
+    articleParts && articleR === articleParts.result
+      ? composeArticleBody(
+          articleParts.parts,
+          articleInput.detail,
+          BUDGET_ARTICLE,
+          sections[0].hint,
+          (no) => `fin_article({ law: "${input.law.trim()}", article: "${articleLabel}제${no}항"${input.basis_date ? `, basis_date: "${input.basis_date}"` : ""} })`
+        )
+      : undefined
+  const truncatedNames = sections
+    .filter((s) => s.r.status === "성공" && (s.name === "조문" ? !!articleBody?.truncated : s.r.text.length > s.budget))
+    .map((s) =>
+      s.name === "조문" && articleBody
+        ? `본문 일부 절단(${articleBody.fullLength.toLocaleString()}자 중 ${articleBody.shownLength.toLocaleString()}자${
+            articleBody.detailFirst ? ` — 요청 제${articleBody.detailHang}항 우선 수록` : ""
+          })`
+        : `${s.name} 일부 절단(예산 ${s.budget.toLocaleString()}자)`
+    )
   const failedNames = sections
     .filter((s) => s.r.status !== "성공" && !(s.name === "조문" && articleAbsent))
     .map((s) => `${s.name}(${s.r.status}: ${s.r.reason})`)
@@ -1163,13 +1400,14 @@ export async function handleFinArticle(
     ...(articleAbsent ? [efYd ? "조문 미발견(기준일 시행본)" : "조문 없음(✗)"] : []),
     ...(failedNames.length > 0 ? [`실패 섹션: ${failedNames.join(", ")}`] : []),
   ]
-  // 삭제 조문은 조회 실패가 아니다 — 그래도 첫 줄에서 바로 보이게 한다
+  // 삭제 조문·절단은 조회 실패가 아니다 — 그래도 첫 줄에서 바로 보이게 한다 ("전체 성공" 금지)
+  const notes = [...(articleDeleted ? [`⚠${deletedLabel}`] : []), ...truncatedNames.map((n) => `⚠${n}`)]
   const overall =
     overallParts.length === 0
-      ? articleDeleted
-        ? `조회 성공 — ⚠${deletedLabel}`
+      ? notes.length > 0
+        ? `조회 성공 — ${notes.join(" / ")}`
         : "전체 성공"
-      : `부분 성공 — ${[...(articleDeleted ? [`⚠${deletedLabel}`] : []), ...overallParts].join(" / ")}`
+      : `부분 성공 — ${[...notes, ...overallParts].join(" / ")}`
 
   const basisLine = input.basis_date ? `[기준일: ${input.basis_date} 시행 기준${basisNote}]` : `[기준: 현행]`
   // 기준일 헤더 아래 현행 데이터가 무고지로 섞이면 "헤더는 기준일, 내용은 현행"인
@@ -1182,7 +1420,8 @@ export async function handleFinArticle(
     : ""
   // 조 단위로 접었다는 사실을 남긴다 — 위임 매핑은 조 단위라 항·호에 한정된 위임만 골라낼 수 없다
   const detailScope = articleInput.detail
-    ? `※ 요청 표기 "${input.article.trim()}" → 조 단위(${articleLabel})로 조회했습니다 — 본문은 조 전체이고, 위임(3단비교)은 조 단위 매핑이라 ` +
+    ? `※ 요청 표기 "${input.article.trim()}" → 조 단위(${articleLabel})로 조회했습니다 — ` +
+      `본문은 ${articleBody?.detailFirst ? `조 전체가 예산을 넘어 조 머리와 제${articleBody.detailHang}항만 실었고` : "조 전체이고"}, 위임(3단비교)은 조 단위 매핑이라 ` +
       `${articleInput.detail}에 해당하는 위임만 골라내지 못합니다. ${articleInput.detail}의 위임 여부는 아래 본문의 "대통령령으로 정하는" 등 문구로 확인하세요`
     : ""
   // 기준일 조회에서는 그 시점 시행본이 **정상 결과**다 — 경고를 붙이면 정상을 이상으로 읽게 된다
@@ -1217,6 +1456,7 @@ export async function handleFinArticle(
       return efYd ? `${header}\n  ⚠ 기준일 시행본에서 미발견: ${s.r.reason}` : `${header}\n  ✗ 없음: ${s.r.reason}`
     }
     if (s.r.status !== "성공") return `${header}\n  ⚠ 조회 실패(${s.r.status}): ${s.r.reason} — "없음"이 아니라 확인 불가입니다.`
+    if (s.name === "조문" && articleBody) return `${header}\n${articleBody.text}`
     return `${header}\n${truncateWithHint(s.r.text, s.budget, s.hint)}`
   }
 
@@ -1247,5 +1487,7 @@ export async function handleFinArticle(
     SOURCE_FOOTER,
   ].join("\n").replace(/\n{3,}/g, "\n\n")
 
-  return { content: [{ type: "text", text }] }
+  // 반환 조문 불일치는 핵심 근거(요청 조문 본문)를 확정하지 못한 것이다 — 나머지 섹션은 싣되
+  // 호출측(훅·LLM)이 정상 응답으로 읽지 않게 isError로 표시한다
+  return { content: [{ type: "text", text }], ...(articleMismatch ? { isError: true } : {}) }
 }
