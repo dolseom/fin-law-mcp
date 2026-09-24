@@ -19,6 +19,13 @@ import { assessLatestFirst, buildLadder, ladderWarning, readTotalCnt, totalCntNo
 /** 본문 1건당 절단 상한. ⚠ 도구 description의 "최대 6,000자"와 같은 수여야 한다 (nts-ruling.test.ts가 대조) */
 export const BUDGET_BODY = 6000
 
+/** 절단 결과가 원문 앞에서 몇 자를 그대로 실었는지 — 헤더의 "n자 중 m자" 표기용 */
+function sharedPrefixLength(a: string, b: string): number {
+  let i = 0
+  while (i < a.length && i < b.length && a[i] === b[i]) i++
+  return i
+}
+
 /**
  * 본문 자동 동봉 기본 건수 — `FIN_NTS_BODY_TOP_N` (README 환경변수 표).
  *
@@ -245,12 +252,20 @@ export async function handleFinNtsRuling(
       // 목록 링크는 법제처가 준 값 그대로다 — 인증키(OC)가 실린 DRF 링크가 오면 출력에 새지 않게
       // &amp;를 되돌린 뒤 가린다 (ruling-search detailUrl과 같은 마지막 방어, Codex 9차)
       const link = maskSensitiveUrl(b.r.link.replace(/&amp;/g, "&"))
-      text += `\n\n━━━ 본문: ${b.r.docNo} (${b.r.date}) ━━━\n`
       if (b.ok) {
-        text += truncateWithHint(b.text, BUDGET_BODY, `원문 링크 ${link}`)
+        // 절단은 본문 머리줄에 밝힌다 — 끝의 생략 고지만으로는 잘린 본문이 전문으로 읽힌다 (외부 검토 B3 같은 모양)
+        const shown = truncateWithHint(b.text, BUDGET_BODY, `원문 링크 ${link}`)
+        const cutNote =
+          b.text.length > BUDGET_BODY ? ` ⚠본문 일부 절단(${b.text.length}자 중 ${sharedPrefixLength(b.text, shown)}자)` : ""
+        text += `\n\n━━━ 본문: ${b.r.docNo} (${b.r.date}) ━━━${cutNote}\n${shown}`
       } else {
-        // 조용한 실패 금지: 본문 실패는 목록을 죽이지 않고 사유를 명시
-        text += `⚠ 본문 조회 실패 — "본문 없음"이 아니라 확인 불가입니다.\n${truncateWithHint(b.text || "", 500, "원문 링크")}\n원문: ${link}`
+        // 조용한 실패 금지: 본문 실패는 목록을 죽이지 않고 사유를 명시.
+        // 식별자 불일치(다른 문서 본문이 옴)는 조회 실패와 사유가 달라 따로 적는다
+        const lead = b.text.startsWith("[ID_MISMATCH] 본문 확인 불가(식별자 불일치)")
+          ? `⚠ 본문 확인 불가(식별자 불일치) — 다른 문서의 본문이 와서 싣지 않았습니다.`
+          : `⚠ 본문 조회 실패 — "본문 없음"이 아니라 확인 불가입니다.`
+        text += `\n\n━━━ 본문: ${b.r.docNo} (${b.r.date}) ━━━\n`
+        text += `${lead}\n${truncateWithHint(b.text || "", 500, "원문 링크")}\n원문: ${link}`
       }
     }
   }

@@ -171,6 +171,19 @@ export async function getNtsDecisionBody(
     const asText = (v: unknown): string =>
       typeof v === "string" ? v.trim() : typeof v === "number" ? String(v) : ""
 
+    // 응답이 요청한 문서의 것인지 대조한다 (외부 검토 B4 같은 모양) — 다른 문서 본문이
+    // 요청 예규 헤더 아래 실리면 틀린 근거가 된다. 실응답 dcmDVO에 ntstDcmId가 요청값 그대로 온다
+    // (2026-09-24 실측, 법인세과-352). 필드가 빠진 응답은 대조할 수 없어 건너뛴다.
+    // 문서번호(ntstDcmDscmCntn)는 목록(법제처 안건번호)과 표기 체계가 같은지 확인되지 않아 대조하지 않는다
+    const returnedId = asText(dcm.ntstDcmId)
+    if (returnedId && returnedId.replace(/^0+/, "") !== ntstDcmId.replace(/^0+/, "")) {
+      const text =
+        `[ID_MISMATCH] 본문 확인 불가(식별자 불일치) — 요청 ntstDcmId ${ntstDcmId}에 다른 문서(${returnedId})가 돌아와 본문을 싣지 않습니다.\n` +
+        `원문 링크에서 직접 확인하세요: ${detailUrl}\n` +
+        `⚠️ LLM은 본문을 추측/생성하지 말고 링크를 사용자에게 안내할 것.`
+      return { content: [{ type: "text", text }], isError: true }
+    }
+
     const title = asText(dcm.ntstDcmTtl)
     const gist = normalizeTaxlawBodyCandidate(dcm.ntstDcmGistCntn)
     const body = extractTaxlawEditorBody(actionData) || normalizeTaxlawBodyCandidate(dcm.ntstDcmCntn)

@@ -17,6 +17,16 @@ import { fetchWithRetry, maskSensitiveUrl } from "../lib/fetch-with-retry.js"
 import { flattenContent } from "../lib/article-parser.js"
 import { truncateWithHint, SOURCE_FOOTER, compactName } from "../lib/fin-common.js"
 
+/** 별표 본문 응답 전체 상한 (헤더·출처 포함) */
+const ANNEX_TEXT_BUDGET = 20_000
+
+/** 절단 결과가 원문 앞에서 몇 자를 그대로 실었는지 — 헤더의 "n자 중 m자" 표기용 */
+function sharedPrefixLength(a: string, b: string): number {
+  let i = 0
+  while (i < a.length && i < b.length && a[i] === b[i]) i++
+  return i
+}
+
 export const FinAnnexInputSchema = z.object({
   law: z.string().min(1).describe("법령명 (예: 법인세법 시행규칙 — 내용연수표·세율표는 대개 시행규칙 별표)"),
   keyword: z.string().optional().describe("별표명 필터 키워드 (예: 내용연수)"),
@@ -283,11 +293,20 @@ async function extractAnnexContent(
     const section = extractBundledSection(markdown, mainNo)
     if (section) markdown = section
   }
-  const text =
-    `[기준: 현행] ${law} [${formatAnnexNo(matched.no, kindLabel)}] ${matched.name}\n` +
-    `(파일: ${result.fileType.toUpperCase()}${result.pageCount ? ` · ${result.pageCount}페이지` : ""} · 원문: ${url})\n\n` +
-    `${markdown}\n\n${SOURCE_FOOTER}`
-  return { content: [{ type: "text", text: truncateWithHint(text, 20_000, "원문 파일 링크로 전체 확인") }] }
+  // 절단은 본문에만 하고 첫 줄에 밝힌다 (외부 검토 B3 같은 모양). 전에는 헤더까지 한 덩어리로
+  // 20,000자에서 잘라 첫 줄은 멀쩡하고 끝에만 고지가 붙었다 — 긴 별표 표의 뒤쪽 행이 빠져도
+  // 첫 줄만 보면 전체 별표로 읽혔고, 출처 줄도 함께 잘렸다. 행 범위를 지정한 재조회 경로는
+  // 없으므로(파일 통째 추출) 나머지는 원문 파일 링크로만 확인할 수 있다
+  const headLine = `[기준: 현행] ${law} [${formatAnnexNo(matched.no, kindLabel)}] ${matched.name}`
+  const fileLine = `(파일: ${result.fileType.toUpperCase()}${result.pageCount ? ` · ${result.pageCount}페이지` : ""} · 원문: ${url})`
+  const bodyBudget = Math.max(1000, ANNEX_TEXT_BUDGET - headLine.length - fileLine.length - SOURCE_FOOTER.length - 300)
+  const body = truncateWithHint(markdown, bodyBudget, "원문 파일 링크로 전체 확인 (나머지 행을 받는 재조회 경로 없음)")
+  const cutNote =
+    markdown.length > bodyBudget
+      ? ` ⚠본문 일부 절단(${markdown.length}자 중 ${sharedPrefixLength(markdown, body)}자) — 뒤쪽 행은 원문 파일로 확인`
+      : ""
+  const text = `${headLine}${cutNote}\n${fileLine}\n\n${body}\n\n${SOURCE_FOOTER}`
+  return { content: [{ type: "text", text }] }
 }
 
 export async function handleFinAnnex(
