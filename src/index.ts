@@ -71,12 +71,25 @@ const apiClient = new LawApiClient({ apiKey: process.env.LAW_OC || "" })
  */
 const NTS_RULING_LISTED = isNtsBodyEnabled()
 
+/**
+ * fin_topic 조건부 등록 — FIN_TOPIC_ENABLED=true일 때만 tools/list에 실린다 (v0.1 실험 기능).
+ *
+ * 폐기가 아니라 **검증 전 노출 보류**다. 13개 주제표의 어절 매칭기라 독립 평가에서 표 안 질문의
+ * 1위 정답이 72%, 표 밖 질문의 오탐이 25%였고, 이 도구를 거친 답이 더 나은지는 아직 측정하지
+ * 못했다 (.release-scratch/orch/compare/astra-review.md D3). 기본 목록에 두면 틀린 주제를 내미는
+ * 비용만 확정된다.
+ *
+ * NTS_RULING_LISTED와 같은 규칙이다 — 부팅 시 한 번만 읽고, HANDLERS에서는 빼지 않는다
+ * (이름으로 직접 부르는 스크립트·목록을 캐시한 클라이언트는 계속 동작한다).
+ */
+const TOPIC_LISTED = ["true", "1"].includes((process.env.FIN_TOPIC_ENABLED || "").toLowerCase())
+
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
-    // 진입 도구를 가장 앞에 — 질문자는 조문 번호를 모른다. LLM이 fin_article부터
-    // 보면 없는 번호를 지어내고, fin_topic을 먼저 보면 표에서 번호를 받아 간다
-    FIN_TOPIC_TOOL,
+    // 조문 도구를 가장 앞에 — 법령명+조문으로 바로 부르는 것이 기본 경로다.
+    // fin_topic(옵트인)은 조문 번호를 모를 때의 보조 진입이라 그 뒤에 둔다
     FIN_ARTICLE_TOOL,
+    ...(TOPIC_LISTED ? [FIN_TOPIC_TOOL] : []),
     FIN_LAW_SEARCH_TOOL,
     FIN_RULING_SEARCH_TOOL,
     ...(NTS_RULING_LISTED ? [FIN_NTS_RULING_TOOL] : []),
@@ -248,6 +261,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
       NTS_RULING_LISTED
         ? "FIN_NTS_BODY_ENABLED: true — 국세청 예규 본문 동봉 사용 (fin_nts_ruling 등록됨)"
         : "FIN_NTS_BODY_ENABLED: 미설정(기본 off) — 예규는 목록·링크만. 본문이 필요하면 .env에 true"
+    )
+    lines.push(
+      TOPIC_LISTED
+        ? "FIN_TOPIC_ENABLED: true — 실험 기능 fin_topic(업무 주제 큐레이션 표) 등록됨"
+        : "FIN_TOPIC_ENABLED: 미설정(기본 off) — 실험 기능 fin_topic 미등록"
     )
     // 진단 실패는 isError가 아니다 — fin_ping은 "물어본 것"을 정확히 답했고,
     // isError로 만들면 클라이언트에 따라 이 본문이 통째로 감춰진다

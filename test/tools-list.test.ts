@@ -3,6 +3,7 @@
  *
  * fin_nts_ruling은 FIN_NTS_BODY_ENABLED=true일 때만 목록에 실린다 (기획검토 1-5).
  * OFF면 이 도구가 주는 것은 예규 목록뿐이고 fin_ruling_search(domains=["nts"])와 겹친다.
+ * fin_topic은 FIN_TOPIC_ENABLED=true일 때만 실린다 (v0.1 실험 기능 — 검증 전 노출 보류).
  *
  * ⚠ build/를 띄우므로 CI는 build → test 순서여야 한다 (verify-file-hook.test.ts와 같은 전제).
  * tools/list는 네트워크를 타지 않아 LAW_OC 없이도 결정형이다.
@@ -19,12 +20,12 @@ const serverEntry = path.join(repoRoot, "build", "index.js")
 // build/가 없으면(클린 checkout에서 build 전) verify-file-hook.test.ts와 같이 skip — 실패로 위장하지 않는다
 const hasBuild = existsSync(serverEntry)
 
-function listTools(ntsBodyEnabled: string): Promise<string[]> {
+function listTools(ntsBodyEnabled: string, topicEnabled = ""): Promise<string[]> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [serverEntry], {
       cwd: repoRoot,
       // dotenv는 이미 있는 process.env를 덮어쓰지 않으므로 개인 .env의 값보다 이쪽이 이긴다
-      env: { ...process.env, FIN_NTS_BODY_ENABLED: ntsBodyEnabled },
+      env: { ...process.env, FIN_NTS_BODY_ENABLED: ntsBodyEnabled, FIN_TOPIC_ENABLED: topicEnabled },
       stdio: ["pipe", "pipe", "pipe"],
     })
     let buf = ""
@@ -72,17 +73,17 @@ function listTools(ntsBodyEnabled: string): Promise<string[]> {
 }
 
 // ⚠ 나열 순서가 곧 계약이다 — 아래 toEqual이 순서까지 본다.
-// 진입 도구 fin_topic이 맨 앞이어야 한다 (index.ts의 tools 배열 주석 참조).
-const BASE_TOOLS = ["fin_topic", "fin_article", "fin_law_search", "fin_ruling_search", "fin_annex", "fin_verify", "fin_calc", "fin_ping"]
+// 조문 도구 fin_article이 맨 앞이다 (index.ts의 tools 배열 주석 참조). fin_topic은 기본 목록에 없다
+const BASE_TOOLS = ["fin_article", "fin_law_search", "fin_ruling_search", "fin_annex", "fin_verify", "fin_calc", "fin_ping"]
 
 describe.skipIf(!hasBuild)("tools/list — fin_nts_ruling 조건부 등록", () => {
-  it("FIN_NTS_BODY_ENABLED=false면 8개 (fin_nts_ruling 미노출)", async () => {
+  it("FIN_NTS_BODY_ENABLED=false면 7개 (fin_nts_ruling 미노출)", async () => {
     const tools = await listTools("false")
     expect(tools).toEqual(BASE_TOOLS)
     expect(tools).not.toContain("fin_nts_ruling")
   }, 30_000)
 
-  it("FIN_NTS_BODY_ENABLED=true면 9개 (fin_nts_ruling 노출)", async () => {
+  it("FIN_NTS_BODY_ENABLED=true면 8개 (fin_nts_ruling 노출)", async () => {
     const tools = await listTools("true")
     expect(tools).toContain("fin_nts_ruling")
     expect(tools).toHaveLength(BASE_TOOLS.length + 1)
@@ -91,5 +92,30 @@ describe.skipIf(!hasBuild)("tools/list — fin_nts_ruling 조건부 등록", () 
   it("환경변수 미설정은 OFF와 같다 — 공개 기본값", async () => {
     const tools = await listTools("")
     expect(tools).not.toContain("fin_nts_ruling")
+  }, 30_000)
+})
+
+describe.skipIf(!hasBuild)("tools/list — fin_topic 조건부 등록 (실험 기능)", () => {
+  it("FIN_TOPIC_ENABLED 미설정이면 fin_topic 없음 — 공개 기본값", async () => {
+    const tools = await listTools("false", "")
+    expect(tools).toEqual(BASE_TOOLS)
+    expect(tools).not.toContain("fin_topic")
+  }, 30_000)
+
+  it("FIN_TOPIC_ENABLED=false도 미노출", async () => {
+    const tools = await listTools("false", "false")
+    expect(tools).not.toContain("fin_topic")
+  }, 30_000)
+
+  it("FIN_TOPIC_ENABLED=true면 fin_article 바로 뒤에 fin_topic", async () => {
+    const tools = await listTools("false", "true")
+    expect(tools).toEqual(["fin_article", "fin_topic", ...BASE_TOOLS.slice(1)])
+  }, 30_000)
+
+  it("두 옵트인을 함께 켜면 9개", async () => {
+    const tools = await listTools("true", "true")
+    expect(tools).toContain("fin_topic")
+    expect(tools).toContain("fin_nts_ruling")
+    expect(tools).toHaveLength(BASE_TOOLS.length + 2)
   }, 30_000)
 })
