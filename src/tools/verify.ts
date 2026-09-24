@@ -13,7 +13,6 @@ import type { LawApiClient } from "../lib/api-client.js"
 import { findLaws, findRepealedLaw, resolvedLawMatches, INTERPUNCT_CHARS, type LawInfo } from "../lib/law-search.js"
 import { resolveLawAlias, LAW_ALIAS_CANONICALS } from "../lib/search-normalizer.js"
 import { buildJO } from "../lib/law-parser.js"
-import { toArray } from "../lib/xml-parser.js"
 import {
   isAdminRuleName,
   isAdminRuleLikeName,
@@ -32,6 +31,7 @@ import {
   BASIS_DATE_CALENDAR_MESSAGE,
 } from "../lib/fin-common.js"
 import { resolveVersionAt } from "../lib/historical-utils.js"
+import { pickArticleUnit } from "../lib/article-unit.js"
 
 const MAX_CITATIONS = 15
 // 전체 시간 상한 — 순차 검증(15건 × 조회 2~3회)이 무한정 길어지지 않게 (Codex 리뷰).
@@ -1143,11 +1143,26 @@ async function verifyLawCitation(
       expectedJsonKey: "법령", // 루트 키가 다른 응답을 "조문 없음(✗)"으로 위장하지 않는다
     })
     const lawData = JSON.parse(jsonText)?.법령
-    const units: any[] = toArray(lawData?.조문?.조문단위)
-    const article = units.find((u: any) => u.조문여부 === "조문")
-    if (!article) {
+    // 첫 조문단위를 번호 대조 없이 잡으면 업스트림이 JO를 무시하거나 응답이 섞였을 때
+    // **다른 조문**으로 ✓가 나가고 훅도 exit 0이었다 (외부 검토 B4 — fin_article과 같은 모양).
+    // 요청 조문번호(+가지번호)와 같은 단위 1개만 근거로 쓰고, 없거나 여럿이면 ✓·✗ 어느 쪽도
+    // 아니다 — 조문이 돌아왔으니 "0건(✗)"도 아니고, 대조가 안 됐으니 "실존(✓)"도 아니다.
+    // 삭제 판정도 이 일치 단위로 한다. 기준일 시행본 조회도 이 자리를 지난다
+    const pick = pickArticleUnit(lawData, c.article)
+    if (pick.kind === "none") {
       return { mark: "✗", line: `✗ ${c.raw} — 법령 「${best.lawName}」은 실존하나 ${c.article}가 없음 (정상 조회 후 0건)${basisNote}. 조문 번호 확인` }
     }
+    if (pick.kind !== "match") {
+      const why =
+        pick.kind === "ambiguous"
+          ? `같은 번호 조문이 ${pick.count}개 와서 요청 조문을 확정할 수 없음`
+          : `요청 ${c.article} 대신 ${pick.returned.slice(0, 3).join("·")}${pick.returned.length > 3 ? ` 외 ${pick.returned.length - 3}개` : ""}가 옴`
+      return {
+        mark: "⚠",
+        line: `⚠ ${c.raw} — 판정 불가(반환 조문 불일치): 「${best.lawName}」 조회 응답에서 ${why}${basisNote} — ✓·✗ 어느 쪽도 확정하지 않음 (없음 아님). 원문에서 조문을 직접 확인하세요`,
+      }
+    }
+    const article = pick.unit
     const title = article.조문제목 ? ` (${article.조문제목})` : ""
     const histNote = best.status === "연혁" ? " ⚠주의: 연혁(폐지·과거본) 인용" : ""
     const url = encodeURI(`https://www.law.go.kr/법령/${best.lawName}/${c.article}`)
