@@ -27,7 +27,7 @@ function sharedPrefixLength(a: string, b: string): number {
 }
 
 /**
- * 본문 자동 동봉 기본 건수 — `FIN_NTS_BODY_TOP_N` (README 환경변수 표).
+ * 본문 자동 동봉 기본 건수 — `FIN_NTS_BODY_TOP_N` (docs/GUIDE.md 환경변수 표).
  *
  * 종전 `Number(env) || 2`는 **명시한 "0"을 2로 되돌렸다** — 목록만 받겠다는 설정이 조용히
  * 무시되고 비공식 경로(taxlaw)에서 매번 본문 2건을 받아 왔다. 같은 줄이 빈 문자열도
