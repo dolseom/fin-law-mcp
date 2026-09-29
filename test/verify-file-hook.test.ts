@@ -40,7 +40,7 @@ function runHook(
   writeFileSync(docPath, doc, "utf8")
   const env: Record<string, string | undefined> = {
     ...process.env,
-    LAW_OC: "testkey",
+    LAW_OC: "OC_SENTINEL_TEST",
     HOOK_STUB_SCENARIO: opts.scenario || "all-empty",
     // 바깥 환경의 종료 코드 설정이 새어 들어오지 않게 기본값 상태로 초기화
     FIN_VERIFY_FAIL_EXIT: undefined,
