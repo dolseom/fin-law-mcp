@@ -442,6 +442,74 @@ describe("현행 0건 → 폐지·연혁 확인 (Opus 재검증 개선 — findR
     expect(text).toContain("✗")
     expect(text).toContain("현행·연혁 모두 0건")
   })
+
+  // Fable 최종 검토 F3(b): 연혁 검색은 display 30 한 페이지다. 전체 153건 중 30건만 받았으면
+  // 그 안의 최대 시행일(2005-01-01)을 "마지막 시행"이라 부르면 안 된다 — 실제 마지막(2009-02-04)은 목록 밖
+  it("연혁 목록을 다 받지 못했으면 '마지막 시행' 대신 받은 목록 안의 최대 시행일로 한정해 적는다", async () => {
+    const rows = Array.from(
+      { length: 30 },
+      (_, i) =>
+        `<law id="${i}"><법령명한글>증권거래법</법령명한글><법령ID>9</법령ID><법령일련번호>${1000 + i}</법령일련번호>` +
+        `<법령구분명>법률</법령구분명><현행연혁코드>연혁</현행연혁코드><시행일자>${1980 + (i % 26)}0101</시행일자></law>`
+    ).join("")
+    stubFetchByUrl([{ match: "target=eflaw", body: `<?xml version="1.0"?><LawSearch><totalCnt>153</totalCnt>${rows}</LawSearch>` }])
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "증권거래법 제2조에 따라 판단한다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("폐지·연혁 법령 「증권거래법」")
+    expect(text).toContain("연혁 검색 목록 전체 153건 중 받은 30건 안에서 가장 늦은 시행 2005-01-01")
+    expect(text).toContain("목록 밖의 더 늦은 시행은 미확인")
+    expect(text).not.toContain("마지막 시행")
+  })
+
+  // 연혁 목록이 불완전한데 못 찾았으면 "연혁에도 없음"이 입증되지 않았다 — ✗가 아니라 ⚠판정 불가.
+  // 훅(scripts/verify-file.mjs)은 "⚠ "로 시작하고 "사용 보류"가 없는 줄을 판정 불가(WARN_EXIT)로 센다
+  it("연혁 목록 일부만 받고 못 찾으면 ✗가 아니라 ⚠ 판정 불가 (없음 아님)", async () => {
+    const rows = Array.from(
+      { length: 30 },
+      (_, i) =>
+        `<law id="${i}"><법령명한글>소득세법</법령명한글><법령ID>8</법령ID><법령일련번호>${2000 + i}</법령일련번호>` +
+        `<법령구분명>법률</법령구분명><현행연혁코드>연혁</현행연혁코드><시행일자>${1980 + (i % 26)}0101</시행일자></law>`
+    ).join("")
+    stubFetchByUrl([{ match: "target=eflaw", body: `<?xml version="1.0"?><LawSearch><totalCnt>153</totalCnt>${rows}</LawSearch>` }])
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "가상자산투기억제법 제3조를 검토한다.",
+    })
+    const text = res.content[0].text
+    const line = text.split("\n").find((l) => l.includes("가상자산투기억제법 제3조") && /^[✓✗⚠⌛]\s/.test(l))
+    expect(line).toBeDefined()
+    expect(line!.startsWith("⚠ ")).toBe(true)
+    expect(line).toContain("검색 목록 전체 153건 중 받은 30건 안에서 찾지 못했습니다 — 판정 불가 (없음 아님")
+    expect(line).not.toMatch(/사용\s*보류|사용을 보류/)
+    expect(text).not.toContain("환각 의심")
+    expect(text).not.toContain("현행·연혁 모두 0건")
+  })
+
+  it("[반대] 연혁 목록을 전부 받고(총 2건) 못 찾으면 ✗ 유지", async () => {
+    const rows = [0, 1]
+      .map(
+        (i) =>
+          `<law id="${i}"><법령명한글>소득세법</법령명한글><법령ID>8</법령ID><법령일련번호>${2000 + i}</법령일련번호>` +
+          `<법령구분명>법률</법령구분명><현행연혁코드>연혁</현행연혁코드><시행일자>2000010${i + 1}</시행일자></law>`
+      )
+      .join("")
+    stubFetchByUrl([{ match: "target=eflaw", body: `<?xml version="1.0"?><LawSearch><totalCnt>2</totalCnt>${rows}</LawSearch>` }])
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "가상자산투기억제법 제3조를 검토한다.",
+    })
+    const text = res.content[0].text
+    expect(text).toContain("✗")
+    expect(text).toContain("현행·연혁 모두 0건")
+  })
+
+  it("연혁 목록을 전부 받았으면 종전처럼 '마지막 시행'으로 적는다", async () => {
+    stubFetchByUrl([{ match: "target=eflaw", body: REPEALED_XML }])
+    const res = await handleFinVerify(new LawApiClient({ apiKey: "testkey" }), {
+      text: "택지소유상한에 관한 법률 제5조에 따라 부담금을 부과한다.",
+    })
+    expect(res.content[0].text).toContain("(마지막 시행 1998-09-25)")
+  })
 })
 
 /**

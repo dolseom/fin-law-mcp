@@ -85,7 +85,8 @@ async function fetchSlicePage(
 ): Promise<SlicePage> {
   const extraParams: Record<string, string> = { query: lawName, display: String(SLICE_PAGE_SIZE), efYd: `${fromYmd}~${toYmd}` }
   // 1페이지는 page를 붙이지 않는다 — 종전 URL(캐시 키)과 같게 둔다. 이름은 api-client의
-  // lawSearch.do page 파라미터와 같다 (eflaw에서의 동작은 라이브 확인 필요)
+  // lawSearch.do page 파라미터와 같고, eflaw에서도 2026-09-24 라이브로 동작을 확인했다
+  // (아래 resolveVersionAt 주석 · .release-scratch/probes/v01-live-probe.log — page=2~4로 최신본 확정)
   if (page > 1) extraParams.page = String(page)
   const xml = await apiClient.fetchApi({
     endpoint: "lawSearch.do",

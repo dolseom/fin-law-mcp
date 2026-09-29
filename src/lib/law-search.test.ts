@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest"
-import { findLaws, lawTierOf, pickRepealed, resolvedLawMatches, sameLawFamily, stripNonLawKeywords } from "./law-search.js"
+import { findLaws, findRepealedLaw, lawTierOf, pickRepealed, resolvedLawMatches, sameLawFamily, stripNonLawKeywords } from "./law-search.js"
 import { LawApiClient } from "./api-client.js"
 
 describe("stripNonLawKeywords — 법령 종류 보존 (Codex 리뷰 중요 3 회귀)", () => {
@@ -179,5 +179,63 @@ describe("looseMatchLawName 3절 — 오염된 이름 거부 (퍼즈 차단)", (
   it("별표 소속 대조(sameLawFamily)는 영향받지 않는다", () => {
     expect(sameLawFamily("법인세법", "법인세법 시행규칙")).toBe(true)
     expect(sameLawFamily("법인세법", "소득세법 시행규칙")).toBe(false)
+  })
+})
+
+/**
+ * Fable 최종 검토 F3(b) 회귀 — findRepealedLaw는 eflaw display 30 **한 페이지**만 받는다.
+ * 검색 결과가 그보다 많으면 받은 목록의 최대 시행일은 "마지막 시행"이 아니다 (목록 밖에 더 늦은 행이 있을 수 있음).
+ * 완전 여부를 반환값에 실어 호출측이 표기를 한정하게 한다.
+ */
+describe("findRepealedLaw — 한 페이지 목록의 완전 여부 (F3)", () => {
+  const row = (name: string, mst: string, efYd: string) =>
+    `<law id="${mst}"><법령명한글>${name}</법령명한글><법령ID>9</법령ID><법령일련번호>${mst}</법령일련번호>` +
+    `<법령구분명>법률</법령구분명><현행연혁코드>연혁</현행연혁코드><시행일자>${efYd}</시행일자></law>`
+  const client = (xml: string, seen?: { display?: number; target?: string }) =>
+    ({
+      searchLaw: async (_q: string, _k: unknown, display: number, target: string) => {
+        if (seen) Object.assign(seen, { display, target })
+        return xml
+      },
+    }) as unknown as LawApiClient
+
+  it("totalCnt가 받은 30건보다 크면 listComplete=false — 최신 행(2009년)이 페이지 밖이어도 받은 목록 최대값만 안다", async () => {
+    // 전체 153건 중 30건만 받았고 그 안의 최대 시행일은 2005-01-01 — 실제 마지막 시행(2009-02-04)은 목록 밖
+    const rows = Array.from({ length: 30 }, (_, i) => row("증권거래법", String(1000 + i), `${1980 + (i % 26)}0101`)).join("")
+    const seen: { display?: number; target?: string } = {}
+    const r = await findRepealedLaw(client(`<LawSearch><totalCnt>153</totalCnt>${rows}</LawSearch>`, seen), "증권거래법")
+    expect(seen).toEqual({ display: 30, target: "eflaw" })
+    expect(r.law?.effectiveDate).toBe("20050101")
+    expect(r.listComplete).toBe(false)
+    expect(r.listTotal).toBe(153)
+    expect(r.listReceived).toBe(30)
+  })
+
+  it("totalCnt가 받은 건수와 같으면 listComplete=true", async () => {
+    const xml = `<LawSearch><totalCnt>2</totalCnt>${row("증권거래법", "1", "20090204")}${row("증권거래법", "2", "20050101")}</LawSearch>`
+    const r = await findRepealedLaw(client(xml), "증권거래법")
+    expect(r.listComplete).toBe(true)
+    expect(r.law?.effectiveDate).toBe("20090204")
+  })
+
+  it("totalCnt가 없는데 30건이 꽉 찼으면 완전하다고 보지 않는다 (0건·전부로 지어내지 않음)", async () => {
+    const rows = Array.from({ length: 30 }, (_, i) => row("증권거래법", String(i), "20000101")).join("")
+    const r = await findRepealedLaw(client(`<LawSearch>${rows}</LawSearch>`), "증권거래법")
+    expect(r.listComplete).toBe(false)
+    expect(r.listTotal).toBeUndefined()
+  })
+
+  it("totalCnt가 받은 건수보다 작은 모순 응답은 총건수로 쓰지 않는다", async () => {
+    const xml = `<LawSearch><totalCnt>1</totalCnt>${row("증권거래법", "1", "20090204")}${row("증권거래법", "2", "20050101")}</LawSearch>`
+    const r = await findRepealedLaw(client(xml), "증권거래법")
+    expect(r.listTotal).toBeUndefined()
+    expect(r.listComplete).toBe(true) // 30건 미만 = 마지막 페이지
+  })
+
+  it("조회 실패는 listComplete 없이 lookupFailed로 돌린다 (종전 계약 유지)", async () => {
+    const failing = { searchLaw: async () => { throw new Error("법령 검색 실패 (HTTP 500)") } } as unknown as LawApiClient
+    const r = await findRepealedLaw(failing, "증권거래법")
+    expect(r.lookupFailed).toBe(true)
+    expect(r.listComplete).toBeUndefined()
   })
 })

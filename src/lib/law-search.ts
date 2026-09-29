@@ -289,6 +289,37 @@ export function pickRepealed(rows: LawInfo[], query: string): LawInfo | undefine
     })[0]
 }
 
+/** findRepealedLaw가 받는 eflaw 검색 한 페이지의 건수 */
+const REPEALED_PAGE_SIZE = 30
+
+/**
+ * 검색 응답의 totalCnt — 태그가 없거나 숫자가 아니면 undefined (0으로 지어내면 "전부 받음"으로 오판).
+ * tools/ruling-search.ts readTotalCnt와 같은 규칙 (lib→tools 역방향 import를 피해 인라인)
+ */
+function readSearchTotalCnt(xml: string): number | undefined {
+  const raw = extractTag(xml, "totalCnt").trim()
+  if (!/^\d+$/.test(raw)) return undefined
+  const n = Number(raw)
+  return Number.isSafeInteger(n) ? n : undefined
+}
+
+/** 폐지(연혁) 법령 조회 결과 */
+interface RepealedLawLookup {
+  law?: LawInfo
+  lookupFailed?: boolean
+  reason?: string
+  /**
+   * 받은 목록이 검색 결과 전부인가 (정상 조회 때만 채움). false면 law.effectiveDate는
+   * **받은 목록 안의** 가장 늦은 시행일일 뿐이다 — 목록 밖에 더 늦은 시행본이 있을 수 있고,
+   * law가 없어도 "연혁에 없음"이 입증된 것이 아니다 (외부 검토 B5·Fable 최종 검토 F3과 같은 전제)
+   */
+  listComplete?: boolean
+  /** 응답 totalCnt — 확인된 값만 (태그 없음·비숫자·받은 건수보다 작은 모순 응답이면 undefined) */
+  listTotal?: number
+  /** 받은 <law> 행 수 (질의명 필터 전) */
+  listReceived?: number
+}
+
 /**
  * 폐지(연혁) 법령 조회 — target=eflaw로 과거·폐지본을 검색해 최신 연혁본을 반환.
  * 현행 검색이 0건일 때만 보조로 호출(환각 vs 폐지 구분용).
@@ -296,18 +327,29 @@ export function pickRepealed(rows: LawInfo[], query: string): LawInfo | undefine
  * ⚠ 조회 **실패**와 **0건**을 구분해 돌린다: 실패를 undefined로 뭉개면 호출측이
  * "현행·연혁 모두 0건 (정상 조회)"이라고 적고 ✗(환각 의심)를 찍는다 — 실제로는
  * 확인하지 못한 것이라, 존재하는 구법이 환각으로 판정된다 (Codex 2차 중요)
+ *
+ * ⚠ 요청은 1회(display 30)다. 검색 결과가 그보다 많으면 받은 목록의 최대 시행일을 "마지막 시행"이라
+ * 부를 수 없다 — listComplete로 호출측이 표기를 "받은 목록 안"으로 한정하게 한다. 페이지를 더
+ * 넘기지 않는 이유: 호출측(verify·article)에서 이것은 현행 0건일 때의 보조 확인이고, 연혁 법령의
+ * 기준일 시행본은 article이 resolveVersionAt으로 따로 확정한다 — 추가 요청은 분당 30회 한도만 먹는다
  */
 export async function findRepealedLaw(
   apiClient: LawApiClient,
   query: string,
   apiKey?: string,
   signal?: AbortSignal
-): Promise<{ law?: LawInfo; lookupFailed?: boolean; reason?: string }> {
+): Promise<RepealedLawLookup> {
   let xmlText: string
   try {
-    xmlText = await apiClient.searchLaw(query, apiKey, 30, "eflaw", signal)
+    xmlText = await apiClient.searchLaw(query, apiKey, REPEALED_PAGE_SIZE, "eflaw", signal)
   } catch (e) {
     return { lookupFailed: true, reason: e instanceof Error ? e.message : String(e) }
   }
-  return { law: pickRepealed(parseLawXml(xmlText, 100), query) }
+  const received = (xmlText.match(/<law[^>]*>[\s\S]*?<\/law>/g) ?? []).length
+  const rawTotal = readSearchTotalCnt(xmlText)
+  // totalCnt가 받은 수보다 작으면 모순 응답이라 총건수로 쓰지 않는다 (historical-utils collectRange와 같은 규칙)
+  const listTotal = rawTotal !== undefined && rawTotal >= received ? rawTotal : undefined
+  // 총건수를 못 읽었으면 페이지가 덜 찼을 때만 "전부 받음"으로 본다
+  const listComplete = listTotal !== undefined ? received >= listTotal : received < REPEALED_PAGE_SIZE
+  return { law: pickRepealed(parseLawXml(xmlText, 100), query), listComplete, listTotal, listReceived: received }
 }

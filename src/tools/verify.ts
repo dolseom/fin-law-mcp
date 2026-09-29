@@ -1002,12 +1002,20 @@ async function verifyLawCitation(
     // 폐지·연혁 확인 — 현행 0건이 '지어낸 법령'인지 '폐지된 법령'인지 가른다.
     // findRepealedLaw는 이 용도로 만들어졌으나 배선이 안 돼 있었다 (Opus 재검증 개선)
     let histChecked = false
+    // 연혁 검색 목록 일부만 받고 못 찾았을 때의 받은 범위 — 이때는 "연혁에도 없음"(✗)을 단정하지 않는다
+    let histPartial = ""
     if (!signal?.aborted) {
-      const { law: repealed, lookupFailed, reason } = await findRepealedLaw(apiClient, lookupName, undefined, signal)
+      const { law: repealed, lookupFailed, reason, listComplete, listTotal, listReceived } =
+        await findRepealedLaw(apiClient, lookupName, undefined, signal)
+      const listScope = listTotal !== undefined ? `전체 ${listTotal}건 중 받은 ${listReceived}건` : `받은 ${listReceived}건`
       if (repealed) {
-        const ef = repealed.effectiveDate
-          ? `(마지막 시행 ${repealed.effectiveDate.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3")})`
-          : ""
+        const efIso = repealed.effectiveDate?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3")
+        // 검색 목록을 다 받지 못했으면 받은 목록의 최대 시행일을 "마지막 시행"이라 부르지 않는다 (Fable 최종 검토 F3)
+        const ef = !efIso
+          ? ""
+          : listComplete === false
+            ? `(연혁 검색 목록 ${listScope} 안에서 가장 늦은 시행 ${efIso} — 목록 밖의 더 늦은 시행은 미확인)`
+            : `(마지막 시행 ${efIso})`
         // 기준일을 이미 줬는데 "basis_date를 지정하라"고 하면 같은 요청을 되풀이하게 만든다
         // (9차 리뷰 E6). 이 경로는 현행 목록에서 법령을 찾으므로 기준일을 줘도 조문 대조까지 가지 않는다
         return {
@@ -1025,16 +1033,22 @@ async function verifyLawCitation(
           line: `⚠ ${c.raw} — 현행 법령 0건이고, 폐지·연혁 DB 조회는 실패했습니다 — 판정 불가 (없음 아님): ${reason ?? "사유 미상"}`,
         }
       }
-      if (!signal?.aborted) histChecked = true
+      // 연혁 검색 목록을 다 받지 못했으면 못 찾은 것이 "연혁에도 없음"의 증거가 아니다 — ✗를 막는다
+      if (!signal?.aborted) {
+        if (listComplete === false) histPartial = listScope
+        else histChecked = true
+      }
     }
     const dbNote =
       laws.length > 0
-        ? `「${c.lawName}」 — 법령 DB 정확 일치 없음${adminChecked ? " · 행정규칙 DB 0건" : ""}${histChecked ? " · 폐지·연혁 DB 0건" : ""}${nearNote}`
+        ? `「${c.lawName}」 — 법령 DB 정확 일치 없음${adminChecked ? " · 행정규칙 DB 0건" : ""}${histChecked ? " · 폐지·연혁 DB 0건" : ""}${histPartial ? ` · 폐지·연혁 DB는 목록 ${histPartial} 안에서만 미발견` : ""}${nearNote}`
         : adminChecked && histChecked
           ? `「${c.lawName}」 법령·행정규칙·연혁 DB 모두 0건 (정상 조회)`
           : histChecked
             ? `법령 「${c.lawName}」 실존하지 않음 — 현행·연혁 모두 0건 (정상 조회)`
-            : `법령 「${c.lawName}」 실존하지 않음 (정상 조회 후 0건)`
+            : histPartial
+              ? `법령 「${c.lawName}」 현행 0건 · 폐지·연혁 DB는 목록 ${histPartial} 안에서만 미발견 (실존 여부 미확정)`
+              : `법령 「${c.lawName}」 실존하지 않음 (정상 조회 후 0건)`
     // 따옴표 없는 규정·규칙은 사내 문서일 수 있다 — "당사 취업규칙 제12조"는 정당한
     // 인용인데 법령 DB에는 없다. ✗로 단정하면 실무자의 정상 문서를 환각으로 낙인찍는다.
     // hold로 사용 보류는 요구하되 "없음" 단정은 하지 않는다.
@@ -1077,6 +1091,13 @@ async function verifyLawCitation(
       return {
         mark: "⚠",
         line: `⚠ ${c.raw} — 정확 일치 법령 없음 (유사: ${laws.slice(0, 2).map((l) => `「${l.lawName}」`).join(", ")}${alias.canonical !== lookupName ? ` / 별칭 해석: ${alias.canonical}` : ""}${cutNote}). 표기 확인 필요`,
+      }
+    }
+    if (histPartial) {
+      // 부존재 확정(✗)은 연혁 목록을 전부 받았을 때만 — 목록 밖에 연혁 법령이 있을 수 있다 (Fable 최종 검토 F3)
+      return {
+        mark: "⚠",
+        line: `⚠ ${c.raw} — 현행 법령 0건이고, 폐지·연혁 DB는 검색 목록 ${histPartial} 안에서 찾지 못했습니다 — 판정 불가 (없음 아님: 목록 밖은 미확인). 정식 법령명으로 재검증하거나 법제처 원문으로 확인하세요`,
       }
     }
     return { mark: "✗", line: `✗ ${c.raw} — ${dbNote}. 법령명 오기 또는 환각 의심` }

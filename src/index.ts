@@ -216,8 +216,8 @@ async function probeLawApi(): Promise<{ line: string; hint?: string; note?: stri
   }
 }
 
-// 세 번째 인자는 호출 맥락 — 지금은 MCP 요청 취소 신호만 싣는다. 받는 핸들러(fin_annex)만 쓰고
-// 나머지는 무시한다 (각자 자체 deadline aborter를 둔다)
+// 세 번째 인자는 호출 맥락 — 지금은 MCP 요청 취소 신호만 싣는다. 받는 핸들러(fin_annex·fin_article·
+// fin_law_search)만 쓰고 나머지는 무시한다 (각자 자체 deadline aborter를 둔다)
 const HANDLERS: Record<
   string,
   (client: LawApiClient, args: unknown, ctx: { signal?: AbortSignal }) => Promise<ToolResult>

@@ -11,8 +11,10 @@
 import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
 import { stripNonLawKeywords, resolvedLawMatches } from "../lib/law-search.js"
+import { resolveVersionAt, type VersionAtResult } from "../lib/historical-utils.js"
 import { formatFetchFailure } from "../lib/errors.js"
 import { extractTag } from "../lib/xml-parser.js"
+import { readTotalCnt, totalCntNote } from "./ruling-search.js"
 import { isAdminRuleName, isAdminRuleLikeName, findAdminRule, stripTrailingParen, type AdminRuleMatch } from "./admin-rule-citation.js"
 import {
   FIN_MINISTRY_CODES,
@@ -100,6 +102,64 @@ function pickVersionsAt(items: ScoredLaw[], basisYmd: string): ScoredLaw[] {
   return [...best.values()]
 }
 
+/** 기준일 검색 한 페이지 건수(법제처 display 상한) / 현행 검색 건수 */
+const BASIS_PAGE_SIZE = 100
+const CURRENT_PAGE_SIZE = 50
+/** 기준일 시행본 재확인의 시간 상한 — 도구 시작부터 (fin_article DEADLINE_MS와 같은 6초 예산) */
+const BASIS_RESOLVE_DEADLINE_MS = 6000
+
+/** 받은 페이지가 검색 결과 전부인가 — historical-utils collectRange와 같은 규칙 */
+function pageIsComplete(received: number, total: number | undefined, pageSize: number): boolean {
+  // totalCnt가 받은 수보다 작으면 모순 응답이라 총건수로 쓰지 않는다
+  if (total !== undefined && total >= received) return received >= total
+  return received < pageSize
+}
+
+/**
+ * 정확 일치 법령의 기준일 시행본을 resolveVersionAt으로 다시 확정한다 (Fable 최종 검토 F3).
+ * 도구 deadline과 호출자 취소를 건다 — 취소·시간 초과도 throw하지 않고 reason으로 돌려준다.
+ * Promise.race로 감싸는 이유: 동시성 세마포어 대기는 signal로 끊기지 않는다 (fin_article untilAborted와 같은 사정)
+ */
+async function resolveWithinDeadline(
+  apiClient: LawApiClient,
+  lawName: string,
+  basisYmd: string,
+  deadlineAt: number,
+  parent?: AbortSignal
+): Promise<VersionAtResult> {
+  const remain = deadlineAt - Date.now()
+  if (parent?.aborted) return { reason: "요청 취소됨(호출자 취소) — 재확인하지 않음" }
+  if (remain <= 0) return { reason: `요청 취소됨(도구 deadline) — ${BASIS_RESOLVE_DEADLINE_MS / 1000}초 예산을 검색에서 다 써 재확인하지 못함` }
+  const aborter = new AbortController()
+  const onParent = () => aborter.abort()
+  parent?.addEventListener("abort", onParent, { once: true })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const stopped = new Promise<VersionAtResult>((resolve) => {
+    aborter.signal.addEventListener(
+      "abort",
+      () =>
+        resolve({
+          reason: parent?.aborted
+            ? "요청 취소됨(호출자 취소) — 재확인 중단"
+            : `요청 취소됨(도구 deadline) — ${BASIS_RESOLVE_DEADLINE_MS / 1000}초 예산 안에 시행 이력을 끝까지 받지 못함`,
+        }),
+      { once: true }
+    )
+    timer = setTimeout(() => aborter.abort(), remain)
+  })
+  try {
+    return await Promise.race([
+      resolveVersionAt(apiClient, lawName, basisYmd, undefined, aborter.signal).catch(
+        (e): VersionAtResult => ({ reason: e instanceof Error ? e.message : String(e) })
+      ),
+      stopped,
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+    parent?.removeEventListener("abort", onParent)
+  }
+}
+
 function scoreLaw(item: ScoredLaw, query: string, basisMode = false): number {
   let s = 0
   const cQuery = compactName(query)
@@ -114,8 +174,8 @@ function scoreLaw(item: ScoredLaw, query: string, basisMode = false): number {
   return s
 }
 
-function formatLawLine(item: ScoredLaw, basisMode = false): string {
-  const flags: string[] = []
+function formatLawLine(item: ScoredLaw, basisMode = false, extraFlag = ""): string {
+  const flags: string[] = extraFlag ? [extraFlag] : []
   // 기준일 검색에서는 과거본이 정상 결과다 — 경고를 붙이면 정상을 이상으로 읽게 된다
   if (item.현행연혁 === "연혁" && !basisMode) flags.push("⚠연혁(과거본)")
   if (item.제개정구분 === "폐지") flags.push("⚠폐지")
@@ -126,8 +186,10 @@ function formatLawLine(item: ScoredLaw, basisMode = false): string {
 
 export async function handleFinLawSearch(
   apiClient: LawApiClient,
-  rawInput: unknown
+  rawInput: unknown,
+  ctx: { signal?: AbortSignal } = {}
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+  const deadlineAt = Date.now() + BASIS_RESOLVE_DEADLINE_MS
   const parsed = FinLawSearchInputSchema.safeParse(rawInput)
   if (!parsed.success) {
     return {
@@ -149,7 +211,9 @@ export async function handleFinLawSearch(
     // 사다리: 0건일 때만 어절 축약 (오류에는 재시도하지 않음)
     let items: ScoredLaw[] = []
     let usedQuery = stripped
-    let totalCnt = "0"
+    // 총건수는 응답 totalCnt로만 말한다 — 태그가 없으면 "전체 0건"으로 지어내지 않는다 (ruling·article과 같은 계약)
+    let totalCnt: number | undefined
+    let received = 0
     for (const q of ladderQueries(stripped, 3)) {
       // 기준일 검색은 eflaw + efYd **범위** 문법으로만 동작한다 —
       // 단일 efYd는 법제처가 조용히 무시하고 현행 결과를 준다 (실측)
@@ -158,16 +222,57 @@ export async function handleFinLawSearch(
             endpoint: "lawSearch.do",
             target: "eflaw",
             type: "XML",
-            extraParams: { query: q, display: "100", efYd: `19000101~${basisYmd}` },
+            extraParams: { query: q, display: String(BASIS_PAGE_SIZE), efYd: `19000101~${basisYmd}` },
             expectedRoot: "LawSearch",
+            signal: ctx.signal,
           })
-        : await apiClient.searchLaw(q, undefined, 50)
-      totalCnt = extractTag(xml, "totalCnt") || "0"
+        : await apiClient.searchLaw(q, undefined, CURRENT_PAGE_SIZE, "law", ctx.signal)
+      totalCnt = readTotalCnt(xml)
       items = parseLawBlocks(xml)
+      received = items.length
       if (basisYmd) items = pickVersionsAt(items, basisYmd)
       if (items.length > 0) {
         usedQuery = q
         break
+      }
+    }
+    const listComplete = pageIsComplete(received, totalCnt, basisYmd ? BASIS_PAGE_SIZE : CURRENT_PAGE_SIZE)
+    // 받은 건수보다 작은 totalCnt는 모순 — 총건수로 부르지 않는다
+    const unconfirmedTotal = totalCntNote(totalCnt, received)
+    const receivedScope =
+      unconfirmedTotal === undefined
+        ? `전체 ${totalCnt}건 중 받은 ${received}건`
+        : `받은 ${received}건(검색 총건수 미확인 — ${unconfirmedTotal})`
+
+    // 기준일 검색 결과가 한 페이지를 넘으면 pickVersionsAt의 "법령별 최대 시행일"은 받은 목록 안의
+    // 최대일 뿐이다 — 목록 밖에 기준일 이하의 더 늦은 시행본이 있을 수 있다 (외부 검토 B5와 같은 전제,
+    // resolveVersionAt은 cac5c41에서 고쳤는데 이 소비자는 남아 있었다 — Fable 최종 검토 F3).
+    // 비용: 정확 일치 법령 1개만 resolveVersionAt으로 다시 확정한다 (좁은 구간 우선이라 대개 +1회,
+    // 최악 +6회·도구 6초 예산 안). 나머지 법령까지 재확인하면 최대 10법령 × 1~6회라 분당 30회
+    // 한도를 한 번에 넘길 수 있어, 그 줄들은 "미확정"으로 표시만 한다. 페이지가 전부면 추가 호출 0회
+    let basisNote = ""
+    const unconfirmedNames = new Set<string>()
+    if (basisYmd && !listComplete && items.length > 0) {
+      for (const it of items) unconfirmedNames.add(compactName(it.법령명))
+      const exact = items.find((i) => compactName(i.법령명) === compactName(usedQuery))
+      if (exact) {
+        const { slice, reason } = await resolveWithinDeadline(apiClient, exact.법령명, basisYmd, deadlineAt, ctx.signal)
+        if (slice) {
+          const pagePick = exact.시행일자
+          Object.assign(exact, { mst: slice.mst, 시행일자: slice.efYd, 제개정구분: slice.rrCls || exact.제개정구분 })
+          unconfirmedNames.delete(compactName(exact.법령명))
+          basisNote +=
+            `\n※ 「${exact.법령명}」은 시행 이력을 따로 끝까지 받아 기준일 시행본을 확정했습니다` +
+            (pagePick !== slice.efYd ? ` — 받은 목록 안의 최대 시행일 ${pagePick}이 아니라 ${slice.efYd} 시행본입니다` : "")
+        } else {
+          basisNote += `\n※ 「${exact.법령명}」의 기준일 시행본을 확정하지 못했습니다 — ${reason ?? "사유 미상"}. 표시한 시행일은 받은 목록 안의 최대값입니다 (확정 아님)`
+        }
+      }
+      if (unconfirmedNames.size > 0) {
+        basisNote +=
+          `\n※ 기준일 검색 결과가 한 페이지(${BASIS_PAGE_SIZE}건)를 넘어 일부만 받았습니다(${receivedScope}) — ` +
+          `"⚠시행본 미확정" 표시 법령의 시행일은 받은 목록 안의 최대값이라, 목록 밖에 기준일 이하의 더 늦은 시행본이 있을 수 있습니다` +
+          ` (목록 밖 법령이 빠졌을 수도 있음). 그 시점 조문은 fin_article에 법령명과 basis_date를 넣어 확인하세요 — 시행본을 따로 확정합니다`
       }
     }
 
@@ -271,12 +376,19 @@ export async function handleFinLawSearch(
       ? `${adminRuleBlock}\n※ 아래 법령 검색 결과는 이름이 비슷한 **다른 법령**입니다 — 찾던 것이 위 행정규칙이면 아래 목록을 근거로 쓰지 마세요.\n\n`
       : ""
     text += basis_date
-      ? `[기준일: ${basis_date} 시행 기준] 법령 검색 — 해당 시점 시행본 ${items.length}건 중 재무 관련도순 상위 ${top.length}건`
-      : `[기준: 현행] 법령 검색 — 전체 ${totalCnt}건 중 재무 관련도순 상위 ${top.length}건`
+      ? listComplete
+        ? `[기준일: ${basis_date} 시행 기준] 법령 검색 — 해당 시점 시행본 ${items.length}건 중 재무 관련도순 상위 ${top.length}건`
+        : `[기준일: ${basis_date} 시행 기준] 법령 검색 — 검색 결과 ${receivedScope}에서 추린 시행본 ${items.length}건 중 재무 관련도순 상위 ${top.length}건`
+      : listComplete
+        ? `[기준: 현행] 법령 검색 — ${unconfirmedTotal === undefined ? `전체 ${totalCnt}건` : receivedScope} 중 재무 관련도순 상위 ${top.length}건`
+        : `[기준: 현행] 법령 검색 — ${receivedScope}을 재무 관련도순으로 정렬한 상위 ${top.length}건`
     if (usedQuery !== stripped) text += ` — 검색어 축약: "${stripped}" → "${usedQuery}"`
     text += strippedNote + "\n"
-    text += top.map((t) => formatLawLine(t, !!basisYmd)).join("\n")
+    text += top
+      .map((t) => formatLawLine(t, !!basisYmd, unconfirmedNames.has(compactName(t.법령명)) ? "⚠시행본 미확정" : ""))
+      .join("\n")
     if (demoted > 0) text += `\n  (관련도 하위 ${demoted}건 생략 — 필요 시 더 구체적인 법령명으로 재검색)`
+    text += basisNote
     // 행정규칙 조회를 시도했다가 실패한 사실은 감추지 않는다 — 아래 목록만 보면
     // "행정규칙은 없다"로 읽히지만 실제로는 확인이 안 된 것이다
     if (!adminRuleBlock && adminNote.includes("확인 실패")) {

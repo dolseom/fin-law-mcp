@@ -196,3 +196,137 @@ describe("fin_law_search — 행정규칙 확인 실패 고지", () => {
     expect(text).toContain('"없음"으로 단정하지 마세요')
   })
 })
+
+/**
+ * Fable 최종 검토 F3(a) 회귀 — 기준일 검색은 eflaw display=100 **한 페이지**다.
+ * 종전에는 그 페이지 안에서 법령별 최대 시행일을 "그 시점 시행본"으로 확정해, 총 150건 중
+ * 페이지 밖에 있는 기준일 이하 최신본(2015-07-01)을 모른 채 구본(2012-01-01)을 답했다.
+ * resolveVersionAt(cac5c41)과 같은 전제: 전부 받았음을 입증할 때만 확정한다.
+ */
+function basisRow(name: string, mst: string, efYd: string): string {
+  return (
+    `<law id="${mst}"><법령명한글>${name}</법령명한글><법령일련번호>${mst}</법령일련번호><법령ID>1</법령ID>` +
+    `<법령구분명>법률</법령구분명><소관부처명>기획재정부</소관부처명><소관부처코드>1051000</소관부처코드>` +
+    `<시행일자>${efYd}</시행일자><제개정구분명>일부개정</제개정구분명><현행연혁코드>연혁</현행연혁코드></law>`
+  )
+}
+
+// 전 구간(19000101~기준일) 1페이지: 총 150건 중 100건 — 법인세법은 2012-01-01본만, 시행령은 2014-01-01본만 들어 있다
+const FULL_PAGE_XML =
+  `<LawSearch><totalCnt>150</totalCnt>` +
+  basisRow("법인세법", "140000", "20120101") +
+  basisRow("법인세법 시행령", "150000", "20140101") +
+  Array.from({ length: 98 }, (_, i) => basisRow("법인세법 시행규칙", String(200000 + i), `${1950 + (i % 60)}0101`)).join("") +
+  `</LawSearch>`
+
+// resolveVersionAt의 좁은 구간(전년 1월 1일~기준일): 목록 밖이던 2015-07-01본이 여기 있다
+const NARROW_XML =
+  `<LawSearch><totalCnt>2</totalCnt>` +
+  basisRow("법인세법", "165308", "20150701") +
+  basisRow("법인세법 시행령", "172604", "20150701") +
+  `</LawSearch>`
+
+function pagedStub(
+  onNarrow: () => Promise<string> | string,
+  calls: Array<Record<string, string>> = []
+): LawApiClient {
+  return {
+    fetchApi: async (p: { extraParams?: Record<string, string> }) => {
+      const ep = p.extraParams ?? {}
+      calls.push(ep)
+      if (ep.efYd?.startsWith("19000101~")) return FULL_PAGE_XML
+      return onNarrow()
+    },
+    searchLaw: async () => FULL_PAGE_XML,
+  } as unknown as LawApiClient
+}
+
+describe("fin_law_search — 기준일 검색이 한 페이지를 넘을 때 (F3)", () => {
+  it("정확 일치 법령은 resolveVersionAt으로 다시 확정한다 — 페이지 밖 최신본(2015-07-01)을 답한다", async () => {
+    const calls: Array<Record<string, string>> = []
+    const r = await handleFinLawSearch(pagedStub(() => NARROW_XML, calls), { query: "법인세법", basis_date: "2015-07-01" })
+    const text = r.content[0].text
+    const line = text.split("\n").find((l) => l.startsWith("  · 법인세법 [")) ?? ""
+    expect(line).toContain("MST 165308")
+    expect(line).toContain("시행 20150701")
+    expect(line).not.toContain("⚠시행본 미확정")
+    expect(text).not.toContain("MST 140000")
+    expect(text).toContain("받은 목록 안의 최대 시행일 20120101이 아니라 20150701 시행본")
+    // 추가 호출은 좁은 구간 1회뿐 (분당 30회 한도 보호)
+    expect(calls).toHaveLength(2)
+    expect(calls[1].efYd).toBe("20140101~20150701")
+  })
+
+  it("재확인하지 않은 다른 법령 줄에는 '⚠시행본 미확정'을 붙이고 헤더·주석에 받은 범위를 적는다", async () => {
+    const r = await handleFinLawSearch(pagedStub(() => NARROW_XML), { query: "법인세법", basis_date: "2015-07-01" })
+    const text = r.content[0].text
+    const decree = text.split("\n").find((l) => l.startsWith("  · 법인세법 시행령")) ?? ""
+    expect(decree).toContain("MST 150000")
+    expect(decree).toContain("⚠시행본 미확정")
+    expect(text).toContain("검색 결과 전체 150건 중 받은 100건에서 추린 시행본")
+    expect(text).toContain("목록 밖에 기준일 이하의 더 늦은 시행본이 있을 수 있습니다")
+  })
+
+  it("재확정에 실패하면 정확 일치 법령도 미확정으로 표시하고 사유를 적는다 (구본을 확정처럼 말하지 않음)", async () => {
+    const r = await handleFinLawSearch(
+      pagedStub(() => {
+        throw new Error("법령 검색 실패 (HTTP 500)")
+      }),
+      { query: "법인세법", basis_date: "2015-07-01" }
+    )
+    const text = r.content[0].text
+    const line = text.split("\n").find((l) => l.startsWith("  · 법인세법 [")) ?? ""
+    expect(line).toContain("⚠시행본 미확정")
+    expect(text).toContain("「법인세법」의 기준일 시행본을 확정하지 못했습니다")
+    expect(text).toContain("HTTP 500")
+    expect(r.isError).toBeUndefined() // 목록 자체는 정상 조회 — 첫 줄 판정은 경고로
+  })
+
+  it("호출자가 취소하면 재확인을 기다리지 않고 미확정으로 돌린다", async () => {
+    const ac = new AbortController()
+    const p = handleFinLawSearch(
+      pagedStub(() => new Promise<string>(() => {})), // 응답 없는 좁은 구간 조회
+      { query: "법인세법", basis_date: "2015-07-01" },
+      { signal: ac.signal }
+    )
+    setTimeout(() => ac.abort(), 20)
+    const text = (await p).content[0].text
+    expect(text).toContain("호출자 취소")
+    expect(text).toContain("⚠시행본 미확정")
+  })
+
+  it("페이지가 검색 결과 전부면(totalCnt = 받은 건수) 추가 호출 없이 종전대로 확정한다", async () => {
+    let n = 0
+    const r = await handleFinLawSearch(
+      stub(MULTI_VERSION_XML, () => n++),
+      { query: "법인세법", basis_date: "2015-07-01" }
+    )
+    expect(n).toBe(1)
+    expect(r.content[0].text).not.toContain("⚠시행본 미확정")
+    expect(r.content[0].text).toContain("해당 시점 시행본 2건 중")
+  })
+})
+
+describe("fin_law_search — 총건수를 지어내지 않는다 (최종 검토 참고 2)", () => {
+  it("현행 검색 응답에 totalCnt가 없으면 '전체 0건'이 아니라 받은 건수와 미확인 사유를 적는다", async () => {
+    const noTotal = MULTI_VERSION_XML.replace("<totalCnt>4</totalCnt>", "")
+    const r = await handleFinLawSearch(stub(noTotal), { query: "법인세법" })
+    const text = r.content[0].text
+    expect(text).not.toContain("전체 0건")
+    expect(text).toContain("받은 4건(검색 총건수 미확인 — 응답의 totalCnt를 읽지 못함)")
+  })
+
+  it("현행 검색 총건수가 받은 50건보다 많으면 받은 범위 안에서 정렬했음을 적는다", async () => {
+    const many =
+      `<LawSearch><totalCnt>569</totalCnt>` +
+      Array.from({ length: 50 }, (_, i) => basisRow("법인세법", String(300000 + i), "20240101")).join("") +
+      `</LawSearch>`
+    const r = await handleFinLawSearch(stub(many), { query: "법인세법" })
+    expect(r.content[0].text).toContain("[기준: 현행] 법령 검색 — 전체 569건 중 받은 50건을 재무 관련도순으로 정렬한 상위 10건")
+  })
+
+  it("총건수가 확인되고 전부 받았으면 종전 표기를 유지한다", async () => {
+    const r = await handleFinLawSearch(stub(MULTI_VERSION_XML), { query: "법인세법" })
+    expect(r.content[0].text).toContain("[기준: 현행] 법령 검색 — 전체 4건 중 재무 관련도순 상위")
+  })
+})
