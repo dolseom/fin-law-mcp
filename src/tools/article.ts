@@ -35,7 +35,7 @@ import {
 import { isAdminRuleLikeName, findAdminRule, stripTrailingParen, parseDeletedArticle } from "./admin-rule-citation.js"
 import { LATEST_FIRST_SORT, isLatestFirst, readTotalCnt } from "./ruling-search.js"
 import { formatAnnexNo } from "./annex.js"
-import { toArray } from "../lib/xml-parser.js"
+import { toArray, extractTag } from "../lib/xml-parser.js"
 import { pickArticleUnit, unitJoLabel } from "../lib/article-unit.js"
 import {
   type SectionResult,
@@ -47,6 +47,7 @@ import {
   parseUpcomingVersions,
   formatYmd,
   isFutureDate,
+  compactName,
   isCalendarBasisDate,
   BASIS_DATE_CALENDAR_MESSAGE,
   SOURCE_FOOTER,
@@ -58,6 +59,8 @@ const BUDGET_DELEGATION = 4000
 const BUDGET_RULINGS = 1000
 const BUDGET_ETC = 1000
 const DEADLINE_MS = 6000 // 도구 전체 deadline (p95 SLO)
+/** 개정 예정 확인용 eflaw 검색 한 페이지의 건수 */
+const UPCOMING_PAGE_SIZE = 20
 
 export const FinArticleInputSchema = z.object({
   law: z.string().min(1).describe("법령명 (예: 법인세법, 부가세법 등 약칭 허용)"),
@@ -236,6 +239,15 @@ interface ArticleBody {
   detailFirst: boolean
   /** 우선 실은 항 번호 — "제2항제3호" 요청이면 제2항 전체(호·단서 포함)를 싣는다 */
   detailHang?: number
+  /**
+   * 항을 요청했는데 그 항만 싣지 못한 사유 (detailFirst=false일 때만). 상단 고지가 절단 사실과
+   * 어긋나지 않게 쓴다 (최종 검토 F2 — 절단인데 "본문은 조 전체이고"). 번호는 wantedHang.
+   *  - notFound: 응답 항 번호가 모두 읽히는데 요청 번호가 없다 (절단 여부와 무관하게 알린다)
+   *  - ambiguous: 같은 번호 항이 둘 이상 / noStructure: 항 구조·번호를 읽지 못함 / overBudget: 그 항 자체가 예산 초과
+   */
+  detailMiss?: "notFound" | "ambiguous" | "noStructure" | "overBudget"
+  /** 요청 표기에서 읽은 항 번호 (항 지정이 없으면 undefined) */
+  wantedHang?: number
 }
 
 /**
@@ -255,17 +267,40 @@ function composeArticleBody(
   retry: (hangNo: number) => string
 ): ArticleBody {
   const full = joinUnit(parts)
-  if (full.length <= budget) return { text: full, truncated: false, fullLength: full.length, shownLength: full.length, detailFirst: false }
+  const wanted = detailHangNumber(detail)
+  const hitsOf = (no: number) => parts.hangs.filter((h) => h.no === no)
+  // 항 번호가 모두 읽히는데 요청 번호가 없을 때만 "찾지 못함"이라 한다 — 구조를 못 읽은 응답에서
+  // 부존재를 단정하지 않는다
+  const notFound =
+    wanted !== null && hitsOf(wanted).length === 0 && parts.hangs.length > 0 && parts.hangs.every((h) => h.no !== null)
+  const wantedHang = wanted ?? undefined
+  if (full.length <= budget) {
+    // 항 구분이 없는(또는 번호를 못 읽은) 조문에 항을 요청한 경우도 "조 전체"만 적으면 요청 항이
+    // 확인된 것처럼 읽힌다 (라이브: 법인세법 제26조제99항 — 제26조는 항 없이 호만 있다)
+    const unstructuredMiss = wanted !== null && !notFound && hitsOf(wanted).length === 0
+    return {
+      text: full,
+      truncated: false,
+      fullLength: full.length,
+      shownLength: full.length,
+      detailFirst: false,
+      wantedHang,
+      ...(notFound
+        ? { detailMiss: "notFound" as const }
+        : unstructuredMiss
+          ? { detailMiss: "noStructure" as const }
+          : {}),
+    }
+  }
   // 안내문 자리 — 항만 실은 본문 뒤에 붙는 고지가 예산을 넘지 않게
   const NOTICE_RESERVE = 300
   const hangOnly = (no: number): string | null => {
-    const hit = parts.hangs.filter((h) => h.no === no)
+    const hit = hitsOf(no)
     if (hit.length !== 1) return null
     const t = (parts.head + hit[0].text).trim()
     return t.length <= budget - NOTICE_RESERVE ? t : null
   }
 
-  const wanted = detailHangNumber(detail)
   if (wanted !== null) {
     const t = hangOnly(wanted)
     if (t !== null) {
@@ -278,6 +313,7 @@ function composeArticleBody(
         shownLength: t.length,
         detailFirst: true,
         detailHang: wanted,
+        wantedHang,
       }
     }
   }
@@ -297,7 +333,26 @@ function composeArticleBody(
     offset += h.text.length
   }
   const retryNote = firstOmitted !== null && hangOnly(firstOmitted) !== null ? `\n💡 뒤쪽 항은 항을 지정해 다시 조회하면 그 항을 우선 싣습니다 — 예: ${retry(firstOmitted)}` : ""
-  return { text: cutText + retryNote, truncated: true, fullLength: full.length, shownLength: shown, detailFirst: false }
+  const hitCount = wanted === null ? 0 : hitsOf(wanted).length
+  const detailMiss: ArticleBody["detailMiss"] =
+    wanted === null
+      ? undefined
+      : notFound
+        ? "notFound"
+        : hitCount === 1
+          ? "overBudget"
+          : hitCount > 1
+            ? "ambiguous"
+            : "noStructure"
+  return {
+    text: cutText + retryNote,
+    truncated: true,
+    fullLength: full.length,
+    shownLength: shown,
+    detailFirst: false,
+    wantedHang,
+    ...(detailMiss ? { detailMiss } : {}),
+  }
 }
 
 /**
@@ -415,7 +470,8 @@ async function adminRuleNotice(
  *
  *  - 연혁 법령 + basis_date → 그 시점 시행본을 해소해 조회를 잇는다 ({ law })
  *  - basis_date 없음 · 기준일에 이미 폐지 → 사실대로 고지 ({ text })
- *  - 연혁에도 없음 → null (호출측의 기존 ✗없음 판정)
+ *  - 연혁에도 없음 → null (호출측의 기존 ✗없음 판정) — 연혁 검색 목록을 전부 받았을 때만
+ *  - 목록 일부만 받았는데 못 찾음 → { unconfirmed: 받은 범위 } (호출측이 ⚠판정불가 — ✗없음 아님)
  *  - 연혁 조회 실패·시행본 해소 실패 → ⚠판정불가 ({ text, isError }) — 실패를 null로
  *    돌리면 호출측이 ✗없음을 찍는다 (adminRuleNotice와 같은 함정)
  */
@@ -426,8 +482,16 @@ async function historicLawFallback(
   articleLabel: string,
   efYd: string | undefined,
   signal: AbortSignal
-): Promise<{ text: string; isError?: boolean } | { law: LawInfo; basisNote: string } | null> {
-  const { law: repealed, lookupFailed, reason } = await findRepealedLaw(apiClient, lookupName, undefined, signal)
+): Promise<{ text: string; isError?: boolean } | { law: LawInfo; basisNote: string } | { unconfirmed: string } | null> {
+  const { law: repealed, lookupFailed, reason, listComplete, listTotal, listReceived } = await findRepealedLaw(
+    apiClient,
+    lookupName,
+    undefined,
+    signal
+  )
+  // 연혁 검색은 한 페이지(30건)만 받는다 — 결과가 그보다 많으면 받은 목록의 최대 시행일은 "마지막"이 아니고,
+  // 못 찾았어도 "연혁에 없음"이 입증되지 않는다 (Fable 최종 검토 F3 — verify.ts와 같은 한정)
+  const listScope = listTotal !== undefined ? `전체 ${listTotal}건 중 받은 ${listReceived}건` : `받은 ${listReceived}건`
   if (lookupFailed) {
     return {
       text:
@@ -439,13 +503,18 @@ async function historicLawFallback(
     }
   }
   // pickRepealed는 접두 일치도 받는다 — 조문 본문을 내줄 경로라 종류(본법·시행령)까지 맞춘다
-  if (!repealed || !resolvedLawMatches(lookupName, repealed.lawName)) return null
+  if (!repealed || !resolvedLawMatches(lookupName, repealed.lawName)) {
+    // 목록이 불완전하면 "연혁에도 없음"(✗)을 단정하지 않는다 — 판정은 호출측이 현행 후보 유무와 함께 정한다
+    return listComplete === false ? { unconfirmed: listScope } : null
+  }
 
   if (!efYd) {
     return {
       text:
         `[LAW_HISTORIC] "${rawName}" — 현행 법령에는 없고 **연혁 법령 「${repealed.lawName}」**(폐지·개칭 등으로 현행이 아님)으로 확인됩니다 — ✗없음이 아닙니다.\n` +
-        `연혁 목록의 가장 늦은 시행일: ${repealed.effectiveDate ? formatYmd(repealed.effectiveDate) : "미상"} (폐지·개칭이 반영된 날일 수 있습니다).\n` +
+        (listComplete === false
+          ? `연혁 검색 목록 ${listScope} 안에서 가장 늦은 시행일: ${repealed.effectiveDate ? formatYmd(repealed.effectiveDate) : "미상"} — 목록 밖의 더 늦은 시행은 미확인 (폐지·개칭이 반영된 날일 수 있습니다).\n`
+          : `연혁 목록의 가장 늦은 시행일: ${repealed.effectiveDate ? formatYmd(repealed.effectiveDate) : "미상"} (폐지·개칭이 반영된 날일 수 있습니다).\n`) +
         `💡 그 시점 조문은 basis_date(YYYY-MM-DD)를 지정해 다시 요청하세요 — 기준일 시행본에서 ${articleLabel} 조문을 찾습니다.\n` +
         `⚠️ LLM은 현행 법령의 같은 번호 조문으로 대신하거나 내용을 추측하지 마세요.`,
     }
@@ -687,6 +756,7 @@ async function renderReverseDelegation(params: {
   const BODY_DEADLINE_MARGIN_MS = 500
   const bodyBudget = Math.min(REVERSE_BODY_MS, deadlineAt - Date.now() - BODY_DEADLINE_MARGIN_MS)
   const bodyMap = new Map<string, string>()
+  let baseUnresolved = false
   const needBody = bodyBudget > 0 ? hits.slice(0, REVERSE_BODY_LIMIT) : []
   const bodyAborter = new AbortController()
   const onOuterAbort = () => bodyAborter.abort()
@@ -697,7 +767,11 @@ async function renderReverseDelegation(params: {
     // 정확 일치가 없으면 본문을 붙이지 않는다 — 엉뚱한 법령의 조문을 "모법 본문"으로
     // 동봉하는 것이 이 수정이 막으려는 바로 그 오류다
     const base = baseLaws.find((l) => resolvedLawMatches(baseName, l.lawName))
-    if (!base) return
+    if (!base) {
+      // 조회를 시도하지 않았다 — "조회 실패·시간 초과"와 사유를 구분한다 (최종 검토 참고 1과 같은 모양)
+      baseUnresolved = true
+      return
+    }
     await Promise.all(
       needBody.map(async (h) => {
         try {
@@ -747,7 +821,13 @@ async function renderReverseDelegation(params: {
     const failedCount = needBody.length - bodyMap.size
     if (bodyBudget <= 0) causes.push(`${overflow}건은 도구 응답 시간 예산 소진으로 본문 조회를 생략 — "본문 없음"이 아님`)
     else if (overflow > 0) causes.push(`${overflow}건은 상위 ${REVERSE_BODY_LIMIT}건 상한 초과(응답 시간 예산)`)
-    if (failedCount > 0) causes.push(`${failedCount}건은 조회 실패·시간 초과 — "본문 없음"이 아님`)
+    if (failedCount > 0) {
+      causes.push(
+        baseUnresolved
+          ? `${failedCount}건은 모법(「${baseName}」)을 법령 검색에서 정확히 특정하지 못해 본문 조회 생략 — "본문 없음"이 아님`
+          : `${failedCount}건은 조회 실패·시간 초과 — "본문 없음"이 아님`
+      )
+    }
     out += `\n※ 모법 조문 본문 ${missing}건은 조문 번호만 표시했습니다 (${causes.join(" / ")}). 본문은 fin_article("${baseName}", "<조번호>")로 조회하세요`
   }
   return out.trim()
@@ -879,10 +959,24 @@ export async function handleFinArticle(
       if (hist && "text" in hist) {
         return { content: [{ type: "text", text: hist.text }], ...(hist.isError ? { isError: true } : {}) }
       }
-      if (hist) {
+      if (hist && "law" in hist) {
         law = hist.law
         historic = true
         basisNote = hist.basisNote
+      } else if (laws.length === 0 && hist) {
+        // 연혁 검색 목록을 다 받지 못한 채 못 찾았다 — "현행·연혁 모두 0건(✗없음)"은 입증되지 않았다
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `[LAW_UNRESOLVED] "${input.law}" — 현행 법령 DB 0건이고, 연혁(폐지·개칭 전) 법령은 연혁 검색 목록 ${hist.unconfirmed} 안에서 찾지 못했습니다 — ⚠판정불가 (✗없음이 아님: 목록 밖은 미확인).\n` +
+                `💡 정식 법령명을 확인하거나 fin_law_search로 먼저 검색하세요. 연혁 법령이면 fin_verify로 실존을 확인하세요.\n` +
+                `⚠️ LLM은 이 결과를 "존재하지 않는 법령"으로 단정하지 말고, 조문 내용을 추측하지 마세요.`,
+            },
+          ],
+          isError: true,
+        }
       } else if (laws.length === 0) {
         return {
           content: [
@@ -992,6 +1086,10 @@ export async function handleFinArticle(
 
   // ── ② 병렬: 조문 본문 ∥ 3단 위임 ∥ 별표 ──
   let joTitleForRulings = ""
+  // 예규 검색어가 조문 제목이 아니라 "법령명 제N조" 폴백이었는가 — rulingsP 안에서 갱신하고 조립 때 헤더에 쓴다
+  let rulingsByNumber = false
+  // 개정 예정 조회가 검색 목록 일부만 받았을 때의 확인 범위 고지 — upcomingP 안에서 갱신하고 조립 때 쓴다
+  let upcomingScope = ""
   // 위임 섹션 제목은 방향에 따라 달라진다 (정방향=하위법령 위임 / 역방향=모법 근거).
   // threeTierP 안에서 갱신하고 Promise.all 이후에 읽는다 (joTitleForRulings와 같은 방식)
   let delegationHeader = "■ 시행령·시행규칙 위임"
@@ -1126,6 +1224,8 @@ export async function handleFinArticle(
     // 시행규칙 제외는 조용한 누락이었다 — 내용연수·상각률·이자율이 다 시행규칙에 있다
     // (실사용 시뮬레이션 ③: 법인세법 §26의 시행규칙 §22가 제목만 나오던 실측)
     const bodyMap = new Map<string, string>()
+    // 소속 하위법령을 법령 검색에서 정확히 특정하지 못해 본문 조회를 생략한 건 (`${type}|${joNum}`)
+    const unresolved = new Set<string>()
     const BODY_LIMIT = 3
     const bodyEligible = dels.filter(
       (d) => (d.type === "시행령" || d.type === "시행규칙") && !(d.content || "").trim() && d.joNum
@@ -1145,7 +1245,10 @@ export async function handleFinArticle(
         for (const d of needBody) {
           const name =
             d.lawName || (d.type === "시행령" ? data.meta.sihyungryungName : data.meta.sihyungkyuchikName) || ""
-          if (!name) continue
+          if (!name) {
+            unresolved.add(`${d.type}|${d.joNum}`)
+            continue
+          }
           const group = byName.get(name)
           if (group) group.push(d)
           else byName.set(name, [d])
@@ -1156,7 +1259,11 @@ export async function handleFinArticle(
             // 정확 일치가 없으면 동봉을 생략하고 목록 표시로 폴백 — 엉뚱한 법령의 조문을
             // "시행령 본문"으로 동봉하는 것보다 안 싣는 쪽이 안전 (Opus I1: 무고지 폴백 제거)
             const decree = decreeLaws.find((l) => resolvedLawMatches(decreeName, l.lawName))
-            if (!decree) return
+            if (!decree) {
+              // 조회를 시도하지 않은 건이다 — "조회 실패·시간 초과"로 세면 재시도로 풀릴 것처럼 읽힌다 (최종 검토 참고 1)
+              for (const d of items) unresolved.add(`${d.type}|${d.joNum}`)
+              return
+            }
             await Promise.all(
               items.map(async (d) => {
                 try {
@@ -1207,12 +1314,15 @@ export async function handleFinArticle(
     // 상한 초과와 조회 실패는 원인이 다르다 — 뭉뚱그리면 "실패한 3건"이 "상한 때문"으로
     // 읽혀 재시도할 이유가 사라진다 (Codex 리뷰 개선 1)
     const overflow = bodyEligible.length - needBody.length
-    const failed = needBody.filter((d) => !bodyMap.has(`${d.type}|${d.joNum}`)).length
-    if (overflow > 0 || failed > 0) {
+    const missing = needBody.filter((d) => !bodyMap.has(`${d.type}|${d.joNum}`))
+    const unresolvedCount = missing.filter((d) => unresolved.has(`${d.type}|${d.joNum}`)).length
+    const failed = missing.length - unresolvedCount
+    if (overflow > 0 || missing.length > 0) {
       const causes: string[] = []
       if (overflow > 0) causes.push(`${overflow}건은 상위 ${BODY_LIMIT}건 상한 초과(응답 시간 예산)`)
+      if (unresolvedCount > 0) causes.push(`${unresolvedCount}건은 소속 하위법령을 법령 검색에서 정확히 특정하지 못해 본문 조회 생략 — "본문 없음"이 아님`)
       if (failed > 0) causes.push(`${failed}건은 조회 실패·시간 초과 — "본문 없음"이 아님`)
-      out += `\n※ 위임 조문 본문 ${overflow + failed}건은 제목만 표시했습니다 (${causes.join(" / ")}). 본문이 필요하면 fin_article로 해당 조문을 직접 조회하세요`
+      out += `\n※ 위임 조문 본문 ${overflow + missing.length}건은 제목만 표시했습니다 (${causes.join(" / ")}). 본문이 필요하면 fin_article로 해당 조문을 직접 조회하세요`
     }
     return { status: "성공" as const, text: out.trim() }
   })().catch((e) => failed(e instanceof Error ? e.message : String(e)))
@@ -1241,7 +1351,26 @@ export async function handleFinArticle(
       // 붙던 혼입 제거 (실사용 시뮬레이션 d). 기준일 모드의 생략은 상단 조회 범위 고지가 설명한다
       return { status: "성공" as const, text: "" }
     }
-    const xml = await apiClient.searchLaw(law.lawName, undefined, 20, "eflaw", aborter.signal)
+    const xml = await apiClient.searchLaw(law.lawName, undefined, UPCOMING_PAGE_SIZE, "eflaw", aborter.signal)
+    // 한 페이지만 받는다 — 검색 결과가 그보다 많으면 목록 밖의 시행예정 행은 조용히 빠진다.
+    // 판정은 바꾸지 않고 확인 범위만 고지한다 (Fable 최종 검토 F3 제안 ④ — findRepealedLaw와 같은 완전성 규칙)
+    const received = (xml.match(/<law[^>]*>[\s\S]*?<\/law>/g) ?? []).length
+    const rawTotal = readTotalCnt(xml)
+    const total = rawTotal !== undefined && rawTotal >= received ? rawTotal : undefined
+    const complete = total !== undefined ? received >= total : received < UPCOMING_PAGE_SIZE
+    // 받은 이 법령의 행이 시행일 내림차순이고 이미 시행된 행까지 내려왔으면, 목록 밖(뒤쪽)에 미래 시행 행은 없다 —
+    // 큰 세법은 연혁이 수백 건이라 이 근거 없이는 매 호출 고지가 붙는다. 순서를 확인할 수 없으면 고지한다
+    const ownDates = (xml.match(/<law[^>]*>[\s\S]*?<\/law>/g) ?? [])
+      .filter((b) => compactName(extractTag(b, "법령명한글")) === compactName(law.lawName))
+      .map((b) => extractTag(b, "시행일자"))
+    const coveredByOrder =
+      ownDates.length > 0 &&
+      ownDates.every((d) => /^\d{8}$/.test(d)) &&
+      ownDates.every((d, i) => i === 0 || d <= ownDates[i - 1]) &&
+      !isFutureDate(ownDates[ownDates.length - 1])
+    if (!complete && !coveredByOrder) {
+      upcomingScope = `연혁 검색 목록 ${total !== undefined ? `전체 ${total}건 중 받은 ${received}건` : `받은 ${received}건`}만 확인 — 목록 밖의 공포된 개정은 누락됐을 수 있음`
+    }
     // 시행일이 지난 "시행예정" 행은 parseUpcomingVersions가 거르고 같은 시행일은 하나로 접는다
     const ups = parseUpcomingVersions(xml, law.lawName)
     if (ups.length === 0) return { status: "성공" as const, text: "" }
@@ -1272,6 +1401,26 @@ export async function handleFinArticle(
       // 반환 조문이 요청 조문과 달라 조문 제목을 확정할 수 없다 — 번호로 찾은 예규를 이 조문의 후보로 내지 않는다
       return { status: "성공", text: "(검색 생략 — 반환 조문이 요청 조문과 달라 조문 제목을 확정하지 못했습니다. 예규는 fin_ruling_search로 직접 찾으세요)" }
     }
+    // 없는 조문·조회 실패도 제목이 없어 검색어가 "법령명 제N조"로 폴백되고, 사다리가 "법령명"까지 줄여
+    // 법령 전체의 최신 예규 3건이 "이 조문의 후보"로 붙었다 (최종 검토 F1 — 법인세법 제999조 → 418건 중 3건).
+    // 조문 부존재·확인 불가 옆에 예규가 있으면 LLM이 부존재를 무시하고 예규로 답을 만든다
+    if (articleDone === absentResult) {
+      return {
+        status: "성공",
+        text: efYd
+          ? "(검색 생략 — 기준일 시행본에서 조문을 찾지 못해 조문 제목이 없고, 번호로 찾은 예규는 이 조문에 관한 것인지 확인할 수 없습니다. 예규는 fin_ruling_search로 직접 찾으세요)"
+          : "(검색 생략 — 현행본에 없는 조문이라 조문 제목이 없고, 번호로 찾은 예규는 이 조문의 후보가 아닙니다. 조문 번호를 먼저 확인하세요)",
+      }
+    }
+    if (articleDone.status !== "성공") {
+      return {
+        status: "성공",
+        text: "(검색 생략 — 조문 조회에 실패해 조문 제목을 확보하지 못했습니다. 번호로 찾은 예규를 이 조문의 후보로 내지 않습니다 — 조문을 다시 조회하거나 예규는 fin_ruling_search로 직접 찾으세요)",
+      }
+    }
+    // 조문은 받았지만 제목이 비어 있으면 검색어가 "법령명 제N조"다 — 헤더가 "조문 제목 키워드 검색"이라고
+    // 적으면 사실과 다르므로 조립 단계에서 헤더를 바꾼다
+    rulingsByNumber = !rulingQueryFromTitle(joTitleForRulings, "")
     const rulingQuery = rulingQueryFromTitle(joTitleForRulings, `${law.lawName} ${articleLabel}`)
     return withDeadline(
       (async () => {
@@ -1389,7 +1538,13 @@ export async function handleFinArticle(
     .map((s) =>
       s.name === "조문" && articleBody
         ? `본문 일부 절단(${articleBody.fullLength.toLocaleString()}자 중 ${articleBody.shownLength.toLocaleString()}자${
-            articleBody.detailFirst ? ` — 요청 제${articleBody.detailHang}항 우선 수록` : ""
+            articleBody.detailFirst
+              ? ` — 요청 제${articleBody.detailHang}항 우선 수록`
+              : articleBody.detailMiss === "notFound"
+                ? ` — 요청 제${articleBody.wantedHang}항 미발견, 조 앞부분부터`
+                : articleBody.detailMiss
+                  ? ` — 요청 제${articleBody.wantedHang}항만 싣지 못해 조 앞부분부터`
+                  : ""
           })`
         : `${s.name} 일부 절단(예산 ${s.budget.toLocaleString()}자)`
     )
@@ -1419,9 +1574,36 @@ export async function handleFinArticle(
     ? `※ 「${law.lawName}」은 현행 법령 DB에 없는 **연혁 법령**(폐지·개칭 전)입니다 — 아래 조문은 기준일 시행본이며 현행 규정이 아닙니다`
     : ""
   // 조 단위로 접었다는 사실을 남긴다 — 위임 매핑은 조 단위라 항·호에 한정된 위임만 골라낼 수 없다
+  // 본문 범위 문구는 실제로 실은 범위와 같아야 한다 — 절단·요청 항 미확보인데 "조 전체이고"라 적으면
+  // 첫 줄의 ⚠절단과 한 응답 안에서 충돌한다 (최종 검토 F2). 본문이 없으면(없음·불일치·실패) 범위를 말하지 않는다
+  const bodyScope = ((): string => {
+    if (!articleBody) return "본문은 싣지 못했고"
+    const b = articleBody
+    const shownPart = `조 전체 ${b.fullLength.toLocaleString()}자가 예산을 넘어 앞부분 ${b.shownLength.toLocaleString()}자만 실었고`
+    if (b.detailFirst) return `조 전체가 예산을 넘어 조 머리와 제${b.detailHang}항만 실었고`
+    if (!b.truncated) {
+      return b.detailMiss === "notFound"
+        ? `조 전체이고(요청한 제${b.wantedHang}항은 응답의 항 번호에서 찾지 못했습니다 — 항 번호를 확인하세요)`
+        : b.detailMiss === "noStructure"
+          ? `조 전체이고(이 조문은 응답에서 항으로 구분되지 않아 요청한 제${b.wantedHang}항의 존재를 확인하지 못했습니다 — 항 번호를 확인하세요)`
+          : "조 전체이고"
+    }
+    switch (b.detailMiss) {
+      case "notFound":
+        return `요청한 제${b.wantedHang}항을 응답의 항 번호에서 찾지 못해 ${shownPart}(뒤쪽 항 생략)`
+      case "overBudget":
+        return `요청한 제${b.wantedHang}항 자체가 예산을 넘어 ${shownPart}(제${b.wantedHang}항 뒷부분·뒤쪽 항 생략)`
+      case "ambiguous":
+        return `요청한 제${b.wantedHang}항이 응답에 둘 이상이라 특정하지 못해 ${shownPart}(뒤쪽 항 생략)`
+      case "noStructure":
+        return `응답에서 항 번호를 읽지 못해 요청한 제${b.wantedHang}항만 골라내지 못하고 ${shownPart}(뒤쪽 생략)`
+      default:
+        return `요청 표기에 항 번호가 없어 그 부분만 골라내지 못하고 ${shownPart}(뒤쪽 생략)`
+    }
+  })()
   const detailScope = articleInput.detail
     ? `※ 요청 표기 "${input.article.trim()}" → 조 단위(${articleLabel})로 조회했습니다 — ` +
-      `본문은 ${articleBody?.detailFirst ? `조 전체가 예산을 넘어 조 머리와 제${articleBody.detailHang}항만 실었고` : "조 전체이고"}, 위임(3단비교)은 조 단위 매핑이라 ` +
+      `본문은 ${bodyScope}, 위임(3단비교)은 조 단위 매핑이라 ` +
       `${articleInput.detail}에 해당하는 위임만 골라내지 못합니다. ${articleInput.detail}의 위임 여부는 아래 본문의 "대통령령으로 정하는" 등 문구로 확인하세요`
     : ""
   // 기준일 조회에서는 그 시점 시행본이 **정상 결과**다 — 경고를 붙이면 정상을 이상으로 읽게 된다
@@ -1469,7 +1651,14 @@ export async function handleFinArticle(
     ``,
     // "관련"은 근거 관계를 단정한다 — 실제로는 조문 제목 키워드 검색이라 무관 예규가 섞인다
     // (아래 ③ 주석·축약 경고와 같은 사실). 제목에서부터 후보임을 밝힌다 (Codex 제품 검토 2)
-    sec({ ...sections[2] }, `■ 국세청 예규 후보 (조문 제목 키워드 검색 — 적용 관계 미확인)${efYd ? " [현행 기준 — 기준일 필터 없음]" : ""}`),
+    sec(
+      { ...sections[2] },
+      `■ 국세청 예규 후보 (${
+        rulingsByNumber
+          ? `조문 제목 미확보 — 법령명·조문번호 "${law.lawName} ${articleLabel}"로 검색, 이 조문의 예규인지 확인 안 됨`
+          : "조문 제목 키워드 검색 — 적용 관계 미확인"
+      })${efYd ? " [현행 기준 — 기준일 필터 없음]" : ""}`
+    ),
     ``,
     sec({ ...sections[3] }, `■ 별표${efYd ? " [현행 기준 — 기준일 별표 조회는 법제처 미지원]" : ""}`),
     ``,
@@ -1479,8 +1668,10 @@ export async function handleFinArticle(
         ? // 법령 단위 예고다 — 공포된 개정이 이 조문을 바꾸는지는 알 수 없다. 조문 바로 아래에
           // "개정 예정"만 쓰면 조문 개정으로 읽힌다 (R3 라이브: 법인세법 §26에 §21 개정의 2028 시행이 붙음)
           `■ ⚠ 법령 개정 예정(「${law.lawName}」 법령 단위 — 이 조문 해당 여부는 부칙·개정문 확인) — ${upcomingR.text}. ` +
-          `개정 이후 기준 검토는 basis_date로 해당 시행일을 지정`
-        : ``
+          `개정 이후 기준 검토는 basis_date로 해당 시행일을 지정${upcomingScope ? ` (확인 범위: ${upcomingScope})` : ""}`
+        : upcomingScope
+          ? `■ 법령 개정 예정 — 받은 목록에서는 발견되지 않음 (확인 범위: ${upcomingScope}). "개정 예정 없음"으로 단정하지 말 것`
+          : ``
       : `■ 법령 개정 예정 여부 — ⚠ 확인 실패(${upcomingR.reason}). "개정 없음"으로 단정하지 말 것`,
     ``,
     `※ 전거 서열: 이 응답의 조문(법률·시행령·시행규칙)이 1차 근거 — 예규는 행정해석(구속력 없음), 상충 시 조문 우선`,
