@@ -3,7 +3,7 @@ name: CI
 # npm test는 fixture 기반이라 법제처 API 키가 없어도 돈다.
 # 라이브 골든셋(test:live)은 실 API를 호출하므로 CI에서 돌리지 않는다 —
 # 외부 장애가 곧 빌드 실패가 되면 신호가 아니라 잡음이 된다.
-# fin_calc 상수 대조만 월 1회 따로 돈다 — calc-constants.yml
+# fin_calc 상수 원문 대조는 로컬에서 `npm run test:constants`로 돌린다 (docs/GUIDE.md)
 on:
   push:
     branches: [main]

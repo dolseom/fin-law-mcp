@@ -270,7 +270,7 @@ async function loadArticle(lawName: string, article: string): Promise<ArticleDoc
 }
 
 /**
- * 정기 실행(.github/workflows/calc-constants.yml)은 FIN_LIVE_STRICT=1로 돈다 — 무인 실행에서 skip은
+ * `npm run test:constants`는 FIN_LIVE_STRICT=1로 돈다(vitest.constants.config.ts) — skip은
  * 초록불로 보여 "대조를 못 했다"는 사실이 묻힌다. 그때는 조회 실패도 실패로 올리되, 사유는 그대로 적는다.
  */
 const STRICT = process.env.FIN_LIVE_STRICT === "1"
