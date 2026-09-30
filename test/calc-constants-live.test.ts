@@ -30,6 +30,7 @@ import { handleFinAnnex } from "../src/tools/annex.js"
 import {
   handleFinCalc,
   calcExecutiveSeveranceLimit,
+  calcExecRetirementIncomeLimit,
   calcEntertainmentLimit,
   calcDepreciationLimit,
   calcDeemedInterest,
@@ -267,10 +268,18 @@ async function loadArticle(lawName: string, article: string): Promise<ArticleDoc
   return parseArticleJson(raw)
 }
 
-/** skip 사유를 남기고 값을 꺼낸다 — 조회 실패를 테스트 실패로 만들지 않는다 */
+/**
+ * 정기 실행(.github/workflows/calc-constants.yml)은 FIN_LIVE_STRICT=1로 돈다 — 무인 실행에서 skip은
+ * 초록불로 보여 "대조를 못 했다"는 사실이 묻힌다. 그때는 조회 실패도 실패로 올리되, 사유는 그대로 적는다.
+ */
+const STRICT = process.env.FIN_LIVE_STRICT === "1"
+
+/** skip 사유를 남기고 값을 꺼낸다 — 조회 실패를 테스트 실패로 만들지 않는다 (STRICT면 실패) */
 function need<T>(ctx: TestContext, key: string, entry: Loaded<T>): T {
   if (!entry.ok) {
-    ctx.skip(`[조회 실패 — 상수 문제 아님] ${key}: ${entry.reason}`)
+    const why = `[조회 실패 — 상수 문제 아님] ${key}: ${entry.reason}`
+    if (STRICT) throw new Error(`${why} (FIN_LIVE_STRICT=1 — 대조하지 못한 것을 통과로 두지 않는다)`)
+    ctx.skip(why)
     throw new Error("unreachable")
   }
   return entry.value
@@ -296,6 +305,7 @@ const src: {
   decree88: Loaded<ArticleDoc>
   decree44: Loaded<ArticleDoc>
   decree26: Loaded<ArticleDoc>
+  ita22: Loaded<ArticleDoc>
   lta92: Loaded<ArticleDoc>
   annex4: Loaded<string>
 } = {} as any
@@ -311,6 +321,7 @@ beforeAll(async () => {
   src.decree88 = await load(() => loadArticle("법인세법 시행령", "제88조"))
   src.decree44 = await load(() => loadArticle("법인세법 시행령", "제44조"))
   src.decree26 = await load(() => loadArticle("법인세법 시행령", "제26조"))
+  src.ita22 = await load(() => loadArticle("소득세법", "제22조"))
   src.lta92 = await load(() => loadArticle("지방세법", "제92조"))
   src.annex4 = await load(async () => {
     callCount += 2 // 별표 목록 조회 + 파일 다운로드
@@ -712,6 +723,37 @@ d("상수 대조: 임원 퇴직급여 한도 (법인세법 시행령 §44④2)",
       got.limit,
       signal("임원 퇴직급여 한도 비율", "법인세법 시행령 제44조제4항제2호", `총급여 × ${ratio} × 근속연수 = ${expected}`, got.limit)
     ).toBeCloseTo(expected, 6)
+  })
+})
+
+d("상수 대조: 임원 퇴직소득 한도 (소득세법 §22③④)", () => {
+  it("계산식의 두 구간(2012~2019 × 3, 2020 이후 × 2)과 1/10, 월수 올림 규정이 원문과 일치한다", (ctx) => {
+    const doc = need(ctx, "소득세법 제22조", src.ita22)
+    // 계산식은 상자 그림 표로 온다 — 칸을 파싱하는 대신 산식을 이루는 표지를 확인한다.
+    // 표지가 하나라도 사라지면 계산식이 바뀐 것이므로 상수를 원문과 다시 대조해야 한다
+    const formula = hang(doc, "③").replace(/\s+/g, " ")
+    const markers: Array<[string, RegExp]> = [
+      ["2012~2019 구간 배수 × 3", /×\s*3\s*\+/],
+      ["2020 이후 구간 배수 × 2", /×\s*2(?!\d)/],
+      ["구간 경계 2019년 12월 31일", /2019년/],
+      ["구간 시작 2020년 1월 1일", /2020년 1월/],
+      ["2011년 12월 31일 퇴직 가정 금액 차감", /2011년 12월 31일에 퇴직하였다고 가정/],
+      ["초과분은 근로소득", /근로소득으로 본다/],
+    ]
+    const missing = markers.filter(([, re]) => !re.test(formula)).map(([name]) => name)
+    expect(
+      missing,
+      signal("EXEC_INCOME_* (임원 퇴직소득 한도)", "소득세법 제22조제3항 계산식", `표지 누락: ${missing.join(", ")} — 원문: ${formula.slice(0, 400)}`, "×3·×2·1/10")
+    ).toEqual([])
+    expect(formula, "§22③ 계산식에 1/10(분모 10)이 없습니다").toMatch(/─+\s*(?:[^─]{0,40})?10/)
+
+    const months = ho(doc, "④", "1.")
+    expect(months, signal("§22④1 월수 계산", "소득세법 제22조제4항제1호", months, "1개월 미만은 1개월")).toContain("1개월로 본다")
+
+    // 배선 — 코드가 실제로 쓰는 배수·비율
+    const r = calcExecRetirementIncomeLimit(120_000_000, 12, 120_000_000, 12)
+    expect(r.part2012, signal("EXEC_INCOME_MULTIPLIER_2012_2019", "소득세법 제22조제3항", "1.2억 × 1/10 × 12/12 × 3 = 36,000,000", r.part2012)).toBeCloseTo(36_000_000, 4)
+    expect(r.part2020, signal("EXEC_INCOME_MULTIPLIER_FROM_2020", "소득세법 제22조제3항", "1.2억 × 1/10 × 12/12 × 2 = 24,000,000", r.part2020)).toBeCloseTo(24_000_000, 4)
   })
 })
 
