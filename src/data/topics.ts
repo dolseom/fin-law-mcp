@@ -64,7 +64,7 @@ export interface Topic {
   rulingQuery: string | null
   /** 검색어를 그것으로 고른 이유 (예: "축의금은 예규 제목에 드묾") */
   rulingNote?: string
-  /** 연결되는 fin_calc의 calc_type — 없으면 null (지어내지 말 것: 지원 5종 외에는 null) */
+  /** 연결되는 fin_calc의 calc_type — 없으면 null (지어내지 말 것: calc.ts CALC_TYPES에 없는 값은 null) */
   calc: string | null
   /** 계산 연결의 단서 (예: "거래처인 경우에만") */
   calcNote?: string

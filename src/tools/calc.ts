@@ -228,6 +228,9 @@ export const FinCalcInputSchema = z.discriminatedUnion("calc_type", [
     // (시행령 §26②2). 전기까지 상각부인액이 있으면 장부 잔액에 더해야 세무상 잔액이 된다 —
     // 빠지면 상각범위액이 과소 계산된다 (2026-09-30 외부 검토 지적)
     disallowed_depreciation: z.number().min(0, "disallowed_depreciation(상각부인액 누계)는 0 이상이어야 합니다").max(MAX_AMOUNT, amountMax("disallowed_depreciation(상각부인액 누계)")).optional().describe("[정률법] 전기말 상각부인액 잔액 (원, 이후 손금 추인분 차감) — 세무상 미상각잔액 = 장부 잔액 + 이 금액"),
+    // 장부 잔액 + 상각부인액이 세무상 잔액과 같지 않은 자산이 있다 — 즉시상각의제(법 §23④), K-IFRS 추가
+    // 손금산입(§23②), 감면법인 의무 손금산입(§23③). 그런 자산은 세무상 잔액을 직접 받는다 (Codex 아스트라 2026-09-30)
+    tax_remaining_value: z.number().min(0, "tax_remaining_value(세무상 기초 미상각잔액)는 0 이상이어야 합니다").max(MAX_AMOUNT, amountMax("tax_remaining_value(세무상 기초 미상각잔액)")).optional().describe("[정률법] 세무상 기초 미상각잔액 (원) = 취득가액 − 이미 손금에 산입한 감가상각비 — remaining_value·disallowed_depreciation 대신"),
     business_months: z.number().int("business_months(월수)는 정수여야 합니다").min(1, "business_months(월수)는 1 이상이어야 합니다").max(12, "business_months(월수)는 12 이하여야 합니다").default(12).describe("상각 대상 월수 (기본 12). 12 미만이면 short_period_basis로 그 사유를 명시할 것"),
     short_period_basis: z
       .enum(["기중취득", "사업연도변경의제", "사업연도1년미만"])
@@ -297,11 +300,11 @@ export const FIN_CALC_TOOL = {
       years: { type: "integer", minimum: 0, maximum: 100, description: "[임원퇴직금한도·필수] 근속 연수(년)" },
       months: { type: "integer", minimum: 0, maximum: 11, description: "[임원퇴직금한도] 잔여 개월(기본 0)" },
       months_2012_2019: { type: "integer", minimum: 0, maximum: 96, description: "[임원퇴직소득한도·필수] 2012~2019 근무월수" },
-      months_since_2020: { type: "integer", minimum: 0, description: "[임원퇴직소득한도·필수] 2020년 이후 근무월수" },
-      avg_salary_to_2019: { type: "number", minimum: 0, description: "[임원퇴직소득한도] 2019말 소급3년 연평균급여(원)" },
-      avg_salary_last3y: { type: "number", minimum: 0, description: "[임원퇴직소득한도] 퇴직일 소급3년 연평균급여(원)" },
+      months_since_2020: { type: "integer", minimum: 0, maximum: 1200, description: "[임원퇴직소득한도·필수] 2020년 이후 근무월수" },
+      avg_salary_to_2019: { type: "number", minimum: 0, description: "[임원퇴직소득한도·월수>0이면 필수] 2019말 소급3년 연평균급여" },
+      avg_salary_last3y: { type: "number", minimum: 0, description: "[임원퇴직소득한도·월수>0이면 필수] 퇴직일 소급3년 연평균급여" },
       severance_income: { type: "number", minimum: 0, description: "[임원퇴직소득한도] 퇴직소득금액(원)" },
-      months_before_2012: { type: "integer", minimum: 0, description: "[임원퇴직소득한도] 2011년 이전 근무월수" },
+      months_before_2012: { type: "integer", minimum: 0, maximum: 1200, description: "[임원퇴직소득한도·퇴직소득금액 주면 필수] 2011년 이전 월수" },
       pre2012_amount: { type: "number", minimum: 0, description: "[임원퇴직소득한도] 2011말 정관기준 금액(원)" },
       revenue: { type: "number", minimum: 0, description: "[기업업무추진비한도·필수] 일반 수입금액(원)" },
       related_party_revenue: { type: "number", minimum: 0, description: "[기업업무추진비한도] 특수관계인 수입금액(원, 기본 0)" },
@@ -310,8 +313,9 @@ export const FIN_CALC_TOOL = {
       acquisition_cost: { type: "number", exclusiveMinimum: 0, description: "[감가상각비·필수] 취득가액(원)" },
       useful_life: { type: "integer", minimum: 2, maximum: 60, description: "[감가상각비·필수] 내용연수(년)" },
       method: { type: "string", enum: ["정액법", "정률법"], description: "[감가상각비·필수] 상각방법" },
-      remaining_value: { type: "number", minimum: 0, description: "[감가상각비·정률법 필수] 장부상 기초 미상각잔액(원)" },
-      disallowed_depreciation: { type: "number", minimum: 0, description: "[감가상각비·정률법] 전기말 상각부인액 잔액(원)" },
+      remaining_value: { type: "number", minimum: 0, description: "[감가상각비·정률법] 장부상 기초 미상각잔액(원)" },
+      disallowed_depreciation: { type: "number", minimum: 0, description: "[감가상각비·정률법] 전기말 상각부인액 잔액(원, 없으면 0)" },
+      tax_remaining_value: { type: "number", minimum: 0, description: "[감가상각비·정률법] 세무상 기초 미상각잔액(원) — 위 둘 대신" },
       short_period_basis: {
         type: "string",
         enum: ["기중취득", "사업연도변경의제", "사업연도1년미만"],
@@ -356,7 +360,10 @@ export const FIN_CALC_TOOL = {
         // 정률법은 미상각잔액이 없으면 계산 자체가 불가능하다 (정액법은 취득가액 기준이라 불필요)
         anyOf: [
           { properties: { method: { const: "정액법" } }, required: ["method"] },
-          { properties: { method: { const: "정률법" } }, required: ["method", "remaining_value"] },
+          // 정률법의 잔액은 세무상 잔액이다(시행령 §26②2) — 장부 잔액과 상각부인액 잔액을 **둘 다** 주거나
+          // (없으면 0을 명시 — 생략이 0으로 읽혀 한도가 과소 계산되지 않게), 세무상 잔액을 직접 준다
+          { properties: { method: { const: "정률법" } }, required: ["method", "remaining_value", "disallowed_depreciation"] },
+          { properties: { method: { const: "정률법" } }, required: ["method", "tax_remaining_value"] },
         ],
       },
       {
@@ -407,7 +414,7 @@ const EXAMPLES: Record<string, string> = {
   임원퇴직금한도: `{ "calc_type": "임원퇴직금한도", "annual_salary": 120000000, "years": 5, "months": 3 }`,
   임원퇴직소득한도: `{ "calc_type": "임원퇴직소득한도", "months_2012_2019": 96, "months_since_2020": 69, "avg_salary_to_2019": 150000000, "avg_salary_last3y": 200000000, "severance_income": 800000000, "months_before_2012": 24 }`,
   기업업무추진비한도: `{ "calc_type": "기업업무추진비한도", "revenue": 15000000000, "is_sme": false }`,
-  감가상각비: `{ "calc_type": "감가상각비", "acquisition_cost": 100000000, "useful_life": 5, "method": "정률법", "remaining_value": 54900000 }`,
+  감가상각비: `{ "calc_type": "감가상각비", "acquisition_cost": 100000000, "useful_life": 5, "method": "정률법", "remaining_value": 54900000, "disallowed_depreciation": 0 }`,
   가지급금인정이자: `{ "calc_type": "가지급금인정이자", "principal": 100000000, "days": 365, "rate_type": "가중평균차입이자율", "weighted_average_rate": 5.2 }`,
   퇴직소득세: `{ "calc_type": "퇴직소득세", "severance_pay": 100000000, "service_years": 20 }`,
 }
@@ -425,17 +432,26 @@ export function calcExecutiveSeveranceLimit(annualSalary: number, years: number,
   return { serviceYears, limit }
 }
 
+/** 확인일로부터 이 일수가 지나면 1월 1일 전이라도 경고한다 — 연중 개정(예: 시행령 10월 시행)을 무기한 놓치지 않게 */
+const CONSTANTS_VALID_DAYS = 180
+
 /**
- * 확인일(CONSTANTS_CHECKED_ON) 뒤로 1월 1일(정기 세법개정 시행일)이 지났으면 경고 줄을 돌려준다.
+ * 산식 상수의 원문 대조 상태를 응답 머리에 밝힌다. 이 도구는 실행 중에 조문을 부르지 않으므로
+ * 대조일 뒤의 개정은 스스로 알 수 없다 — 그래서 늘 대조일을 한 줄로 적고,
+ * 대조일 뒤로 1월 1일(정기 세법개정 시행일)이 지났거나 CONSTANTS_VALID_DAYS가 지나면 경고로 올린다.
  * 날짜는 KST로 센다 — UTC 호스트에서 1월 1일 새벽에 하루 늦게 켜지지 않게 (isFutureDate와 같은 방식)
  */
 export function staleConstantsNotice(now: number = Date.now()): string[] {
   const todayKst = new Date(now + 9 * 60 * 60 * 1000).toISOString().slice(0, 10)
   const nextJan1 = `${Number(CONSTANTS_CHECKED_ON.slice(0, 4)) + 1}-01-01`
-  if (todayKst < nextJan1) return []
+  const expiry = new Date(Date.parse(`${CONSTANTS_CHECKED_ON}T00:00:00Z`) + CONSTANTS_VALID_DAYS * 86_400_000).toISOString().slice(0, 10)
+  if (todayKst < nextJan1 && todayKst < expiry) {
+    return [`※ 산식 상수 원문 대조일: ${CONSTANTS_CHECKED_ON} — 그 뒤의 개정(연중 개정 포함)은 이 계산에 반영되지 않았을 수 있다`, ``]
+  }
+  const why = todayKst >= nextJan1 ? `정기 세법개정 시행일(${nextJan1})이 지났습니다` : `${CONSTANTS_VALID_DAYS}일(${expiry})이 지났습니다`
   return [
-    `⚠ 산식 상수 확인일(${CONSTANTS_CHECKED_ON}) 이후 정기 세법개정 시행일(${nextJan1})이 지났습니다 — ` +
-      `이 계산의 세율·한도·배수가 그 개정을 반영했는지 확인되지 않았습니다. 금액을 쓰기 전에 아래 "근거" 조문을 fin_article로 현행 원문과 대조하세요.`,
+    `⚠ 산식 상수 원문 대조일(${CONSTANTS_CHECKED_ON}) 이후 ${why} — ` +
+      `이 계산의 세율·한도·배수가 그 뒤 개정을 반영했는지 확인되지 않았습니다. 금액을 쓰기 전에 아래 "근거" 조문을 fin_article로 현행 원문과 대조하세요.`,
     ``,
   ]
 }
@@ -723,7 +739,9 @@ export async function handleFinCalc(
       useful_life: "useful_life(내용연수, 2~60년)",
       method: "method(상각방법, \"정액법\" 또는 \"정률법\")",
       remaining_value: "remaining_value(장부상 기초 미상각잔액, 원)",
-      disallowed_depreciation: "disallowed_depreciation(전기말 상각부인액 잔액, 원)",
+      disallowed_depreciation: "disallowed_depreciation(전기말 상각부인액 잔액, 원 — 없으면 0)",
+      tax_remaining_value: "tax_remaining_value(세무상 기초 미상각잔액, 원)",
+      short_period_basis: "short_period_basis(1년 미만 월수의 사유)",
       months_2012_2019: "months_2012_2019(2012.1.1~2019.12.31 근무 월수, 0~96)",
       months_since_2020: "months_since_2020(2020.1.1~퇴직일 근무 월수)",
       avg_salary_to_2019: "avg_salary_to_2019(2019.12.31부터 소급 3년 총급여 연평균환산액, 원)",
@@ -766,12 +784,24 @@ export async function handleFinCalc(
   const input = parsed.data
 
   // discriminatedUnion으로는 표현할 수 없는 분기별 필수 인자 — 여기서 한글로 잡는다
-  if (input.calc_type === "감가상각비" && input.method === "정률법" && input.remaining_value === undefined) {
-    return invalidParam(
-      "정률법은 기초 미상각잔액이 있어야 계산됩니다 — remaining_value(장부상 기초 미상각잔액, 원 = 취득가액 − 장부상 감가상각누계액)가 필요합니다. " +
-        "전기말 상각부인액 잔액이 있으면 disallowed_depreciation에 함께 주세요 (세무상 미상각잔액 = 취득가액 − 이미 손금에 산입한 감가상각비, 시행령 §26②2)",
-      EXAMPLES["감가상각비"]
-    )
+  if (input.calc_type === "감가상각비") {
+    const hasTax = input.tax_remaining_value !== undefined
+    const hasBook = input.remaining_value !== undefined || input.disallowed_depreciation !== undefined
+    // 두 형태를 다 주면 한쪽이 조용히 무시된다 — 적수 중복 입력과 같은 원칙으로 거부한다
+    if (hasTax && hasBook) {
+      return invalidParam(
+        "잔액 입력이 중복됩니다 — tax_remaining_value(세무상 잔액)를 주거나, remaining_value(장부상 잔액)와 disallowed_depreciation(상각부인액 잔액)을 주거나 둘 중 하나만 쓰세요",
+        EXAMPLES["감가상각비"]
+      )
+    }
+    if (input.method === "정률법" && !hasTax && (input.remaining_value === undefined || input.disallowed_depreciation === undefined)) {
+      return invalidParam(
+        "정률법은 세무상 기초 미상각잔액(= 취득가액 − 이미 감가상각비로 손금에 산입한 금액, 시행령 §26②2)으로 계산합니다 — 둘 중 하나로 주세요:\n" +
+          "  · remaining_value(장부상 잔액, 원 = 취득가액 − 장부상 감가상각누계액) + disallowed_depreciation(전기말 상각부인액 잔액, 원 — 없으면 0을 명시). 생략을 0으로 보지 않습니다 — 상각부인액이 빠지면 한도가 과소 계산됩니다\n" +
+          "  · tax_remaining_value(세무상 잔액, 원) — 즉시상각의제(법인세법 §23④)·K-IFRS 추가 손금산입(§23②)·감면법인 의무 손금산입(§23③)이 있어 장부 잔액 + 상각부인액이 세무상 잔액과 다른 자산",
+        EXAMPLES["감가상각비"]
+      )
+    }
   }
   if (input.calc_type === "임원퇴직소득한도") {
     if (input.months_2012_2019 + input.months_since_2020 === 0) {
@@ -804,9 +834,12 @@ export async function handleFinCalc(
         EXAMPLES["임원퇴직소득한도"]
       )
     }
-    if (input.severance_income !== undefined && input.pre2012_amount !== undefined && input.pre2012_amount > input.severance_income) {
+    // 2011년 이전 근무가 0개월이라고 명시했는데 2011.12.31 퇴직 가정 금액이 양수면 둘 중 하나가 틀렸다 —
+    // 정관 금액을 우선하면 근로소득 초과분이 조용히 사라진다 (Codex 아스트라 2026-09-30).
+    // (가정 금액이 실제 퇴직소득금액보다 큰 것 자체는 막지 않는다 — 그런 상한은 조문에서 확인되지 않았다)
+    if (input.pre2012_amount !== undefined && input.pre2012_amount > 0 && input.months_before_2012 === 0) {
       return invalidParam(
-        `pre2012_amount(${input.pre2012_amount.toLocaleString("ko-KR")}원)가 severance_income(${input.severance_income.toLocaleString("ko-KR")}원)보다 큽니다 — 입력값을 확인하세요`,
+        `months_before_2012가 0(2011.12.31 이전 근무 없음)인데 pre2012_amount가 ${input.pre2012_amount.toLocaleString("ko-KR")}원입니다 — 2011.12.31에 퇴직했다고 가정한 지급액은 그 전에 근무한 경우에만 생깁니다. 둘 중 틀린 값을 고치세요 (소득세법 시행령 §42의2⑥)`,
         EXAMPLES["임원퇴직소득한도"]
       )
     }
@@ -939,8 +972,14 @@ export async function handleFinCalc(
       ``,
       `⚠ 주의:`,
       `  · 근무 월수는 1개월 미만을 1개월로 센다 (§22④1) — 입력 전에 반영할 것`,
-      `  · 총급여 = 봉급·상여 등 근로소득(§20①1·2)에서 비과세소득을 뺀 금액 (§22④2). 해외 현지법인 파견 중 국외 급여는 포함 (시행령 §42의2⑦)`,
-      `  · 각 구간의 "소급 3년"은 그 구간의 근무기간이 3년 미만이면 그 근무기간으로 한다 — 연평균환산액 입력은 이 기준으로`,
+      `  · 총급여 = 봉급·상여 등 근로소득(§20①1·2)에서 비과세소득을 뺀 금액 (§22④2). 해외 현지법인 파견 중 국외 급여는 포함하되, 정관(위임 급여규정 포함)이 있는 법인의 주거보조비·교육비수당·특수지수당·의료보험료·해외체재비·자동차임차료·실의료비 등 중 국내 근무 시 받을 금액을 넘는 부분은 제외 (시행령 §42의2⑦ 본문·단서) — avg_salary_*는 이 조정을 마친 금액이어야 한다`,
+      `  · 각 구간의 "소급 3년"은 그 구간의 근무기간이 3년 미만이면 그 근무기간으로 한다. "연평균환산액"을 구하는 세부 방법(분모를 월수로 할지 등)은 이 조문들에 없다 — 이 도구는 환산값을 입력받을 뿐 방법을 정하지 않는다`,
+      ...(ex && !usedOverride
+        ? [`  · 2011년 이전분의 분모 "전체 근무기간"(시행령 §42의2⑥)을 세 구간 입력의 합으로 둔 것은 이 도구의 가정이다 — 1개월 미만 올림은 구간별로 하면 전체를 한 번에 센 것과 달라질 수 있으니, 전체 근무기간을 따로 세어 합과 같은지 확인할 것`]
+        : []),
+      ...(ex && ex.pre2012 >= input.severance_income!
+        ? [`  · 2011.12.31 이전분이 퇴직소득금액 이상이라 한도와 비교할 금액이 0원이다 — 입력값이 맞는지 확인할 것`]
+        : []),
       `  · 임원 = 법인세법 시행령 §40①의 직무에 종사하는 사람 (시행령 §42의2⑤). 직원 기간을 포함할지·기산일을 언제로 볼지(직원 기간 퇴직금 정산·중간정산 여부)는 이 도구가 판단하지 않는다 — 월수 입력 전에 확인`,
       `  · 공적연금 일시금(§22①1)과 비과세소득은 severance_income에서 뺀다 (§22③ 괄호)`,
       `  · 퇴직소득으로 남는 금액의 세액은 fin_calc 퇴직소득세로 계산한다`,
@@ -996,7 +1035,7 @@ export async function handleFinCalc(
       `  · revenue는 특수관계인과의 거래 수입금액을 **뺀** 금액이다 — 총수입금액을 그대로 넣으면 특수관계인분이 10%로 줄지 않아 한도가 과대 계산되고, related_party_revenue까지 함께 넣으면 그 금액이 이중으로 잡힌다`,
       // 조특법 §136은 추가 한도를 둘 둔다 — ③만 적으면 ⑥이 없는 것으로 읽힌다 (2026-09-30 외부 검토, 원문 대조)
       `  · 조세특례제한법의 추가 한도 둘은 이 계산에 미포함 — 각각 기업업무추진비 한도액의 20% 범위, 2028-12-31까지 지출분:`,
-      `    §136③ 문화비로 지출한 기업업무추진비 / §136⑥ 전통시장 또는 지역사랑상품권으로 지출한 기업업무추진비(신용카드등사용금액 요건, 소비성서비스업 지출 제외)`,
+      `    §136③ 문화비로 지출한 기업업무추진비 / §136⑥ 전통시장에서 또는 지역사랑상품권으로 지출한 기업업무추진비(신용카드등사용금액 요건 — 지역사랑상품권은 현금 구입 증명자료에 적힌 금액 포함 — , 소비성서비스업 지출 제외)`,
       `  · 3만원 초과 적격증빙(신용카드 등) 미수취분은 한도 이전에 전액 손금불산입 (§25②)`,
       `  · 부동산임대업 주업 법인 등 특정법인은 한도 50% 축소 (§25⑤) — 미반영`,
       `  · 산식 개정 여부는 fin_article("법인세법","제25조")로 교차 확인 가능`,
@@ -1010,17 +1049,20 @@ export async function handleFinCalc(
     const isDeclining = input.method === "정률법"
     // 모순 입력 차단 — "취득가액 1억 − 누계액 = 2억" 같은 산술 모순이 확신형으로
     // 나가면 자릿수 오타가 그대로 검토서에 실린다 (Opus 리뷰 중요 3)
-    // 세무상 미상각잔액 = 장부 잔액 + 상각부인액 잔액 (시행령 §26②2 "취득가액 − 이미 손금에 산입한 금액")
-    const taxRemaining = (input.remaining_value ?? 0) + (input.disallowed_depreciation ?? 0)
-    if (isDeclining && taxRemaining > input.acquisition_cost) {
-      const withDisallowed = input.disallowed_depreciation !== undefined
+    // 세무상 미상각잔액 = 직접 입력 또는 장부 잔액 + 상각부인액 잔액 (시행령 §26②2 "취득가액 − 이미 손금에 산입한 금액")
+    const taxDirect = input.tax_remaining_value !== undefined
+    const hasResidualInput = taxDirect || input.remaining_value !== undefined || input.disallowed_depreciation !== undefined
+    const taxRemaining = taxDirect ? input.tax_remaining_value! : (input.remaining_value ?? 0) + (input.disallowed_depreciation ?? 0)
+    // 잔액을 출력·상한 안내에 쓰는 모든 분기(정액법 포함)에서 같은 모순 검사를 한다
+    if (hasResidualInput && taxRemaining > input.acquisition_cost) {
+      const withDisallowed = !taxDirect && input.disallowed_depreciation !== undefined
       return {
         content: [
           {
             type: "text",
             text: withDisallowed
               ? `[INVALID_PARAMETER] fin_calc: 세무상 미상각잔액(장부 잔액 ${won(input.remaining_value ?? 0)} + 상각부인액 잔액 ${won(input.disallowed_depreciation ?? 0)} = ${won(taxRemaining)})이 acquisition_cost(취득가액 ${won(input.acquisition_cost)})보다 큽니다 — 세무상 미상각잔액은 취득가액에서 이미 손금에 산입한 감가상각비를 뺀 값이므로 취득가액을 넘을 수 없습니다. remaining_value에 이미 세무상 잔액을 넣었다면 상각부인액을 이중으로 더한 것입니다. 입력값을 확인하세요.`
-              : `[INVALID_PARAMETER] fin_calc: remaining_value(미상각잔액 ${won(input.remaining_value ?? 0)})가 acquisition_cost(취득가액 ${won(input.acquisition_cost)})보다 큽니다 — 미상각잔액은 취득가액에서 감가상각누계액을 뺀 값이므로 취득가액을 넘을 수 없습니다. 입력값을 확인하세요.`,
+              : `[INVALID_PARAMETER] fin_calc: ${taxDirect ? "tax_remaining_value" : "remaining_value"}(미상각잔액 ${won(taxRemaining)})가 acquisition_cost(취득가액 ${won(input.acquisition_cost)})보다 큽니다 — 미상각잔액은 취득가액에서 감가상각누계액을 뺀 값이므로 취득가액을 넘을 수 없습니다. 입력값을 확인하세요.`,
           },
         ],
         isError: true,
@@ -1099,12 +1141,16 @@ export async function handleFinCalc(
         : `  ① 상각률 = ${rate.toFixed(3)} (${pct(rate)}) — 내용연수 ${input.useful_life}년 ${input.method} (시행규칙 별표 4)`,
       ...(isDeclining
         ? [
-            `  ② 세무상 미상각잔액 = 장부상 미상각잔액 ${won(input.remaining_value ?? 0)} + 상각부인액 잔액 ${won(input.disallowed_depreciation ?? 0)} = ${won(base)}`,
+            taxDirect
+              ? `  ② 세무상 미상각잔액 = ${won(base)} (입력값)`
+              : `  ② 세무상 미상각잔액 = 장부상 미상각잔액 ${won(input.remaining_value ?? 0)} + 상각부인액 잔액 ${won(input.disallowed_depreciation ?? 0)} = ${won(base)}`,
             `     (시행령 §26②2: 취득가액 ${won(input.acquisition_cost)} − 이미 감가상각비로 손금에 산입한 금액)`,
-            // 생략을 0으로 읽되 그 전제를 숨기지 않는다 — 빠지면 상각범위액이 과소 계산된다
-            ...(input.disallowed_depreciation === undefined
-              ? [`     ⚠ disallowed_depreciation을 주지 않아 상각부인액 잔액 0원으로 계산했다 — 전기까지 상각부인액이 있으면 그만큼 상각범위액이 과소 계산되니 넣어서 다시 계산할 것`]
-              : []),
+            // 장부 경로는 "장부 잔액 + 상각부인액 = 세무상 잔액"이 성립하는 자산일 때만 맞다 — 전제를 밝힌다
+            ...(taxDirect
+              ? []
+              : [
+                  `     전제: 장부·세무 취득가액이 같고 즉시상각의제(법인세법 §23④)·K-IFRS 추가 손금산입(§23②)·감면법인 의무 손금산입(§23③)이 없는 자산 — 있으면 tax_remaining_value로 세무상 잔액을 직접 입력할 것`,
+                ]),
           ]
         : [`  ② 취득가액 = ${won(base)}`]),
       `  ③ 상각범위액 = ${won(base)} × ${rate.toFixed(3)}${monthNote} = ${won(regular)}`,
@@ -1123,9 +1169,9 @@ export async function handleFinCalc(
                 : []),
             ]
           : []),
-      ...(!isDeclining && input.remaining_value !== undefined
+      ...(!isDeclining && hasResidualInput
         ? [
-            `  ※ 입력한 미상각잔액 ${won(taxRemaining)}${input.disallowed_depreciation !== undefined ? `(장부 잔액 + 상각부인액 잔액)` : ``}은 정액법 산식에는 쓰이지 않는다 — 실제 손금 상한은 세무상 미상각잔액 − 비망가액${
+            `  ※ 입력한 미상각잔액 ${won(taxRemaining)}${taxDirect ? `(세무상 잔액)` : input.disallowed_depreciation !== undefined ? `(장부 잔액 + 상각부인액 잔액)` : `(장부 잔액)`}은 정액법 산식에는 쓰이지 않는다 — 실제 손금 상한은 세무상 미상각잔액 − 비망가액${
               regular > taxRemaining ? ` (이번 상각범위액이 미상각잔액을 초과하므로 상한 적용 필요)` : ``
             }`,
           ]

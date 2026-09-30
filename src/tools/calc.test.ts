@@ -23,6 +23,16 @@ import {
   FIN_CALC_TOOL,
 } from "./calc.js"
 
+/** 계산 유형별 최소 유효 입력 — "모든 유형" 검사가 이 목록 하나를 쓴다. 유형을 늘리면 여기에 추가 */
+const REPRESENTATIVE_INPUTS: Array<Record<string, unknown> & { calc_type: string }> = [
+  { calc_type: "임원퇴직금한도", annual_salary: 120_000_000, years: 5 },
+  { calc_type: "임원퇴직소득한도", months_2012_2019: 96, months_since_2020: 12, avg_salary_to_2019: 100_000_000, avg_salary_last3y: 120_000_000 },
+  { calc_type: "기업업무추진비한도", revenue: 5_000_000_000, is_sme: false },
+  { calc_type: "감가상각비", acquisition_cost: 100_000_000, useful_life: 5, method: "정액법" },
+  { calc_type: "가지급금인정이자", balance_days: 36_500_000_000, rate_type: "당좌대출이자율" },
+  { calc_type: "퇴직소득세", severance_pay: 100_000_000, service_years: 20 },
+]
+
 describe("임원퇴직금한도 (법인세법 시행령 §44④2)", () => {
   it("총급여 1.2억 · 근속 5년 → 6,000만원", () => {
     const { limit } = calcExecutiveSeveranceLimit(120_000_000, 5, 0)
@@ -451,6 +461,7 @@ describe("handleFinCalc 계약", () => {
       useful_life: 5,
       method: "정률법",
       remaining_value: 100_000_000,
+    disallowed_depreciation: 0,
     })
     const t = res.content[0].text
     expect(res.isError).toBeFalsy()
@@ -481,6 +492,7 @@ describe("handleFinCalc 계약", () => {
       useful_life: 5,
       method: "정률법",
       remaining_value: 100_000_000,
+    disallowed_depreciation: 0,
       business_months: 6,
     })
     expect(res.isError).toBe(true)
@@ -495,6 +507,7 @@ describe("handleFinCalc 계약", () => {
       useful_life: 5,
       method: "정률법",
       remaining_value: 100_000_000,
+    disallowed_depreciation: 0,
       business_months: 6,
       short_period_basis: "사업연도1년미만",
     })
@@ -512,6 +525,7 @@ describe("handleFinCalc 계약", () => {
       useful_life: 5,
       method: "정률법",
       remaining_value: 200_000_000,
+    disallowed_depreciation: 0,
       business_months: 12,
     })
     expect(res.isError).toBe(true)
@@ -624,14 +638,11 @@ describe("handleFinCalc 계약", () => {
     expect(t).toContain("합계: 1,080원")
   })
 
-  it("모든 계산 유형이 산식 기준일·근거·출처를 동봉한다", async () => {
-    const inputs = [
-      { calc_type: "임원퇴직금한도", annual_salary: 120_000_000, years: 5 },
-      { calc_type: "기업업무추진비한도", revenue: 5_000_000_000, is_sme: false },
-      { calc_type: "감가상각비", acquisition_cost: 100_000_000, useful_life: 5, method: "정액법" },
-      { calc_type: "가지급금인정이자", balance_days: 36_500_000_000, rate_type: "당좌대출이자율" },
-      { calc_type: "퇴직소득세", severance_pay: 100_000_000, service_years: 20 },
-    ]
+  it("모든 계산 유형이 산식 기준일·근거·출처·상수 대조일을 동봉한다", async () => {
+    const inputs = REPRESENTATIVE_INPUTS
+    expect(inputs.map((i) => i.calc_type).sort(), "대표 입력 목록이 calc_type enum과 다르다").toEqual(
+      [...(FIN_CALC_TOOL.inputSchema as any).properties.calc_type.enum].sort()
+    )
     for (const input of inputs) {
       const res = await handleFinCalc(null, input)
       expect(res.isError, `${input.calc_type} 실패`).toBeFalsy()
@@ -641,6 +652,7 @@ describe("handleFinCalc 계약", () => {
       expect(t, `${input.calc_type}: 근거 없음`).toContain("근거:")
       expect(t, `${input.calc_type}: 주의 없음`).toContain("⚠ 주의")
       expect(t, `${input.calc_type}: 출처 없음`).toContain("출처")
+      expect(t, `${input.calc_type}: 상수 대조일 없음`).toContain(CONSTANTS_CHECKED_ON)
     }
   })
 })
@@ -724,6 +736,14 @@ describe("입력 스키마 — 조건부 필수 (Codex 리뷰: oneOf)", () => {
     expect(ng2.isError).toBe(true)
   })
 
+  it("oneOf로 표현하지 않은 조건부 필수는 속성 설명에 적는다 — 스키마만 보고 호출해도 거부 사유를 예측할 수 있게", () => {
+    const props = (FIN_CALC_TOOL.inputSchema as any).properties
+    expect(props.avg_salary_to_2019.description).toContain("필수")
+    expect(props.avg_salary_last3y.description).toContain("필수")
+    expect(props.months_before_2012.description).toContain("필수")
+    expect(props.disallowed_depreciation.description).toContain("없으면 0")
+  })
+
   it("오류 메시지가 한글로 무엇이 필요한지 알려준다", async () => {
     const res = await handleFinCalc(null, { calc_type: "임원퇴직금한도" })
     const t = res.content[0].text
@@ -746,11 +766,13 @@ describe("입력 스키마 — 조건부 필수 (Codex 리뷰: oneOf)", () => {
   // 2026-09-16 Codex 9차 I3로 +14자(inputSchema 3,091 / 전체 3,372): is_sme 필수화(설명·oneOf required).
   // 2026-09-30 외부 검토로 +895자(inputSchema 3,986 / 전체 4,297): 계산 유형 임원퇴직소득한도(소득세법 §22③,
   //   속성 7개 + oneOf 가지)와 정률법 disallowed_depreciation. 실사용 기록에서 가장 오래 붙잡은 계산이라 추가했다.
+  // 같은 날 Codex 아스트라 재작업으로 +276자(inputSchema 4,262 / 전체 4,573): tax_remaining_value·정률법 anyOf 가지·
+  //   조건부 필수 표기·월수 상한.
   it("도구 정의가 다시 부풀지 않는다 — 세션 토큰 회귀 방어", () => {
     const schemaLen = JSON.stringify(FIN_CALC_TOOL.inputSchema).length
     const wholeLen = JSON.stringify(FIN_CALC_TOOL).length
-    expect(schemaLen, `inputSchema ${schemaLen}자`).toBeLessThanOrEqual(4_050)
-    expect(wholeLen, `도구 정의 전체 ${wholeLen}자`).toBeLessThanOrEqual(4_360)
+    expect(schemaLen, `inputSchema ${schemaLen}자`).toBeLessThanOrEqual(4_300)
+    expect(wholeLen, `도구 정의 전체 ${wholeLen}자`).toBeLessThanOrEqual(4_610)
   })
 
   /**
@@ -914,6 +936,7 @@ describe("감가상각 — 월할 사업연도의 마무리 연도 (Codex 리뷰
     useful_life: 5,
     method: "정률법" as const,
     remaining_value: 5_500_000,
+    disallowed_depreciation: 0,
     business_months: 6,
     short_period_basis: "기중취득" as const,
   }
@@ -941,7 +964,7 @@ describe("감가상각 — 월할 사업연도의 마무리 연도 (Codex 리뷰
   })
 
   it("마무리 연도가 아닌 월할 사업연도도 단일 금액이다", async () => {
-    const res = await handleFinCalc(null, { ...shortFinal, remaining_value: 100_000_000 })
+    const res = await handleFinCalc(null, { ...shortFinal, remaining_value: 100_000_000, disallowed_depreciation: 0 })
     const t = res.content[0].text
     expect(t).not.toContain("두 해석이 갈립니다")
   })
@@ -1035,12 +1058,7 @@ describe("기업업무추진비한도 — 중소기업 여부 기본값 없음 (
   })
 
   it("다른 계산 유형은 is_sme를 요구하지 않는다 (반대 방향 — 과잉 거부 방지)", async () => {
-    const others = [
-      { calc_type: "임원퇴직금한도", annual_salary: 120_000_000, years: 5 },
-      { calc_type: "감가상각비", acquisition_cost: 100_000_000, useful_life: 5, method: "정액법" },
-      { calc_type: "가지급금인정이자", balance_days: 36_500_000_000, rate_type: "당좌대출이자율" },
-      { calc_type: "퇴직소득세", severance_pay: 100_000_000, service_years: 20 },
-    ]
+    const others = REPRESENTATIVE_INPUTS.filter((i) => i.calc_type !== "기업업무추진비한도")
     for (const input of others) {
       const res = await handleFinCalc(null, input)
       expect(res.isError, `${input.calc_type}가 is_sme 없이 실패`).toBeFalsy()
@@ -1253,9 +1271,26 @@ describe("임원퇴직소득한도 (소득세법 §22③)", () => {
     expect(res.content[0].text).toContain("pre2012_amount")
   })
 
-  it("2011년 이전분이 퇴직소득금액보다 크면 거부한다", async () => {
-    const res = await handleFinCalc(null, { ...golden, severance_income: 100_000_000, pre2012_amount: 200_000_000 })
+  it("2011년 이전 근무 0개월과 양수 정관 금액을 함께 주면 모순으로 거부한다 (아스트라 #8)", async () => {
+    const res = await handleFinCalc(null, {
+      calc_type: "임원퇴직소득한도", months_2012_2019: 0, months_since_2020: 12, avg_salary_last3y: 120_000_000,
+      severance_income: 100_000_000, months_before_2012: 0, pre2012_amount: 90_000_000,
+    })
     expect(res.isError).toBe(true)
+    expect(res.content[0].text).toContain("§42의2⑥")
+  })
+
+  it("정관 금액이 퇴직소득금액보다 커도 거부하지 않고 비교 대상 0원을 알린다 (그런 상한은 조문에 없다)", async () => {
+    const res = await handleFinCalc(null, { ...golden, severance_income: 100_000_000, pre2012_amount: 200_000_000 })
+    expect(res.isError).toBeFalsy()
+    expect(res.content[0].text).toContain("한도와 비교할 금액이 0원")
+  })
+
+  it("해외 파견 급여의 제외 단서와 연평균 환산 방법의 공백, 분모 가정을 밝힌다 (아스트라 #1·#12)", async () => {
+    const t = (await handleFinCalc(null, { ...golden, severance_income: 800_000_000, months_before_2012: 24 })).content[0].text
+    expect(t).toContain("§42의2⑦ 본문·단서")
+    expect(t).toContain("이 조문들에 없다")
+    expect(t).toContain("이 도구의 가정")
   })
 
   it("2012~2019 월수는 96개월을 넘을 수 없다", async () => {
@@ -1286,11 +1321,37 @@ describe("정률법 세무상 미상각잔액 — 상각부인액 (시행령 §2
     expect(t).not.toContain("disallowed_depreciation을 주지 않아")
   })
 
-  it("상각부인액을 주지 않으면 0원 전제를 경고로 드러낸다", async () => {
+  it("정률법은 상각부인액 잔액을 생략할 수 없다 — 0이라도 명시 (아스트라 #3, is_sme·rate_type 선례)", async () => {
     const res = await handleFinCalc(null, base)
-    const t = res.content[0].text
-    expect(t).toContain("상각범위액: 13,530,000원")
-    expect(t).toContain("disallowed_depreciation을 주지 않아")
+    expect(res.isError).toBe(true)
+    expect(res.content[0].text).toContain("disallowed_depreciation")
+    expect(res.content[0].text).toContain("tax_remaining_value")
+    const zero = await handleFinCalc(null, { ...base, disallowed_depreciation: 0 })
+    expect(zero.content[0].text).toContain("상각범위액: 13,530,000원")
+  })
+
+  it("세무상 잔액을 직접 받을 수 있다 — 장부 잔액 + 상각부인액이 성립하지 않는 자산 (아스트라 #2)", async () => {
+    const res = await handleFinCalc(null, { calc_type: "감가상각비", acquisition_cost: 100_000_000, useful_life: 5, method: "정률법", tax_remaining_value: 60_000_000 })
+    expect(res.isError).toBeFalsy()
+    expect(res.content[0].text).toContain("상각범위액: 27,060,000원")
+    expect(res.content[0].text).toContain("(입력값)")
+  })
+
+  it("장부 경로는 성립 전제(즉시상각의제·K-IFRS 추가 손금산입 없음)를 밝힌다", async () => {
+    const t = (await handleFinCalc(null, { ...base, disallowed_depreciation: 0 })).content[0].text
+    expect(t).toContain("§23④")
+    expect(t).toContain("tax_remaining_value")
+  })
+
+  it("세무상 잔액과 장부 경로를 함께 주면 한쪽이 무시되므로 거부한다", async () => {
+    const res = await handleFinCalc(null, { ...base, disallowed_depreciation: 0, tax_remaining_value: 30_000_000 })
+    expect(res.isError).toBe(true)
+    expect(res.content[0].text).toContain("중복")
+  })
+
+  it("정액법도 잔액 모순 검사를 받는다 (아스트라 #10)", async () => {
+    const res = await handleFinCalc(null, { calc_type: "감가상각비", acquisition_cost: 100_000_000, useful_life: 5, method: "정액법", remaining_value: 90_000_000, disallowed_depreciation: 20_000_000 })
+    expect(res.isError).toBe(true)
   })
 
   it("장부 잔액 + 상각부인액이 취득가액을 넘으면 이중 가산을 의심하고 거부한다", async () => {
@@ -1321,9 +1382,17 @@ describe("기업업무추진비 — 조특법 §136 추가 한도 고지 (2026-0
 describe("산식 상수 확인일 경과 경고", () => {
   const year = Number(CONSTANTS_CHECKED_ON.slice(0, 4))
 
-  it("확인일 뒤 1월 1일 전(KST)에는 경고하지 않는다", () => {
-    // 12-31 23:59 KST = 14:59 UTC
-    expect(staleConstantsNotice(Date.parse(`${year}-12-31T14:59:00Z`))).toEqual([])
+  it("경고 전에도 대조일을 한 줄로 밝힌다 — 연중 개정은 이 도구가 스스로 알 수 없다", () => {
+    const text = staleConstantsNotice(Date.parse(`${CONSTANTS_CHECKED_ON}T03:00:00Z`)).join("\n")
+    expect(text).toContain(`대조일: ${CONSTANTS_CHECKED_ON}`)
+    expect(text).not.toContain("⚠")
+  })
+
+  it("확인일로부터 180일이 지나면 1월 1일 전이라도 경고한다 (아스트라 #4 — 연중 개정)", () => {
+    const at = Date.parse(`${CONSTANTS_CHECKED_ON}T00:00:00Z`) + 181 * 86_400_000
+    const text = staleConstantsNotice(at).join("\n")
+    // 2026-08-25 + 181일은 2027-02-22라 1월 1일 기준이 먼저 걸린다 — 어느 쪽이든 ⚠
+    expect(text).toContain("⚠")
   })
 
   it("KST 1월 1일 0시부터 경고한다 — UTC 호스트에서도 하루 늦지 않게", () => {

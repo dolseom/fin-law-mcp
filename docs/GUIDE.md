@@ -372,7 +372,8 @@ node scripts/verify-file.mjs 검토서.md   # 문서 하나의 인용을 통째�
 
 - `npm test`의 세 파일(`test/tools-list`·`test/ping-diagnostics`·`test/verify-file-hook`)은 **`build/`의 서버와 훅 스크립트를 실행해** 검사합니다. `build/`가 없으면 이 테스트들은 건너뛰고(skip), 오래된 `build/`가 있으면 고치기 전 코드를 검사합니다 — 소스를 고쳤으면 **빌드를 끝낸 뒤** 테스트하세요.
 - 라이브 테스트는 파일명 `*-live.test.ts` 규칙으로 기본 스위트에서 빠지고 `test:live`에만 잡힙니다.
-- `fin_calc` 상수 대조(`test/calc-constants-live.test.ts`)는 GitHub Actions `세법 상수 대조 (월간)`(`.github/workflows/calc-constants.yml`)가 매월 2일 돌립니다. 저장소 시크릿 `LAW_OC`가 필요하고, `FIN_LIVE_STRICT=1`이라 조회 실패도 실패로 올라옵니다(수동 실행은 skip). 대조를 다시 통과시킨 뒤에만 `calc.ts`의 `CONSTANTS_CHECKED_ON`을 올리세요 — 그 날짜 뒤로 1월 1일이 지나면 `fin_calc` 응답에 "개정 반영 미확인" 경고가 붙습니다.
+- `fin_calc` 상수 대조(`test/calc-constants-live.test.ts`)는 GitHub Actions `세법 상수 대조 (월간)`(`.github/workflows/calc-constants.yml`)가 매월 2일 돌립니다. 저장소 시크릿 `LAW_OC`가 필요하고, `FIN_LIVE_STRICT=1`이라 조회 실패·키 없음도 실패로 올라옵니다(워크플로의 수동 실행 `workflow_dispatch`도 같다. 로컬 `npm run test:live`는 STRICT가 아니라 조회 실패를 skip한다).
+- `CONSTANTS_CHECKED_ON`(calc.ts)은 **`FIN_LIVE_STRICT=1`로 이 스위트를 skip 0·실패 0으로 통과시키고, 실패했던 원문 지문(`FINGERPRINTS`)은 개정 내용을 사람이 원문으로 확인해 상수·출력 문구를 고친 뒤에만** 올립니다. `fin_calc` 응답은 늘 대조일을 한 줄로 밝히고, 대조일 뒤로 1월 1일이 지나거나 180일이 지나면 "개정 반영 미확인" 경고로 올립니다. 이 도구는 실행 중에 조문을 부르지 않으므로 대조일 뒤 개정을 스스로 알지 못합니다 — 설치본은 저장소를 갱신해야 새 상수를 받습니다.
 
 - [docs/BENCHMARK.md](./BENCHMARK.md) — 검증 게이트 정의 · 오검증 회귀 사례 83건 · 실측 결과
 - [docs/HOOKS.md](./HOOKS.md) — 검토서(.md) 저장 시 인용을 자동 검증하는 Claude Code 훅 설정

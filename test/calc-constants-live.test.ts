@@ -21,6 +21,7 @@
  */
 
 import { describe, it, expect, beforeAll } from "vitest"
+import { createHash } from "node:crypto"
 import type { TestContext } from "vitest"
 import { config } from "dotenv"
 import { LawApiClient } from "../src/lib/api-client.js"
@@ -306,6 +307,8 @@ const src: {
   decree44: Loaded<ArticleDoc>
   decree26: Loaded<ArticleDoc>
   ita22: Loaded<ArticleDoc>
+  itaDecree42_2: Loaded<ArticleDoc>
+  stta136: Loaded<ArticleDoc>
   lta92: Loaded<ArticleDoc>
   annex4: Loaded<string>
 } = {} as any
@@ -322,6 +325,8 @@ beforeAll(async () => {
   src.decree44 = await load(() => loadArticle("법인세법 시행령", "제44조"))
   src.decree26 = await load(() => loadArticle("법인세법 시행령", "제26조"))
   src.ita22 = await load(() => loadArticle("소득세법", "제22조"))
+  src.itaDecree42_2 = await load(() => loadArticle("소득세법 시행령", "제42조의2"))
+  src.stta136 = await load(() => loadArticle("조세특례제한법", "제136조"))
   src.lta92 = await load(() => loadArticle("지방세법", "제92조"))
   src.annex4 = await load(async () => {
     callCount += 2 // 별표 목록 조회 + 파일 다운로드
@@ -726,11 +731,60 @@ d("상수 대조: 임원 퇴직급여 한도 (법인세법 시행령 §44④2)",
   })
 })
 
+/**
+ * 원문 지문 — 공백을 뺀 항 본문의 SHA-256 앞 16자리.
+ * 계산식이 상자 그림 표로 오는 조문은 칸 파싱이 불안정하고, 표지(정규식) 검사는 분자·분모·기간이
+ * 바뀌어도 통과했다(Codex 아스트라 2026-09-30: 변이 5개 전부 통과). 그래서 **글자 하나라도 바뀌면**
+ * 실패하게 한다. 실패하면 개정 여부를 사람이 원문으로 확인하고, 상수·출력 문구를 고친 뒤 지문을 갱신한다.
+ * 지문은 2026-09-30 법제처 현행 원문(소득세법 2026-07-01 시행, 조특법 2026-09-18 시행)에서 받은 값이다.
+ */
+function fingerprint(text: string): string {
+  return createHash("sha256").update(text.replace(/\s+/g, "")).digest("hex").slice(0, 16)
+}
+const FINGERPRINTS: Record<string, string> = {
+  "소득세법 §22③": "82d298965c0174b3",
+  "소득세법 §22④": "e648e49b338b198a",
+  "소득세법 시행령 §42의2⑤": "59b1912d931e4faf",
+  "소득세법 시행령 §42의2⑥": "c201f25cd49597db",
+  "소득세법 시행령 §42의2⑦": "1c81f0ccb47303a7",
+  "조세특례제한법 §136③": "79b876a5d495d6bd",
+  "조세특례제한법 §136⑥": "7a91d760ebed3fc8",
+}
+
+/** 항 본문 + 그 항의 호 본문 (호가 있는 항은 요건이 호에 있다) */
+function hangWithHo(doc: ArticleDoc, no: string): string {
+  const u = doc.units.find((x) => x.hang === no)
+  if (!u) throw new Error(`${doc.title} ${no}항을 찾을 수 없습니다`)
+  return [u.text, ...u.ho.map((h) => h.text)].join("\n")
+}
+
+d("원문 지문: fin_calc가 문구·산식을 옮겨 적은 항 (임원 퇴직소득 한도·기업업무추진비 추가 한도)", () => {
+  const cases: Array<[string, keyof typeof src, string]> = [
+    ["소득세법 §22③", "ita22", "③"],
+    ["소득세법 §22④", "ita22", "④"],
+    ["소득세법 시행령 §42의2⑤", "itaDecree42_2", "⑤"],
+    ["소득세법 시행령 §42의2⑥", "itaDecree42_2", "⑥"],
+    ["소득세법 시행령 §42의2⑦", "itaDecree42_2", "⑦"],
+    ["조세특례제한법 §136③", "stta136", "③"],
+    ["조세특례제한법 §136⑥", "stta136", "⑥"],
+  ]
+  for (const [name, key, no] of cases) {
+    it(`${name}이 대조 당시 원문과 글자 단위로 같다`, (ctx) => {
+      const doc = need(ctx, name, src[key] as Loaded<ArticleDoc>)
+      const text = hangWithHo(doc, no)
+      const got = fingerprint(text)
+      expect(
+        got,
+        signal(`원문 지문 ${name}`, name, `지문 ${FINGERPRINTS[name]} → ${got} — 원문: ${text.replace(/\s+/g, " ").slice(0, 500)}`, "calc.ts의 해당 산식·문구")
+      ).toBe(FINGERPRINTS[name])
+    })
+  }
+})
+
 d("상수 대조: 임원 퇴직소득 한도 (소득세법 §22③④)", () => {
   it("계산식의 두 구간(2012~2019 × 3, 2020 이후 × 2)과 1/10, 월수 올림 규정이 원문과 일치한다", (ctx) => {
     const doc = need(ctx, "소득세법 제22조", src.ita22)
-    // 계산식은 상자 그림 표로 온다 — 칸을 파싱하는 대신 산식을 이루는 표지를 확인한다.
-    // 표지가 하나라도 사라지면 계산식이 바뀐 것이므로 상수를 원문과 다시 대조해야 한다
+    // 표지 검사는 지문(위)이 실패했을 때 무엇이 바뀌었는지 좁히는 보조 진단이다 — 단독으로는 검출력이 약하다
     const formula = hang(doc, "③").replace(/\s+/g, " ")
     const markers: Array<[string, RegExp]> = [
       ["2012~2019 구간 배수 × 3", /×\s*3\s*\+/],
@@ -832,8 +886,9 @@ d("조회 요약", () => {
 
 if (!hasKey) {
   describe("상수 라이브 대조 (건너뜀)", () => {
-    it("LAW_OC 미설정 — 상수 대조는 키 설정 후 실행", () => {
-      expect(hasKey).toBe(false)
+    // STRICT 실행이 원문을 하나도 보지 않고 성공하면, 그 초록불로 CONSTANTS_CHECKED_ON을 올릴 수 있다 (아스트라 #6)
+    it("LAW_OC 미설정 — 상수 대조는 키 설정 후 실행 (FIN_LIVE_STRICT=1이면 실패)", () => {
+      expect(STRICT, "FIN_LIVE_STRICT=1인데 LAW_OC가 없어 원문을 하나도 대조하지 못했습니다").toBe(false)
     })
   })
 }
